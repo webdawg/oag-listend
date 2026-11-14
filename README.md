@@ -75,7 +75,7 @@ client can discover what exists. Verified by hand with `curl` and a raw socket.
 
 ## Status
 
-**Serves, and survives a restart.** Four carriers are live and tested: 33 unit tests plus 12
+**Serves, and survives a restart.** Four carriers are live and tested: 32 unit tests plus 12
 end-to-end tests (`cargo test -p oag-listend`). The native protocol, HTTP, and UDP share one store,
 and all were verified by hand: audio posted to HTTP came back byte-identical, `push_pull` verified
 over TCP and UDP, HTML labelled `audio/wav` was refused on every carrier, and a daemon restarted
