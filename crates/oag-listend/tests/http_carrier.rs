@@ -177,6 +177,14 @@ async fn shared_store() {
 /// A player or a browser uses ranges to seek and to probe; the carrier must answer with a partial
 /// body, a correct Content-Range, and 416 when the range is unsatisfiable. HEAD must answer with
 /// headers and no body.
+async fn get_with(addr: std::net::SocketAddr, url: &str, extra_headers: &str) -> Vec<u8> {
+    http(
+        addr,
+        &format!("GET {url} HTTP/1.1\r\nHost: x\r\n{extra_headers}Connection: close\r\n\r\n"),
+    )
+    .await
+}
+
 async fn get_query(addr: std::net::SocketAddr, query: &str) -> Vec<u8> {
     http(
         addr,
@@ -465,6 +473,59 @@ async fn query() {
     assert_eq!(status_of(&fetched), 200);
     let missing = http(addr, "GET /nope?x=1 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").await;
     assert_eq!(status_of(&missing), 404);
+
+    shutdown.shutdown();
+    tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .expect("shutdown bound")
+        .expect("join")
+        .expect("run");
+}
+
+/// Audio is content-addressed, so it is immutable: a client may cache it for a year and revalidate
+/// with the hash (If-None-Match) instead of re-downloading it.
+#[tokio::test]
+async fn http_caches_immutable_audio_with_an_etag() {
+    tokio::time::timeout(BOUND, caching()).await.expect("caching exchange within the bound")
+}
+
+async fn caching() {
+    let store = Arc::new(Mutex::new(AudioStore::default()));
+    let (carrier, addr) = HttpCarrier::bind_shared("127.0.0.1:0", Arc::clone(&store))
+        .await
+        .expect("bind http");
+    let shutdown = carrier.shutdown_handle();
+    let run = tokio::spawn(async move { carrier.run().await });
+
+    let tone = wav::generate(21, wav::Sound::Tone);
+    let posted = http_post(addr, &tone, "audio/wav").await;
+    let hash = String::from_utf8_lossy(body_of(&posted)).trim().to_string();
+    let etag = format!("\"{hash}\"");
+    let url = format!("/audio/{hash}");
+
+    let full = get_with(addr, &url, "").await;
+    assert_eq!(status_of(&full), 200);
+    assert!(head_contains(&full, &format!("etag: {etag}")), "{}", String::from_utf8_lossy(&full));
+    assert!(head_contains(&full, "cache-control: public, max-age=31536000, immutable"));
+
+    let revalidated = get_with(addr, &url, &format!("If-None-Match: {etag}\r\n")).await;
+    assert_eq!(status_of(&revalidated), 304, "{}", String::from_utf8_lossy(&revalidated));
+    assert!(head_contains(&revalidated, &format!("etag: {etag}")));
+    assert!(body_of(&revalidated).is_empty(), "a 304 has no body");
+
+    let stale = get_with(addr, &url, "If-None-Match: \"stale\"\r\n").await;
+    assert_eq!(status_of(&stale), 200, "a non-matching validator must be served");
+
+    let star = get_with(addr, &url, "If-None-Match: *\r\n").await;
+    assert_eq!(status_of(&star), 304, "`*` matches an existing resource");
+
+    let head = http(
+        addr,
+        &format!("HEAD {url} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"),
+    )
+    .await;
+    assert_eq!(status_of(&head), 200);
+    assert!(head_contains(&head, &format!("etag: {etag}")));
 
     shutdown.shutdown();
     tokio::time::timeout(Duration::from_secs(5), run)

@@ -113,6 +113,7 @@ struct HttpRequest {
     path: String,
     content_type: Option<String>,
     range: Option<String>,
+    if_none_match: Option<String>,
     body: Vec<u8>,
 }
 
@@ -126,6 +127,7 @@ async fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<HttpRequ
                 path: String::new(),
                 content_type: None,
                 range: None,
+                if_none_match: None,
                 body: Vec::new(),
             }));
         }
@@ -149,12 +151,14 @@ async fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<HttpRequ
                     path: String::new(),
                     content_type: None,
                     range: None,
+                    if_none_match: None,
                     body: Vec::new(),
                 }));
             }
             let mut content_length = 0usize;
             let mut content_type = None;
             let mut range = None;
+            let mut if_none_match = None;
             let mut expect_continue = false;
             for line in lines {
                 if let Some((name, value)) = line.split_once(':') {
@@ -165,6 +169,8 @@ async fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<HttpRequ
                         content_type = Some(value.to_string());
                     } else if name.trim().eq_ignore_ascii_case("range") {
                         range = Some(value.to_string());
+                    } else if name.trim().eq_ignore_ascii_case("if-none-match") {
+                        if_none_match = Some(value.to_string());
                     } else if name.trim().eq_ignore_ascii_case("expect")
                         && value.eq_ignore_ascii_case("100-continue")
                     {
@@ -191,6 +197,7 @@ async fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<HttpRequ
                     path: String::new(),
                     content_type: None,
                     range: None,
+                    if_none_match: None,
                     body: Vec::new(),
                 }));
             }
@@ -204,7 +211,7 @@ async fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<HttpRequ
                 body.extend_from_slice(&buf[..n]);
             }
             body.truncate(content_length);
-            return Ok(Some(HttpRequest { method, path, content_type, range, body }));
+            return Ok(Some(HttpRequest { method, path, content_type, range, if_none_match, body }));
         }
     }
 }
@@ -226,6 +233,8 @@ struct HttpResponse {
     /// Listing pagination, for a client that is walking the store.
     total_count: Option<usize>,
     offset: Option<usize>,
+    /// Additional response headers, for caching and future metadata.
+    extra_headers: Vec<(String, String)>,
     body: Vec<u8>,
 }
 
@@ -303,7 +312,14 @@ async fn route(request: HttpRequest, store: &Arc<Mutex<AudioStore>>) -> HttpResp
                 .map(|format| format.media_type().to_string())
                 .or_else(|| item.media_type.clone())
                 .unwrap_or_else(|| "application/octet-stream".into());
-            match parse_range(request.range.as_deref(), item.bytes.len()) {
+            let etag = format!("\"{hash}\"");
+            let not_modified = request
+                .if_none_match
+                .as_deref()
+                .map(|value| value == etag || value == "*")
+                .unwrap_or(false);
+
+            let mut response = match parse_range(request.range.as_deref(), item.bytes.len()) {
                 None => {
                     let mut response = HttpResponse {
                         status: 200,
@@ -314,6 +330,7 @@ async fn route(request: HttpRequest, store: &Arc<Mutex<AudioStore>>) -> HttpResp
                         content_length: None,
                         total_count: None,
                         offset: None,
+                        extra_headers: Vec::new(),
                         body: item.bytes.clone(),
                     };
                     if head_only {
@@ -331,6 +348,7 @@ async fn route(request: HttpRequest, store: &Arc<Mutex<AudioStore>>) -> HttpResp
                     content_length: None,
                     total_count: None,
                     offset: None,
+                    extra_headers: Vec::new(),
                     body: b"range not satisfiable".to_vec(),
                 },
                 Some(Ok((start, end))) => {
@@ -347,6 +365,7 @@ async fn route(request: HttpRequest, store: &Arc<Mutex<AudioStore>>) -> HttpResp
                         content_length: None,
                         total_count: None,
                         offset: None,
+                        extra_headers: Vec::new(),
                         body: slice,
                     };
                     if head_only {
@@ -355,7 +374,24 @@ async fn route(request: HttpRequest, store: &Arc<Mutex<AudioStore>>) -> HttpResp
                     }
                     response
                 }
+            };
+
+            // The item is content-addressed, so it is immutable: a client may cache it for a year
+            // and revalidate with the hash instead of re-downloading it.
+            response.extra_headers.push(("ETag".to_string(), etag));
+            response.extra_headers.push((
+                "Cache-Control".to_string(),
+                "public, max-age=31536000, immutable".to_string(),
+            ));
+            if not_modified {
+                response.status = 304;
+                response.reason = "Not Modified";
+                response.content_range = None;
+                response.accept_ranges = false;
+                response.content_length = None;
+                response.body.clear();
             }
+            response
         }
         ("POST", "/audio") => {
             let mut store = store.lock().await;
@@ -443,6 +479,7 @@ impl HttpResponse {
             content_length: None,
             total_count: None,
             offset: None,
+            extra_headers: Vec::new(),
             body: body.to_vec(),
         }
     }
@@ -464,6 +501,9 @@ async fn write_response(stream: &mut TcpStream, response: &HttpResponse) -> std:
     }
     if let Some(offset) = response.offset {
         out.extend_from_slice(format!("X-Offset: {offset}\r\n").as_bytes());
+    }
+    for (name, value) in &response.extra_headers {
+        out.extend_from_slice(format!("{name}: {value}\r\n").as_bytes());
     }
     // The service holds no credentials and serves public audio, so any origin may read it.
     out.extend_from_slice(b"Access-Control-Allow-Origin: *\r\n");
