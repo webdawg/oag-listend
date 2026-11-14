@@ -18,6 +18,7 @@ struct Args {
     listen: String,
     http: Option<String>,
     udp: Option<String>,
+    dir: Option<String>,
     seed: u64,
     max_bytes: usize,
     no_generate: bool,
@@ -28,6 +29,7 @@ fn parse_args() -> Args {
         listen: "0.0.0.0:7100".to_string(),
         http: None,
         udp: None,
+        dir: None,
         seed: default_seed(),
         max_bytes: DEFAULT_MAX_BYTES,
         no_generate: false,
@@ -38,6 +40,7 @@ fn parse_args() -> Args {
             "--listen" => args.listen = it.next().expect("--listen needs an address"),
             "--http" => args.http = Some(it.next().expect("--http needs an address")),
             "--udp" => args.udp = Some(it.next().expect("--udp needs an address")),
+            "--dir" => args.dir = Some(it.next().expect("--dir needs a directory")),
             "--seed" => {
                 args.seed = it
                     .next()
@@ -72,7 +75,8 @@ fn usage() -> String {
          Usage: oag-listend [--listen ADDR] [--http ADDR] [--seed U64] [--max-bytes N] [--no-generate]\n\n\
            --listen ADDR    native protocol bind address (default 0.0.0.0:7100)\n\
            --http ADDR      also serve HTTP at ADDR (GET /audio/{{hash}}, POST /audio)
-           --udp ADDR       also serve the native protocol over UDP datagrams\n\
+           --udp ADDR       also serve the native protocol over UDP datagrams
+           --dir PATH       persist the audio content-addressed under PATH\n\
            --seed U64       seed for the startup sounds (default: clock)\n\
            --max-bytes N    store bound in bytes (default {DEFAULT_MAX_BYTES})\n\
            --no-generate    do not publish generated sounds at startup\n\n\
@@ -92,7 +96,21 @@ fn default_seed() -> u64 {
 #[tokio::main]
 async fn main() {
     let args = parse_args();
-    let store = Arc::new(Mutex::new(AudioStore::with_capacity(args.max_bytes)));
+    let store = match &args.dir {
+        Some(dir) => {
+            let (store, report) =
+                AudioStore::with_directory(dir, args.max_bytes).unwrap_or_else(|e| {
+                    eprintln!("oag-listend: cannot open store {dir}: {e}");
+                    std::process::exit(1);
+                });
+            println!(
+                "store {dir}: loaded {} skipped {}",
+                report.loaded, report.skipped
+            );
+            Arc::new(Mutex::new(store))
+        }
+        None => Arc::new(Mutex::new(AudioStore::with_capacity(args.max_bytes))),
+    };
 
     let (server, native_addr) = ListendServer::bind_shared(&args.listen, Arc::clone(&store))
         .await
@@ -139,7 +157,12 @@ async fn main() {
     }
 
     println!("oag-listend listening on {native_addr}");
-    println!("  seed {}  max-bytes {}", args.seed, args.max_bytes);
+    println!(
+        "  seed {}  max-bytes {}{}",
+        args.seed,
+        args.max_bytes,
+        args.dir.as_deref().map(|d| format!("  store {d}")).unwrap_or_default()
+    );
     println!("  only audio is accepted; everything else is rejected before it is stored");
 
     let native_run = tokio::spawn(async move { server.run().await });

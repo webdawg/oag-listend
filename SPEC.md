@@ -2,12 +2,14 @@
 
 **License: GNU Affero General Public License v3.0 or later (AGPL-3.0-or-later).**
 
-**Status: serves.** Three carriers are live and share one store: the native length-prefixed
-protocol, HTTP, and UDP. The daemon binds, publishes a small seeded set of generated sounds,
-accepts audio, and serves it back with the BLAKE3 of the bytes. The end-to-end tests
-`the_daemon_serves_audio_and_refuses_everything_else`, `http_serves_audio_and_refuses_the_rest`,
-`the_two_carriers_serve_the_same_audio`, and `udp_carries_the_same_audio` are green, and
-`examples/push_pull.rs` works over TCP and UDP. The audio rules have not moved.
+**Status: serves, and survives a restart.** Three carriers are live and share one store: the
+native length-prefixed protocol, HTTP, and UDP. The store is content-addressed, so `--dir` persists
+every accepted sound under its BLAKE3 and a restart loads it back. The daemon publishes a small
+seeded set of generated sounds, accepts audio, and serves it back with the BLAKE3 of the bytes. The
+end-to-end tests `the_daemon_serves_audio_and_refuses_everything_else`,
+`http_serves_audio_and_refuses_the_rest`, `the_two_carriers_serve_the_same_audio`,
+`udp_carries_the_same_audio`, and `audio_accepted_before_a_shutdown_is_served_after_it` are green.
+The audio rules have not moved.
 
 ## The idea, recorded verbatim
 
@@ -98,7 +100,8 @@ The protocol is length-prefixed frames with exactly four operations -- hello, pu
 list -- and nothing else. Every inbound publish goes through `AudioStore::accept`; every outbound
 fetch returns the bytes and the hash they must verify against.
 
-    oag-listend --listen 0.0.0.0:7100 --http 0.0.0.0:7101 --udp 0.0.0.0:7120 --seed 20261112
+    oag-listend --listen 0.0.0.0:7100 --http 0.0.0.0:7101 --udp 0.0.0.0:7120 \
+                --dir /var/lib/oag-listend --seed 20261112
     cargo run -p oag-listend --example push_pull -- --addr 127.0.0.1:7100
     cargo run -p oag-listend --example push_pull -- --udp --addr 127.0.0.1:7120
 
@@ -124,9 +127,19 @@ reply goes back to the sender, and the frame codec is reused unchanged. A datagr
 truncation. Small exchanges (hello, list, a generated tone, a short recording) are this carrier's
 job; a long recording belongs on TCP or HTTP.
 
+## Persistence
+
+`--dir PATH` makes the store content-addressed: `<PATH>/<hash>` is the audio, `<PATH>/<hash>.json`
+is the declared media type. An accepted item is written before it is answerable -- a write failure
+is a refusal, not a silent loss. On startup every entry is re-checked: the name must be the BLAKE3
+of the bytes and the bytes must still sniff as audio, so a hand-placed file cannot smuggle anything
+in. The load is reported (`loaded N skipped M`), never silent.
+
+Eviction deletes the file, so the directory and the store agree on what is held and the
+`--max-bytes` bound is a bound on disk too, not just memory. Without `--dir` the store is in-memory.
+
 ## Next
 
-The store is in-memory, so a restart loses the audio. Persistence is the honest next step: write
-each accepted item content-addressed under a directory and load it at startup. After that,
-whatever other carriers the imagination `Transport` seam offers (IPFS, Reticulum), each reusing
-`AudioStore::accept` and adding no operations.
+Whatever other carriers the imagination `Transport` seam offers -- IPFS, Reticulum -- each reusing
+`AudioStore::accept` and adding no operations. Then a real listening address on the operator's
+network.

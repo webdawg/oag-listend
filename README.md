@@ -33,7 +33,8 @@ One additional individual directive is recorded for the next implementation step
 
 ## Turn it on
 
-    cargo run -p oag-listend -- --listen 127.0.0.1:7100 --http 127.0.0.1:7101 --udp 127.0.0.1:7120 --seed 20261112
+    cargo run -p oag-listend -- --listen 127.0.0.1:7100 --http 127.0.0.1:7101 --udp 127.0.0.1:7120 \
+        --dir /var/lib/oag-listend --seed 20261112
 
 The daemon binds, prints four generated sounds, and serves until interrupted. Then exchange audio
 with it over the native protocol:
@@ -49,12 +50,23 @@ or over HTTP, with any client:
 
 All three carriers share one store, and all accept audio and nothing else.
 
+`--dir` persists the audio content-addressed under a directory, so a restart loads it back:
+
+    # first run: post a sound, then stop the daemon
+    curl -X POST --data-binary @tone.wav http://127.0.0.1:7101/audio
+    # second run: the same sound is served again
+    curl http://127.0.0.1:7101/audio/<hash>
+
+Every entry is re-checked on load (name must be the BLAKE3 of the bytes, bytes must sniff as
+audio), and a write failure refuses the inbound rather than losing it silently.
+
 ## Status
 
-**Serves.** Three carriers are live and tested: 25 unit tests plus 5 end-to-end tests
-(`cargo test -p oag-listend`). The native protocol, HTTP, and UDP share one store, and all were
-verified by hand: audio posted to HTTP came back byte-identical, `push_pull` verified over TCP and
-UDP, and HTML labelled `audio/wav` was refused on every carrier.
+**Serves, and survives a restart.** Three carriers are live and tested: 30 unit tests plus 6
+end-to-end tests (`cargo test -p oag-listend`). The native protocol, HTTP, and UDP share one store,
+and all were verified by hand: audio posted to HTTP came back byte-identical, `push_pull` verified
+over TCP and UDP, HTML labelled `audio/wav` was refused on every carrier, and a daemon restarted
+with `--dir` loaded 5 items and served the posted WAV byte-identical.
 The audio surface (`AudioItem`, `AudioStore`, `AudioFormat::sniff`) is unchanged; the rules did not
 move to the wire, they were already at the surface. See `SPEC.md` for the carriers and the bounds.
 
