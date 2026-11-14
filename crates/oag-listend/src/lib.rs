@@ -148,6 +148,22 @@ impl AudioFormat {
         }
         None
     }
+
+    /// The canonical MIME type for this format, derived from the bytes.
+    ///
+    /// The HTTP carrier serves this rather than a publisher's declared type: a declared type is a
+    /// claim, and a browser that is told `application/x-www-form-urlencoded` about a WAV will not
+    /// play it. The bytes are the evidence.
+    pub fn media_type(&self) -> &'static str {
+        match self {
+            Self::Wav => "audio/wav",
+            Self::Flac => "audio/flac",
+            Self::Ogg => "audio/ogg",
+            Self::Mp3 => "audio/mpeg",
+            Self::M4a => "audio/mp4",
+            Self::Aiff => "audio/aiff",
+        }
+    }
 }
 
 /// The audio surface: everything the daemon can serve, keyed by content hash.

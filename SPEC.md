@@ -8,7 +8,8 @@ every accepted sound under its BLAKE3 and a restart loads it back. The daemon pu
 seeded set of generated sounds, accepts audio, and serves it back with the BLAKE3 of the bytes. The
 end-to-end tests `the_daemon_serves_audio_and_refuses_everything_else`,
 `http_serves_audio_and_refuses_the_rest`, `the_two_carriers_serve_the_same_audio`,
-`udp_carries_the_same_audio`, and `audio_accepted_before_a_shutdown_is_served_after_it` are green.
+`udp_carries_the_same_audio`, `audio_accepted_before_a_shutdown_is_served_after_it`,
+`http_range_requests_and_head`, and `the_served_content_type_comes_from_the_bytes` are green.
 The audio rules have not moved.
 
 ## The idea, recorded verbatim

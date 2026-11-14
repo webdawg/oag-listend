@@ -47,6 +47,8 @@ or over HTTP, with any client:
     curl -X POST --data-binary @tone.wav http://127.0.0.1:7101/audio   # -> the content hash
     curl http://127.0.0.1:7101/audio/<hash>                            # -> the same bytes
     curl http://127.0.0.1:7101/                                        # -> what this is
+    curl -I http://127.0.0.1:7101/audio/<hash>                         # -> headers, no body
+    curl -r 0-1023 http://127.0.0.1:7101/audio/<hash>                  # -> 206, a byte range
 
 All three carriers share one store, and all accept audio and nothing else.
 
@@ -60,9 +62,12 @@ All three carriers share one store, and all accept audio and nothing else.
 Every entry is re-checked on load (name must be the BLAKE3 of the bytes, bytes must sniff as
 audio), and a write failure refuses the inbound rather than losing it silently.
 
+The HTTP content type comes from the bytes, not from what the publisher claimed, and `Range` and
+`HEAD` are supported, so a browser can stream and seek. Verified by hand with `curl`.
+
 ## Status
 
-**Serves, and survives a restart.** Three carriers are live and tested: 30 unit tests plus 6
+**Serves, and survives a restart.** Three carriers are live and tested: 30 unit tests plus 8
 end-to-end tests (`cargo test -p oag-listend`). The native protocol, HTTP, and UDP share one store,
 and all were verified by hand: audio posted to HTTP came back byte-identical, `push_pull` verified
 over TCP and UDP, HTML labelled `audio/wav` was refused on every carrier, and a daemon restarted

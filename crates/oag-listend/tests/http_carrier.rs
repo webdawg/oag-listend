@@ -173,3 +173,126 @@ async fn shared_store() {
     tokio::time::timeout(Duration::from_secs(5), http_run).await.expect("bound").expect("join").expect("run");
     tokio::time::timeout(Duration::from_secs(5), native_run).await.expect("bound").expect("join").expect("run");
 }
+
+/// A player or a browser uses ranges to seek and to probe; the carrier must answer with a partial
+/// body, a correct Content-Range, and 416 when the range is unsatisfiable. HEAD must answer with
+/// headers and no body.
+async fn get_range(addr: std::net::SocketAddr, hash: &str, range: Option<&str>) -> Vec<u8> {
+    let mut request = format!("GET /audio/{hash} HTTP/1.1\r\nHost: x\r\n");
+    if let Some(range) = range {
+        request.push_str(&format!("Range: {range}\r\n"));
+    }
+    request.push_str("Connection: close\r\n\r\n");
+    http(addr, &request).await
+}
+
+#[tokio::test]
+async fn http_range_requests_and_head() {
+    tokio::time::timeout(BOUND, ranges()).await.expect("range exchange within the bound")
+}
+
+async fn ranges() {
+    let store = Arc::new(Mutex::new(AudioStore::default()));
+    let (carrier, addr) = HttpCarrier::bind_shared("127.0.0.1:0", Arc::clone(&store))
+        .await
+        .expect("bind http");
+    let shutdown = carrier.shutdown_handle();
+    let run = tokio::spawn(async move { carrier.run().await });
+
+    let tone = wav::generate(6, wav::Sound::Tone);
+    let posted = http_post(addr, &tone, "audio/wav").await;
+    assert_eq!(status_of(&posted), 201);
+    let hash = String::from_utf8_lossy(body_of(&posted)).trim().to_string();
+    let len = tone.len();
+
+    // No range: the whole body, advertising that ranges are accepted.
+    let whole = get_range(addr, &hash, None).await;
+    assert_eq!(status_of(&whole), 200);
+    assert!(head_contains(&whole, "accept-ranges: bytes"));
+    assert_eq!(body_of(&whole), tone.as_slice());
+
+    // A first-byte range.
+    let first = get_range(addr, &hash, Some("bytes=0-9")).await;
+    assert_eq!(status_of(&first), 206, "{}", String::from_utf8_lossy(&first));
+    assert!(head_contains(&first, &format!("content-range: bytes 0-9/{len}")));
+    assert_eq!(body_of(&first), &tone[0..10]);
+
+    // A suffix range.
+    let last = get_range(addr, &hash, Some("bytes=-10")).await;
+    assert_eq!(status_of(&last), 206);
+    assert!(head_contains(&last, &format!("content-range: bytes {}-{}/{len}", len - 10, len - 1)));
+    assert_eq!(body_of(&last), &tone[len - 10..]);
+
+    // An open-ended range.
+    let tail = get_range(addr, &hash, Some("bytes=100-")).await;
+    assert_eq!(status_of(&tail), 206);
+    assert_eq!(body_of(&tail), &tone[100..]);
+
+    // An unsatisfiable range.
+    let bad = get_range(addr, &hash, Some(&format!("bytes={len}-"))).await;
+    assert_eq!(status_of(&bad), 416, "{}", String::from_utf8_lossy(&bad));
+    assert!(head_contains(&bad, &format!("content-range: bytes */{len}")));
+
+    // Multiple ranges are ignored, not answered with multipart.
+    let multi = get_range(addr, &hash, Some("bytes=0-9,20-29")).await;
+    assert_eq!(status_of(&multi), 200);
+    assert_eq!(body_of(&multi), tone.as_slice());
+
+    // HEAD: headers, no body.
+    let head = http(
+        addr,
+        &format!("HEAD /audio/{hash} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"),
+    )
+    .await;
+    assert_eq!(status_of(&head), 200, "{}", String::from_utf8_lossy(&head));
+    assert!(head_contains(&head, &format!("content-length: {len}")));
+    assert!(body_of(&head).is_empty(), "HEAD must not carry a body");
+
+    shutdown.shutdown();
+    tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .expect("shutdown bound")
+        .expect("join")
+        .expect("run");
+}
+
+/// The content type on the way out comes from the bytes, not from what the publisher claimed. A
+/// WAV posted as `application/x-www-form-urlencoded` must still be served as audio, or a browser
+/// will not play it.
+#[tokio::test]
+async fn the_served_content_type_comes_from_the_bytes() {
+    tokio::time::timeout(BOUND, content_type()).await.expect("content-type exchange within the bound")
+}
+
+async fn content_type() {
+    let store = Arc::new(Mutex::new(AudioStore::default()));
+    let (carrier, addr) = HttpCarrier::bind_shared("127.0.0.1:0", Arc::clone(&store))
+        .await
+        .expect("bind http");
+    let shutdown = carrier.shutdown_handle();
+    let run = tokio::spawn(async move { carrier.run().await });
+
+    let tone = wav::generate(8, wav::Sound::Tone);
+    let posted = http_post(addr, &tone, "application/x-www-form-urlencoded").await;
+    assert_eq!(status_of(&posted), 201);
+    let hash = String::from_utf8_lossy(body_of(&posted)).trim().to_string();
+
+    let fetched = http(
+        addr,
+        &format!("GET /audio/{hash} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"),
+    )
+    .await;
+    assert_eq!(status_of(&fetched), 200);
+    assert!(
+        head_contains(&fetched, "content-type: audio/wav"),
+        "the bytes are a WAV, so the response must say audio/wav: {}",
+        String::from_utf8_lossy(&fetched)
+    );
+
+    shutdown.shutdown();
+    tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .expect("shutdown bound")
+        .expect("join")
+        .expect("run");
+}
