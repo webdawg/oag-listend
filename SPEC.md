@@ -111,6 +111,9 @@ fetch returns the bytes and the hash they must verify against.
 
 Bounds: every read and write has a 10 s timeout, a frame may not exceed 16 MiB, the store is
 capped by `--max-bytes` (1 GiB by default), and at most 64 sessions are served at once per carrier.
+A single item is capped by `servable_bound` -- the store bound capped by what one frame can carry
+(`MAX_FRAME_BYTES - 256`) -- so no accepted item can be one that a client's own decoder would
+reject. A store bound above the frame cap does not admit unfetchable items.
 A fresh daemon publishes four generated sounds (silence, tone, noise) through the same inbound
 rule a client's bytes use, so a fetch-only client still receives audio. The set seeds an *empty*
 store: a restart with a persistent store is left alone, because otherwise every start would add

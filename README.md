@@ -72,6 +72,8 @@ than counted as held.
 
 `--max-bytes` is enforced on the way in: audio larger than the bound is refused with `400` rather
 than written and immediately evicted, and an oversized startup file is skipped without being read.
+A single item is also capped by what one frame can carry (`MAX_FRAME_BYTES - 256`), so a store
+bound above the frame cap cannot admit an item that no client could fetch.
 Verified by hand: a 4044-byte WAV against `--max-bytes 100` returned
 `audio is 4044 bytes, larger than the 100 byte store bound`, while a small WAV was accepted.
 
@@ -99,7 +101,7 @@ address the daemon prints a note saying so. Use `--listen 127.0.0.1:...` to keep
 
 ## Status
 
-**Serves, and survives a restart.** Four carriers are live and tested: 40 unit tests plus 16
+**Serves, and survives a restart.** Four carriers are live and tested: 41 unit tests plus 16
 end-to-end tests (`cargo test -p oag-listend`). Runs as a systemd service (`scripts/oag-listend.service`)
 and shuts down cleanly on SIGINT and SIGTERM. The native protocol, HTTP, and UDP share one store,
 and all were verified by hand: audio posted to HTTP came back byte-identical, `push_pull` verified

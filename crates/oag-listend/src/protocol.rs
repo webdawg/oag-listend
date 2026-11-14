@@ -41,6 +41,12 @@ pub const DEFAULT_LIST_LIMIT: usize = 1000;
 /// frame its own client has to reject as too long.
 pub const MAX_LIST_LIMIT: usize = 10_000;
 
+/// The largest item that can be served in one frame. A `Fetch` response carries the hash and a
+/// length prefix, so an item at the frame cap would make a response larger than the cap -- the
+/// client's own decoder would reject it. Every carrier's item bound is the store bound capped by
+/// this, so no accepted item can be unfetchable.
+pub const MAX_SERVABLE_BYTES: usize = MAX_FRAME_BYTES - 256;
+
 /// The page size for a `limit` of zero or a limit above `max`.
 ///
 /// A client that sends `limit: 0` is asking for the default, not for one item; clamping zero to 1

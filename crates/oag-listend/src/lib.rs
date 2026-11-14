@@ -286,7 +286,7 @@ impl AudioStore {
             // A file larger than the store can hold is skipped without being read: an unbounded
             // read on the startup path is the same defect as an unbounded network read.
             let len = entry.metadata().map(|m| m.len() as usize).unwrap_or(0);
-            if len > store.max_bytes {
+            if len > servable_bound(store.max_bytes) {
                 report.skipped += 1;
                 continue;
             }
@@ -322,8 +322,9 @@ impl AudioStore {
         if AudioFormat::sniff(&bytes).is_none() {
             return Err(ListendError::NotAudio);
         }
-        if bytes.len() > self.max_bytes {
-            return Err(ListendError::TooLarge { len: bytes.len(), max: self.max_bytes });
+        let bound = servable_bound(self.max_bytes);
+        if bytes.len() > bound {
+            return Err(ListendError::TooLarge { len: bytes.len(), max: bound });
         }
         let item = AudioItem::new(bytes, declared_media_type);
         if self.items.contains_key(&item.content_hash) {
@@ -434,6 +435,13 @@ impl AudioStore {
             dir: Some(dir),
         }
     }
+}
+
+/// The largest item this store will hold and serve: the store bound, capped by what a single
+/// frame can carry. A store bound above the frame cap would otherwise admit items that no carrier
+/// can fetch.
+pub fn servable_bound(max_bytes: usize) -> usize {
+    max_bytes.min(crate::protocol::MAX_SERVABLE_BYTES)
 }
 
 /// The declared media type recorded beside a persisted item, if any.
@@ -646,6 +654,17 @@ mod tests {
         assert!(dir.join(&second_hash).exists());
         assert!(store.bytes_held() <= 60);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_item_bound_is_the_store_bound_capped_by_a_frame() {
+        assert_eq!(servable_bound(10), 10, "a small store bound is unchanged");
+        assert_eq!(
+            servable_bound(usize::MAX),
+            crate::protocol::MAX_SERVABLE_BYTES,
+            "a large store bound is capped by what a frame can carry"
+        );
+        assert!(servable_bound(usize::MAX) < crate::protocol::MAX_FRAME_BYTES);
     }
 
     #[test]
