@@ -34,6 +34,13 @@ pub const DAEMON_NAME: &str = "oag-listend";
 /// The version of the frame protocol. A client that does not recognise it should not guess.
 pub const PROTOCOL_VERSION: u16 = 1;
 
+/// The page size a client gets when it asks for a listing without a limit.
+pub const DEFAULT_LIST_LIMIT: usize = 1000;
+/// The largest page a stream carrier will return. A listing is bounded so the response always fits
+/// the frame cap; without it a store with a quarter of a million items would make the daemon send a
+/// frame its own client has to reject as too long.
+pub const MAX_LIST_LIMIT: usize = 10_000;
+
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum WireError {
     #[error("the frame is truncated")]
@@ -58,8 +65,10 @@ pub enum Request {
     Publish { declared_media_type: Option<String>, bytes: Vec<u8> },
     /// Give me the audio with this content hash.
     Fetch { content_hash: String },
-    /// What content hashes do you hold.
-    List,
+    /// What content hashes do you hold, a page at a time. `offset` is the first index, `limit` the
+    /// page size (clamped by the carrier). The response reports the total so a client can tell
+    /// whether more pages remain.
+    List { offset: usize, limit: usize },
 }
 
 /// A daemon response. Every request gets exactly one.
@@ -72,7 +81,9 @@ pub enum Response {
     /// The inbound rule refused these bytes. `reason` describes the refusal, never the bytes.
     Rejected { reason: String },
     NotFound { content_hash: String },
-    Listing { content_hashes: Vec<String> },
+    /// One page of the listing. `total` is the whole store's size, `offset` the index this page
+    /// starts at, so a client can walk the store without guessing.
+    Listing { content_hashes: Vec<String>, total: usize, offset: usize },
     Published { content_hash: String },
 }
 
@@ -197,7 +208,11 @@ pub fn encode_request(req: &Request) -> Vec<u8> {
     let mut out = Vec::new();
     match req {
         Request::Hello => out.push(OP_HELLO),
-        Request::List => out.push(OP_LIST),
+        Request::List { offset, limit } => {
+            out.push(OP_LIST);
+            put_u32(&mut out, *offset as u32);
+            put_u32(&mut out, *limit as u32);
+        }
         Request::Publish { declared_media_type, bytes } => {
             out.push(OP_PUBLISH);
             put_opt_str(&mut out, declared_media_type);
@@ -216,7 +231,11 @@ pub fn decode_request(body: &[u8]) -> Result<Request, WireError> {
     let op = r.u8()?;
     match op {
         OP_HELLO => Ok(Request::Hello),
-        OP_LIST => Ok(Request::List),
+        OP_LIST => {
+            let offset = r.u32()? as usize;
+            let limit = r.u32()? as usize;
+            Ok(Request::List { offset, limit })
+        }
         OP_PUBLISH => {
             let declared_media_type = r.opt_string()?;
             Ok(Request::Publish { declared_media_type, bytes: r.rest().to_vec() })
@@ -249,8 +268,10 @@ pub fn encode_response(resp: &Response) -> Vec<u8> {
             out.push(OP_RESP_NOT_FOUND);
             put_str(&mut out, content_hash);
         }
-        Response::Listing { content_hashes } => {
+        Response::Listing { content_hashes, total, offset } => {
             out.push(OP_RESP_LISTING);
+            put_u32(&mut out, *total as u32);
+            put_u32(&mut out, *offset as u32);
             put_u32(&mut out, content_hashes.len() as u32);
             for h in content_hashes {
                 put_str(&mut out, h);
@@ -285,6 +306,8 @@ pub fn decode_response(body: &[u8]) -> Result<Response, WireError> {
         OP_RESP_REJECTED => Ok(Response::Rejected { reason: r.string()? }),
         OP_RESP_NOT_FOUND => Ok(Response::NotFound { content_hash: r.hash()? }),
         OP_RESP_LISTING => {
+            let total = r.u32()? as usize;
+            let offset = r.u32()? as usize;
             let count = r.u32()? as usize;
             if count > r.buf.len() {
                 return Err(WireError::Truncated);
@@ -293,7 +316,7 @@ pub fn decode_response(body: &[u8]) -> Result<Response, WireError> {
             for _ in 0..count {
                 content_hashes.push(r.hash()?);
             }
-            Ok(Response::Listing { content_hashes })
+            Ok(Response::Listing { content_hashes, total, offset })
         }
         OP_RESP_PUBLISHED => Ok(Response::Published { content_hash: r.hash()? }),
         other => Err(WireError::UnknownOp(other)),
@@ -317,7 +340,8 @@ mod tests {
     #[test]
     fn requests_round_trip() {
         roundtrip_request(&Request::Hello);
-        roundtrip_request(&Request::List);
+        roundtrip_request(&Request::List { offset: 5, limit: 10 });
+        roundtrip_request(&Request::List { offset: 0, limit: 0 });
         roundtrip_request(&Request::Publish { declared_media_type: None, bytes: b"RIFF....WAVE".to_vec() });
         roundtrip_request(&Request::Publish {
             declared_media_type: Some("audio/wav".into()),
@@ -362,7 +386,11 @@ mod tests {
         });
         roundtrip_response(&Response::Rejected { reason: "input is not audio".into() });
         roundtrip_response(&Response::NotFound { content_hash: "00".repeat(32) });
-        roundtrip_response(&Response::Listing { content_hashes: vec!["11".repeat(32), "22".repeat(32)] });
+        roundtrip_response(&Response::Listing {
+            content_hashes: vec!["11".repeat(32), "22".repeat(32)],
+            total: 7,
+            offset: 2,
+        });
         roundtrip_response(&Response::Published { content_hash: "33".repeat(32) });
     }
 

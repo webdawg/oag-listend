@@ -224,9 +224,19 @@ pub(crate) async fn handle(request: Request, store: &Arc<Mutex<AudioStore>>) -> 
                 item_count: count,
             }
         }
-        Request::List => {
-            let hashes = store.lock().await.hashes();
-            Response::Listing { content_hashes: hashes }
+        Request::List { offset, limit } => {
+            let store = store.lock().await;
+            let hashes = store.hashes();
+            let total = hashes.len();
+            // The page is bounded so the response always fits the frame cap.
+            let limit = limit.clamp(1, crate::protocol::MAX_LIST_LIMIT);
+            let offset = offset.min(total);
+            let end = (offset + limit).min(total);
+            Response::Listing {
+                content_hashes: hashes[offset..end].to_vec(),
+                total,
+                offset,
+            }
         }
         Request::Publish { declared_media_type, bytes } => {
             let mut store = store.lock().await;
@@ -348,6 +358,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_listing_is_a_bounded_page_with_a_total() {
+        let store = Arc::new(Mutex::new(AudioStore::default()));
+        let mut hashes = Vec::new();
+        for seed in 0..5u64 {
+            let wav = crate::wav::generate(seed, crate::wav::Sound::Tone);
+            hashes.push(
+                handle(Request::Publish { declared_media_type: None, bytes: wav }, &store)
+                    .await
+                    .published_hash(),
+            );
+        }
+        hashes.sort();
+
+        let page = handle(Request::List { offset: 0, limit: 2 }, &store).await;
+        assert_eq!(
+            page,
+            Response::Listing { content_hashes: hashes[0..2].to_vec(), total: 5, offset: 0 }
+        );
+        let page = handle(Request::List { offset: 4, limit: 2 }, &store).await;
+        assert_eq!(
+            page,
+            Response::Listing { content_hashes: hashes[4..5].to_vec(), total: 5, offset: 4 }
+        );
+        let page = handle(Request::List { offset: 5, limit: 2 }, &store).await;
+        assert_eq!(page, Response::Listing { content_hashes: vec![], total: 5, offset: 5 });
+        // A limit above the carrier's cap is clamped, not honoured.
+        let page = handle(Request::List { offset: 0, limit: 100_000 }, &store).await;
+        match page {
+            Response::Listing { content_hashes, .. } => {
+                assert!(content_hashes.len() <= crate::protocol::MAX_LIST_LIMIT)
+            }
+            other => panic!("expected a listing, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn a_non_audio_publish_is_rejected_and_nothing_is_stored() {
         let store = Arc::new(Mutex::new(AudioStore::default()));
         let response = handle(
@@ -422,12 +468,12 @@ mod tests {
         let hb = handle(Request::Publish { declared_media_type: None, bytes: b }, &store)
             .await
             .published_hash();
-        let listing = handle(Request::List, &store).await;
+        let listing = handle(Request::List { offset: 0, limit: 100 }, &store).await;
         let mut expected = vec![ha.clone(), hb.clone()];
         expected.sort();
         assert_eq!(
             listing,
-            Response::Listing { content_hashes: expected },
+            Response::Listing { content_hashes: expected, total: 2, offset: 0 },
             "a listing must be sorted, so the walk is the same across a restart"
         );
     }

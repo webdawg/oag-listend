@@ -81,8 +81,8 @@ async fn round_trip() {
     }
 
     assert_eq!(
-        exchange(&socket, addr, &Request::List).await,
-        Response::Listing { content_hashes: vec![hash] }
+        exchange(&socket, addr, &Request::List { offset: 0, limit: 100 }).await,
+        Response::Listing { content_hashes: vec![hash], total: 1, offset: 0 }
     );
 
     shutdown.shutdown();

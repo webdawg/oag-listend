@@ -25,6 +25,8 @@ use crate::{AudioStore, ListendError};
 pub const MAX_DATAGRAM_BYTES: usize = 65_507;
 /// Leave room for the 4-byte frame prefix.
 pub const MAX_FRAME_BYTES: usize = MAX_DATAGRAM_BYTES - 4;
+/// The largest listing page a datagram can carry: 900 hashes is about 59 KiB of body.
+pub const MAX_DATAGRAM_LIST_LIMIT: usize = 900;
 /// A datagram exchange is bounded like every other network read and write.
 pub const IO_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -98,7 +100,19 @@ async fn handle(datagram: &[u8], store: &Arc<Mutex<AudioStore>>) -> Option<Vec<u
             protocol_version: crate::protocol::PROTOCOL_VERSION,
             item_count: store.lock().await.len(),
         },
-        Request::List => Response::Listing { content_hashes: store.lock().await.hashes() },
+        Request::List { offset, limit } => {
+            let store = store.lock().await;
+            let hashes = store.hashes();
+            let total = hashes.len();
+            let limit = limit.clamp(1, MAX_DATAGRAM_LIST_LIMIT);
+            let offset = offset.min(total);
+            let end = (offset + limit).min(total);
+            Response::Listing {
+                content_hashes: hashes[offset..end].to_vec(),
+                total,
+                offset,
+            }
+        }
         Request::Fetch { content_hash } => {
             let store = store.lock().await;
             match store.serve(&content_hash) {

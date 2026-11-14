@@ -157,7 +157,12 @@ count. A client can therefore tell what it reached and whether it speaks the sam
 of inferring from a bare count. An unrecognised name still decodes, so a future daemon is
 recognisable rather than a protocol error.
 
-## Listing order
+## Listing order and pages
+
+The list operation is paginated: `List { offset, limit }` returns one page and the store's `total`,
+so a client can walk the whole store without guessing. The page is bounded (`MAX_LIST_LIMIT` on a
+stream carrier, a smaller cap on UDP) because an unbounded listing would eventually exceed the frame
+cap -- the daemon would send a frame its own client has to reject.
 
 The list operation returns content hashes sorted by hash. Insertion order is reproducible within a
 run but not across a restart, because a restart rebuilds the store in directory-iteration order;

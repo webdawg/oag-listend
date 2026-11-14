@@ -77,8 +77,11 @@ async fn back_and_forth() {
     }
 
     // 4. The listing carries what was published.
-    send(&mut stream, &Request::List).await;
-    assert_eq!(recv(&mut stream).await, Response::Listing { content_hashes: vec![hash.clone()] });
+    send(&mut stream, &Request::List { offset: 0, limit: 100 }).await;
+    assert_eq!(
+        recv(&mut stream).await,
+        Response::Listing { content_hashes: vec![hash.clone()], total: 1, offset: 0 }
+    );
 
     // 5. Non-audio is refused, however it is labelled, and nothing is stored.
     for (bytes, label) in [

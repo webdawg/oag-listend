@@ -94,7 +94,7 @@ return, the Unix socket is removed, and the process exits 0.
 
 ## Status
 
-**Serves, and survives a restart.** Four carriers are live and tested: 36 unit tests plus 13
+**Serves, and survives a restart.** Four carriers are live and tested: 37 unit tests plus 13
 end-to-end tests (`cargo test -p oag-listend`). Runs as a systemd service (`scripts/oag-listend.service`)
 and shuts down cleanly on SIGINT and SIGTERM. The native protocol, HTTP, and UDP share one store,
 and all were verified by hand: audio posted to HTTP came back byte-identical, `push_pull` verified
