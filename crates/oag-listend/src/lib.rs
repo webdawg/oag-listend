@@ -90,8 +90,14 @@ pub enum ListendError {
 /// They are reported, never silently dropped or silently trusted.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct LoadReport {
+    /// Entries now held. Not "entries read": a load can evict older items once the byte bound is
+    /// reached, and a report that counts evicted entries as loaded overstates what is served.
     pub loaded: usize,
+    /// Entries not read, or read and rejected: a name that is not the BLAKE3 of the bytes, bytes
+    /// that do not sniff as audio, or a file larger than the store bound.
     pub skipped: usize,
+    /// Entries read and accepted but pushed out by the byte bound while later entries loaded.
+    pub evicted: usize,
 }
 
 /// A recognised audio container or codec, identified from the bytes themselves.
@@ -225,6 +231,7 @@ impl AudioStore {
             dir: Some(dir.clone()),
         };
         let mut report = LoadReport::default();
+        let mut inserted = 0usize;
 
         let entries = std::fs::read_dir(&dir)?;
         for entry in entries {
@@ -268,9 +275,11 @@ impl AudioStore {
             }
             let media_type = read_sidecar(&dir, &hash);
             store.publish(AudioItem { content_hash: hash, bytes, media_type });
-            report.loaded += 1;
+            inserted += 1;
         }
 
+        report.evicted = inserted - store.len();
+        report.loaded = store.len();
         Ok((store, report))
     }
 
@@ -569,6 +578,27 @@ mod tests {
             "an item larger than the bound must be refused, got {result:?}"
         );
         assert!(store.is_empty(), "a refused item must not be stored");
+    }
+
+    #[test]
+    fn the_load_report_counts_only_what_is_held() {
+        let dir = temp_dir("report");
+        // Three 52-byte WAVs written straight to the directory, bound 120: all three are read,
+        // then the oldest is pushed out. (Writing them through a store would have deleted the
+        // evicted file already, which is not the case under test.)
+        let mut hashes = Vec::new();
+        for seed in [1, 2, 3] {
+            let wav = wav::generate_n(seed, wav::Sound::Tone, 4);
+            let hash = blake3::hash(&wav).to_hex().to_string();
+            std::fs::write(dir.join(&hash), &wav).unwrap();
+            hashes.push(hash);
+        }
+        let (reopened, report) = AudioStore::with_directory(&dir, 120).unwrap();
+        assert_eq!(report.loaded, 2, "only what the bound holds is loaded");
+        assert_eq!(report.evicted, 1, "the pushed-out entry is reported, not hidden");
+        assert_eq!(reopened.len(), 2);
+        assert!(hashes.iter().any(|h| reopened.serve(h).is_err()));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

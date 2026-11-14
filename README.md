@@ -64,7 +64,9 @@ All three carriers share one store, and all accept audio and nothing else.
     curl http://127.0.0.1:7101/audio/<hash>
 
 Every entry is re-checked on load (name must be the BLAKE3 of the bytes, bytes must sniff as
-audio), and a write failure refuses the inbound rather than losing it silently.
+audio), and a write failure refuses the inbound rather than losing it silently. The startup report
+separates `loaded`, `skipped`, and `evicted`, so a bound that pushed entries out is visible rather
+than counted as held.
 
 `--max-bytes` is enforced on the way in: audio larger than the bound is refused with `400` rather
 than written and immediately evicted, and an oversized startup file is skipped without being read.
@@ -92,7 +94,7 @@ return, the Unix socket is removed, and the process exits 0.
 
 ## Status
 
-**Serves, and survives a restart.** Four carriers are live and tested: 35 unit tests plus 13
+**Serves, and survives a restart.** Four carriers are live and tested: 36 unit tests plus 13
 end-to-end tests (`cargo test -p oag-listend`). Runs as a systemd service (`scripts/oag-listend.service`)
 and shuts down cleanly on SIGINT and SIGTERM. The native protocol, HTTP, and UDP share one store,
 and all were verified by hand: audio posted to HTTP came back byte-identical, `push_pull` verified

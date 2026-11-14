@@ -117,7 +117,7 @@ async fn the_listing_walk_is_the_same_after_a_restart() {
 }
 
 async fn listing(dir: &std::path::Path) {
-    let mut first_walk;
+    let first_walk;
     {
         let (mut store, _) = AudioStore::with_directory(dir, 1024 * 1024).expect("open");
         for seed in [50, 17, 91, 3] {

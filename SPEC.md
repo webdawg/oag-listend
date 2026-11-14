@@ -139,7 +139,9 @@ job; a long recording belongs on TCP or HTTP.
 is the declared media type. An accepted item is written before it is answerable -- a write failure
 is a refusal, not a silent loss. On startup every entry is re-checked: the name must be the BLAKE3
 of the bytes and the bytes must still sniff as audio, so a hand-placed file cannot smuggle anything
-in. The load is reported (`loaded N skipped M`), never silent.
+in. The load is reported as `loaded` (entries now held), `skipped` (not read, or rejected), and
+`evicted` (read and accepted, then pushed out by the byte bound while later entries loaded) -- never
+silent, and never counting an evicted entry as held.
 
 Eviction deletes the file, so the directory and the store agree on what is held and the
 `--max-bytes` bound is a bound on disk too, not just memory. Without `--dir` the store is in-memory.
