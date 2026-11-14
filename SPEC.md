@@ -2,8 +2,8 @@
 
 **License: GNU Affero General Public License v3.0 or later (AGPL-3.0-or-later).**
 
-**Status: serves, and survives a restart.** Three carriers are live and share one store: the
-native length-prefixed protocol, HTTP, and UDP. The store is content-addressed, so `--dir` persists
+**Status: serves, and survives a restart.** Four carriers are live and share one store: the
+native length-prefixed protocol over TCP, HTTP, UDP, and a Unix domain socket. The store is content-addressed, so `--dir` persists
 every accepted sound under its BLAKE3 and a restart loads it back. The daemon publishes a small
 seeded set of generated sounds, accepts audio, and serves it back with the BLAKE3 of the bytes. The
 end-to-end tests `the_daemon_serves_audio_and_refuses_everything_else`,
@@ -144,8 +144,15 @@ The bound is enforced on the way in: `accept` refuses audio larger than `--max-b
 writing it and immediately evicting it, and a startup file larger than the bound is skipped without
 being read. A bound that is only checked after the read or write is not a bound.
 
+## The Unix domain socket carrier
+
+`--unix PATH` serves the same frame protocol over a filesystem socket, so a local process reaches
+the daemon by path rather than by port: no port to allocate or collide, and the file's permissions
+decide who may connect. It shares the TCP session loop, so the protocol, the bounds, and the
+inbound rule are identical by construction. A stale socket file from a killed daemon is removed on
+bind and on shutdown.
+
 ## Next
 
 Whatever other carriers the imagination `Transport` seam offers -- IPFS, Reticulum -- each reusing
-`AudioStore::accept` and adding no operations. Then a real listening address on the operator's
-network.
+`AudioStore::accept` and adding no operations. Then a documented one-command way to run the daemon.

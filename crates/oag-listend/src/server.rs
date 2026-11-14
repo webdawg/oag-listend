@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpListener;
 use tokio::sync::{Mutex, Semaphore, watch};
 
 use crate::protocol::{
@@ -124,7 +124,7 @@ impl ListendServer {
             tokio::select! {
                 _ = shutdown_rx.changed() => break,
                 accepted = self.listener.accept() => {
-                    let (stream, peer) = match accepted {
+                    let (stream, _peer) = match accepted {
                         Ok(pair) => pair,
                         Err(_) => continue,
                     };
@@ -135,7 +135,7 @@ impl ListendServer {
                     let max_frame = self.max_frame;
                     tokio::spawn(async move {
                         let _permit = permit;
-                        let _ = serve_session(stream, peer, store, read_timeout, write_timeout, max_frame).await;
+                        let _ = serve_session(stream, store, read_timeout, write_timeout, max_frame).await;
                     });
                 }
             }
@@ -144,14 +144,19 @@ impl ListendServer {
     }
 }
 
-async fn serve_session(
-    mut stream: TcpStream,
-    _peer: std::net::SocketAddr,
+/// Serve one session over any byte stream. TCP and the Unix domain socket share this loop, so a
+/// new stream carrier cannot quietly get a different protocol, a different bound, or a different
+/// inbound rule.
+pub(crate) async fn serve_session<S>(
+    mut stream: S,
     store: Arc<Mutex<AudioStore>>,
     read_timeout: Duration,
     write_timeout: Duration,
     max_frame: usize,
-) -> std::io::Result<()> {
+) -> std::io::Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     loop {
         let body = match read_frame(&mut stream, max_frame, read_timeout).await {
             Ok(Some(body)) => body,
@@ -185,7 +190,7 @@ async fn serve_session(
     }
 }
 
-async fn handle(request: Request, store: &Arc<Mutex<AudioStore>>) -> Response {
+pub(crate) async fn handle(request: Request, store: &Arc<Mutex<AudioStore>>) -> Response {
     match request {
         Request::Hello => {
             let count = store.lock().await.len();
@@ -221,11 +226,14 @@ async fn handle(request: Request, store: &Arc<Mutex<AudioStore>>) -> Response {
 
 /// Read one length-prefixed frame. The length is checked against `max_frame` before the body is
 /// allocated, so a hostile length cannot drive an allocation.
-async fn read_frame(
-    stream: &mut TcpStream,
+async fn read_frame<S>(
+    stream: &mut S,
     max_frame: usize,
     timeout: Duration,
-) -> std::io::Result<Option<Vec<u8>>> {
+) -> std::io::Result<Option<Vec<u8>>>
+where
+    S: tokio::io::AsyncRead + Unpin,
+{
     let mut prefix = [0u8; 4];
     let first = match tokio::time::timeout(timeout, stream.read(&mut prefix[..1])).await {
         Err(_) => return Err(timeout_error("read")),
@@ -253,11 +261,14 @@ async fn read_frame(
     Ok(Some(body))
 }
 
-async fn write_response(
-    stream: &mut TcpStream,
+async fn write_response<S>(
+    stream: &mut S,
     response: &Response,
     timeout: Duration,
-) -> std::io::Result<()> {
+) -> std::io::Result<()>
+where
+    S: tokio::io::AsyncWrite + Unpin,
+{
     let frame = protocol::encode_frame(&protocol::encode_response(response));
     tokio::time::timeout(timeout, stream.write_all(&frame))
         .await

@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use oag_listend::http::HttpCarrier;
 use oag_listend::udp::UdpCarrier;
+use oag_listend::unix::UnixCarrier;
 use oag_listend::{AudioStore, ListendServer, DEFAULT_MAX_BYTES};
 use tokio::sync::Mutex;
 
@@ -18,6 +19,7 @@ struct Args {
     listen: String,
     http: Option<String>,
     udp: Option<String>,
+    unix: Option<String>,
     dir: Option<String>,
     seed: u64,
     max_bytes: usize,
@@ -29,6 +31,7 @@ fn parse_args() -> Args {
         listen: "0.0.0.0:7100".to_string(),
         http: None,
         udp: None,
+        unix: None,
         dir: None,
         seed: default_seed(),
         max_bytes: DEFAULT_MAX_BYTES,
@@ -40,6 +43,7 @@ fn parse_args() -> Args {
             "--listen" => args.listen = it.next().expect("--listen needs an address"),
             "--http" => args.http = Some(it.next().expect("--http needs an address")),
             "--udp" => args.udp = Some(it.next().expect("--udp needs an address")),
+            "--unix" => args.unix = Some(it.next().expect("--unix needs a socket path")),
             "--dir" => args.dir = Some(it.next().expect("--dir needs a directory")),
             "--seed" => {
                 args.seed = it
@@ -76,6 +80,7 @@ fn usage() -> String {
            --listen ADDR    native protocol bind address (default 0.0.0.0:7100)\n\
            --http ADDR      also serve HTTP at ADDR (GET /audio/{{hash}}, POST /audio)
            --udp ADDR       also serve the native protocol over UDP datagrams
+           --unix PATH      also serve the native protocol on a Unix domain socket
            --dir PATH       persist the audio content-addressed under PATH\n\
            --seed U64       seed for the startup sounds (default: clock)\n\
            --max-bytes N    store bound in bytes (default {DEFAULT_MAX_BYTES})\n\
@@ -150,6 +155,21 @@ async fn main() {
     };
     let udp_shutdown = udp.as_ref().map(|(carrier, _)| carrier.shutdown_handle());
 
+    let unix = match &args.unix {
+        Some(path) => {
+            let (carrier, bound) = UnixCarrier::bind_shared(path, Arc::clone(&store))
+                .await
+                .unwrap_or_else(|e| {
+                    eprintln!("oag-listend: cannot bind unix {path}: {e}");
+                    std::process::exit(1);
+                });
+            println!("oag-listend unix on {bound:?}");
+            Some((carrier, bound))
+        }
+        None => None,
+    };
+    let unix_shutdown = unix.as_ref().map(|(carrier, _)| carrier.shutdown_handle());
+
     if !args.no_generate {
         for hash in server.publish_generated(args.seed, oag_listend::server::STARTUP_SOUNDS).await {
             println!("  generated {}", &hash[..16]);
@@ -168,6 +188,7 @@ async fn main() {
     let native_run = tokio::spawn(async move { server.run().await });
     let http_run = http.map(|(carrier, _)| tokio::spawn(async move { carrier.run().await }));
     let udp_run = udp.map(|(carrier, _)| tokio::spawn(async move { carrier.run().await }));
+    let unix_run = unix.map(|(carrier, _)| tokio::spawn(async move { carrier.run().await }));
 
     let _ = tokio::signal::ctrl_c().await;
     println!("oag-listend shutting down");
@@ -178,11 +199,17 @@ async fn main() {
     if let Some(handle) = udp_shutdown {
         handle.shutdown();
     }
+    if let Some(handle) = unix_shutdown {
+        handle.shutdown();
+    }
     let _ = tokio::time::timeout(Duration::from_secs(5), native_run).await;
     if let Some(run) = http_run {
         let _ = tokio::time::timeout(Duration::from_secs(5), run).await;
     }
     if let Some(run) = udp_run {
+        let _ = tokio::time::timeout(Duration::from_secs(5), run).await;
+    }
+    if let Some(run) = unix_run {
         let _ = tokio::time::timeout(Duration::from_secs(5), run).await;
     }
 }

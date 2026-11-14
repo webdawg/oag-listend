@@ -34,6 +34,7 @@ One additional individual directive is recorded for the next implementation step
 ## Turn it on
 
     cargo run -p oag-listend -- --listen 127.0.0.1:7100 --http 127.0.0.1:7101 --udp 127.0.0.1:7120 \
+        --unix /run/oag-listend/audio.sock \
         --dir /var/lib/oag-listend --seed 20261112
 
 The daemon binds, prints four generated sounds, and serves until interrupted. Then exchange audio
@@ -74,7 +75,7 @@ client can discover what exists. Verified by hand with `curl` and a raw socket.
 
 ## Status
 
-**Serves, and survives a restart.** Three carriers are live and tested: 32 unit tests plus 9
+**Serves, and survives a restart.** Four carriers are live and tested: 32 unit tests plus 11
 end-to-end tests (`cargo test -p oag-listend`). The native protocol, HTTP, and UDP share one store,
 and all were verified by hand: audio posted to HTTP came back byte-identical, `push_pull` verified
 over TCP and UDP, HTML labelled `audio/wav` was refused on every carrier, and a daemon restarted

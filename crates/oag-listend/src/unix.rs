@@ -1,0 +1,89 @@
+//! The Unix domain socket carrier: the same audio surface over a filesystem socket.
+//!
+//! A local process reaches the daemon by path, not by port. That is a genuinely different way to
+//! connect -- no port to allocate or collide, and the file's permissions decide who may connect --
+//! and it is why this carrier exists rather than being a fourth TCP listener.
+//!
+//! The session loop is [`crate::server`]'s, unchanged: same frame protocol, same bounds, same
+//! inbound rule. The only thing this file adds is the listener and the socket path.
+
+#![forbid(unsafe_code)]
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
+
+use tokio::net::UnixListener;
+use tokio::sync::{Mutex, watch};
+
+use crate::server::{ShutdownHandle, serve_session};
+use crate::AudioStore;
+
+pub const READ_TIMEOUT: Duration = Duration::from_secs(10);
+pub const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+pub const MAX_CONNECTIONS: usize = 64;
+
+pub struct UnixCarrier {
+    store: Arc<Mutex<AudioStore>>,
+    listener: UnixListener,
+    path: PathBuf,
+    shutdown_tx: watch::Sender<bool>,
+}
+
+impl UnixCarrier {
+    /// Bind `path`. An existing socket file is removed first, because a stale socket from a
+    /// killed daemon would otherwise make startup fail forever.
+    pub async fn bind_shared(
+        path: impl Into<PathBuf>,
+        store: Arc<Mutex<AudioStore>>,
+    ) -> std::io::Result<(Self, PathBuf)> {
+        let path = path.into();
+        if path.exists() {
+            let _ = std::fs::remove_file(&path);
+        }
+        let listener = UnixListener::bind(&path)?;
+        let (shutdown_tx, _) = watch::channel(false);
+        Ok((Self { store, listener, path: path.clone(), shutdown_tx }, path))
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn shutdown_handle(&self) -> ShutdownHandle {
+        ShutdownHandle::new(self.shutdown_tx.clone())
+    }
+
+    pub async fn run(&self) -> std::io::Result<()> {
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
+        let mut shutdown_rx = self.shutdown_tx.subscribe();
+        loop {
+            tokio::select! {
+                _ = shutdown_rx.changed() => break,
+                accepted = self.listener.accept() => {
+                    let (stream, _peer) = match accepted {
+                        Ok(pair) => pair,
+                        Err(_) => continue,
+                    };
+                    let Ok(permit) = semaphore.clone().acquire_owned().await else { break };
+                    let store = Arc::clone(&self.store);
+                    tokio::spawn(async move {
+                        let _permit = permit;
+                        // The same session loop as TCP: same protocol, bounds, and inbound rule.
+                        let _ = serve_session(
+                            stream,
+                            store,
+                            READ_TIMEOUT,
+                            WRITE_TIMEOUT,
+                            crate::protocol::MAX_FRAME_BYTES,
+                        )
+                        .await;
+                    });
+                }
+            }
+        }
+        // Do not leave a dead socket file behind for the next start to trip over.
+        let _ = std::fs::remove_file(&self.path);
+        Ok(())
+    }
+}
