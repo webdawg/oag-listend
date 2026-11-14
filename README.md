@@ -37,7 +37,9 @@ One additional individual directive is recorded for the next implementation step
         --unix /run/oag-listend/audio.sock \
         --dir /var/lib/oag-listend --seed 20261112
 
-The daemon binds, prints four generated sounds, and serves until interrupted. Then exchange audio
+The daemon binds, prints four generated sounds, and serves until interrupted. The generated set
+seeds an empty store only -- a restart with `--dir` does not add more -- and a generated sound the
+store refuses is printed as a rejection rather than dropped. Then exchange audio
 with it over the native protocol:
 
     cargo run -p oag-listend --example push_pull -- --addr 127.0.0.1:7100
@@ -90,7 +92,7 @@ return, the Unix socket is removed, and the process exits 0.
 
 ## Status
 
-**Serves, and survives a restart.** Four carriers are live and tested: 33 unit tests plus 13
+**Serves, and survives a restart.** Four carriers are live and tested: 35 unit tests plus 13
 end-to-end tests (`cargo test -p oag-listend`). Runs as a systemd service (`scripts/oag-listend.service`)
 and shuts down cleanly on SIGINT and SIGTERM. The native protocol, HTTP, and UDP share one store,
 and all were verified by hand: audio posted to HTTP came back byte-identical, `push_pull` verified

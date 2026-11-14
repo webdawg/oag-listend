@@ -28,6 +28,15 @@ pub const MAX_CONNECTIONS: usize = 64;
 /// How many generated sounds a fresh daemon publishes at startup.
 pub const STARTUP_SOUNDS: usize = 4;
 
+/// What startup generation did. `rejected` is reported rather than dropped: a generated sound
+/// that the store refuses is a fact the operator should see, not a silent no-op.
+#[derive(Debug, Default)]
+pub struct GeneratedReport {
+    pub accepted: Vec<String>,
+    pub rejected: Vec<String>,
+    pub skipped_non_empty: bool,
+}
+
 /// A cloneable way to ask a running daemon to stop. Held by whoever started it, so the server
 /// itself can be moved into its accept task without losing the off switch.
 #[derive(Clone)]
@@ -96,14 +105,29 @@ impl ListendServer {
     /// Publish a small seeded set of generated sounds, through [`crate::AudioStore::accept`].
     ///
     /// Generated sound is not trusted audio: it goes through the same inbound rule a carrier's
-    /// bytes do, so the startup path cannot become a way around the rule. Returns the hashes
-    /// accepted.
-    pub async fn publish_generated(&self, seed: u64, count: usize) -> Vec<String> {
+    /// bytes do, so the startup path cannot become a way around the rule.
+    ///
+    /// The set is a *seed for an empty store*, not a recurring addition. A restart with a
+    /// persistent store would otherwise add four more sounds every time -- and with the default
+    /// clock seed they would be new hashes, so the generated set would slowly evict the operator's
+    /// own audio. A non-empty store is left alone.
+    pub async fn publish_generated(&self, seed: u64, count: usize) -> GeneratedReport {
         let mut store = self.store.lock().await;
-        crate::wav::sounds(seed, count)
-            .into_iter()
-            .filter_map(|bytes| store.accept(bytes, Some("audio/wav".to_string())).ok())
-            .collect()
+        if !store.is_empty() {
+            return GeneratedReport {
+                accepted: Vec::new(),
+                rejected: Vec::new(),
+                skipped_non_empty: true,
+            };
+        }
+        let mut report = GeneratedReport::default();
+        for bytes in crate::wav::sounds(seed, count) {
+            match store.accept(bytes, Some("audio/wav".to_string())) {
+                Ok(hash) => report.accepted.push(hash),
+                Err(e) => report.rejected.push(e.to_string()),
+            }
+        }
+        report
     }
 
     pub fn shutdown_handle(&self) -> ShutdownHandle {
@@ -356,6 +380,35 @@ mod tests {
         }
         let missing = handle(Request::Fetch { content_hash: "00".repeat(32) }, &store).await;
         assert_eq!(missing, Response::NotFound { content_hash: "00".repeat(32) });
+    }
+
+    #[tokio::test]
+    async fn generation_seeds_only_an_empty_store() {
+        let store = Arc::new(Mutex::new(AudioStore::default()));
+        let (server, _addr) = super::ListendServer::bind_shared("127.0.0.1:0", Arc::clone(&store))
+            .await
+            .unwrap();
+        let first = server.publish_generated(1, 4).await;
+        assert_eq!(first.accepted.len(), 4);
+        assert!(!first.skipped_non_empty);
+        assert_eq!(store.lock().await.len(), 4);
+
+        let second = server.publish_generated(2, 4).await;
+        assert!(second.accepted.is_empty());
+        assert!(second.skipped_non_empty, "a non-empty store must not be added to");
+        assert_eq!(store.lock().await.len(), 4, "a restart must not grow the store");
+    }
+
+    #[tokio::test]
+    async fn a_generated_sound_the_store_refuses_is_reported() {
+        let store = Arc::new(Mutex::new(AudioStore::with_capacity(1)));
+        let (server, _addr) = super::ListendServer::bind_shared("127.0.0.1:0", Arc::clone(&store))
+            .await
+            .unwrap();
+        let report = server.publish_generated(1, 4).await;
+        assert!(report.accepted.is_empty());
+        assert_eq!(report.rejected.len(), 4, "every refusal must be reported");
+        assert!(report.rejected.iter().all(|r| r.contains("larger than")));
     }
 
     #[tokio::test]

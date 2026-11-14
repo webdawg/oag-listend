@@ -171,8 +171,16 @@ async fn main() {
     let unix_shutdown = unix.as_ref().map(|(carrier, _)| carrier.shutdown_handle());
 
     if !args.no_generate {
-        for hash in server.publish_generated(args.seed, oag_listend::server::STARTUP_SOUNDS).await {
+        let generated =
+            server.publish_generated(args.seed, oag_listend::server::STARTUP_SOUNDS).await;
+        for hash in &generated.accepted {
             println!("  generated {}", &hash[..16]);
+        }
+        for reason in &generated.rejected {
+            eprintln!("  generated sound rejected: {reason}");
+        }
+        if generated.skipped_non_empty {
+            println!("  store already holds audio; not generating a startup set");
         }
     }
 
