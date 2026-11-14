@@ -17,13 +17,19 @@ One stable **audio surface** behind pluggable **carriers**. The audio is the ser
 (TCP, HTTP, UDP, IPFS, Reticulum, a protocol that does not exist yet) is one way to reach it. A
 new network is a new carrier, never a change to the audio.
 
-Two rules, both enforced at the surface so no carrier can forget them:
+Two implemented rules, both enforced at the surface so no carrier can forget them:
 
 - **Outbound:** an item is identified by the BLAKE3 of its bytes, so a receiver on any carrier can
   verify what it got.
 - **Inbound:** only audio is accepted. `AudioStore::accept` admits bytes only if they carry a
   recognised audio signature -- checked on the bytes, never on a declared type. Everything else is
   rejected before it is stored.
+
+One additional individual directive is recorded for the next implementation step:
+
+- **Even pings are music:** every liveness ping must answer with audio rather than an empty control
+  pong. The first canonical ping will be a generated WAV rendition of “Twinkle, Twinkle, Little
+  Star.” See `SPEC.md` and `USER_INPUT_RECORD.md` Entry 3.
 
 ## Turn it on
 

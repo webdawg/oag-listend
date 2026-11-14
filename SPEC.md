@@ -36,6 +36,30 @@ The founding statement makes two claims that shape the architecture:
    that implements the seam. The audio surface is the stable contract; everything in front of it
    is replaceable.
 
+## Individual directive: even pings are music
+
+> even pings are music - start with twinkle twinkle little star
+
+A liveness probe, heartbeat, keepalive, or carrier-level ping must not introduce a silent control
+plane beside the audio service. When oag-listend answers a ping, the answer itself is audio. The
+first canonical ping sound is a generated WAV rendition of the opening phrase of **“Twinkle,
+Twinkle, Little Star.”** A future carrier may choose a different encoding appropriate to its
+network, but it must preserve the musical content rather than replacing it with an empty pong.
+
+This directive is recorded now but is not implemented by the current carriers yet: the native
+protocol's `Hello` response is metadata, not the future musical ping. Compatibility must be
+preserved by adding an explicit audio ping rather than silently changing the existing `Hello`
+frame.
+
+Implementation TODO:
+
+- [ ] Add a deterministic Twinkle melody generator to `crates/oag-listend/src/wav.rs`.
+- [ ] Add a native protocol ping operation whose response is the Twinkle audio item and its BLAKE3
+      content hash.
+- [ ] Expose the same musical liveness response on HTTP and every later carrier.
+- [ ] Test that a ping response is recognized audio, hash-verifiable, bounded, and never an empty
+      metadata-only pong.
+
 ## The inbound rule
 
 The daemon listens on every carrier, and the only thing it accepts is audio. Anything else that

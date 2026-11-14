@@ -13,3 +13,7 @@ The operator's founding statements, recorded verbatim. Nothing here is paraphras
 ## Entry 2 — the inbound rule (2026-11-12)
 
 > the service also listens too all incoming but only accepting audio as an input and nothing else
+
+## Entry 3 — pings are music (2026-11-14)
+
+> even pings are music - start with twinkle twinkle little star
