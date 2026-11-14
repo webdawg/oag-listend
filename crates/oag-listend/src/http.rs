@@ -140,6 +140,7 @@ async fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<HttpRequ
             let mut content_length = 0usize;
             let mut content_type = None;
             let mut range = None;
+            let mut expect_continue = false;
             for line in lines {
                 if let Some((name, value)) = line.split_once(':') {
                     let value = value.trim();
@@ -149,8 +150,23 @@ async fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<HttpRequ
                         content_type = Some(value.to_string());
                     } else if name.trim().eq_ignore_ascii_case("range") {
                         range = Some(value.to_string());
+                    } else if name.trim().eq_ignore_ascii_case("expect")
+                        && value.eq_ignore_ascii_case("100-continue")
+                    {
+                        expect_continue = true;
                     }
                 }
+            }
+            if expect_continue {
+                // A client that is about to send a body it may not want to send needs an answer
+                // before it commits. Without this, curl waits a second on every large publish.
+                let interim = b"HTTP/1.1 100 Continue\r\n\r\n";
+                tokio::time::timeout(IO_TIMEOUT, stream.write_all(interim))
+                    .await
+                    .map_err(|_| timeout_error())??;
+                tokio::time::timeout(IO_TIMEOUT, stream.flush())
+                    .await
+                    .map_err(|_| timeout_error())??;
             }
             let body = head[pos + 4..].to_vec();
             let mut body = body;
@@ -210,8 +226,28 @@ async fn route(request: HttpRequest, store: &Arc<Mutex<AudioStore>>) -> HttpResp
             let mut response = HttpResponse::text(
                 200,
                 "OK",
-                format!("oag-listend\nitems: {count}\nonly audio is accepted\n").as_bytes(),
+                format!(
+                    "oag-listend\nitems: {count}\nGET /audio for the content hashes\n\
+                     only audio is accepted\n"
+                )
+                .as_bytes(),
             );
+            if head_only {
+                response.content_length = Some(response.body.len());
+                response.body.clear();
+            }
+            response
+        }
+        ("GET", "/audio") => {
+            // The list operation, on HTTP: a client that only fetches can discover what exists
+            // without already knowing a hash.
+            let hashes = store.lock().await.hashes();
+            let mut body = String::new();
+            for hash in &hashes {
+                body.push_str(hash);
+                body.push('\n');
+            }
+            let mut response = HttpResponse::text(200, "OK", body.as_bytes());
             if head_only {
                 response.content_length = Some(response.body.len());
                 response.body.clear();

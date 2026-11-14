@@ -296,3 +296,59 @@ async fn content_type() {
         .expect("join")
         .expect("run");
 }
+
+/// A client that only fetches must be able to discover what exists without already knowing a hash,
+/// and a client publishing a large body must get a `100 Continue` before it commits to sending it.
+#[tokio::test]
+async fn http_lists_the_audio_and_honours_expect_continue() {
+    tokio::time::timeout(BOUND, discover()).await.expect("discovery exchange within the bound")
+}
+
+async fn discover() {
+    let store = Arc::new(Mutex::new(AudioStore::default()));
+    let (carrier, addr) = HttpCarrier::bind_shared("127.0.0.1:0", Arc::clone(&store))
+        .await
+        .expect("bind http");
+    let shutdown = carrier.shutdown_handle();
+    let run = tokio::spawn(async move { carrier.run().await });
+
+    let tone = wav::generate(12, wav::Sound::Tone);
+    let posted = http_post(addr, &tone, "audio/wav").await;
+    let hash = String::from_utf8_lossy(body_of(&posted)).trim().to_string();
+
+    // GET /audio is the list operation over HTTP: one hash per line.
+    let listing = http(addr, "GET /audio HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").await;
+    assert_eq!(status_of(&listing), 200, "{}", String::from_utf8_lossy(&listing));
+    assert_eq!(body_of(&listing), format!("{hash}\n").as_bytes());
+
+    // GET / points at it.
+    let root = http(addr, "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").await;
+    assert!(String::from_utf8_lossy(&root).contains("GET /audio"));
+
+    // A POST that says Expect: 100-continue is answered before the body is read.
+    let mut stream = TcpStream::connect(addr).await.expect("connect");
+    let head = format!(
+        "POST /audio HTTP/1.1\r\nHost: x\r\nContent-Type: audio/wav\r\nContent-Length: {}\r\nExpect: 100-continue\r\nConnection: close\r\n\r\n",
+        tone.len()
+    );
+    stream.write_all(head.as_bytes()).await.expect("write head");
+    stream.flush().await.expect("flush head");
+    let mut interim = [0u8; 25];
+    let n = tokio::time::timeout(BOUND, stream.read_exact(&mut interim))
+        .await
+        .expect("100 within the bound")
+        .expect("read interim");
+    assert_eq!(&interim[..n], b"HTTP/1.1 100 Continue\r\n\r\n");
+    stream.write_all(&tone).await.expect("write body");
+    stream.flush().await.expect("flush body");
+    let mut raw = Vec::new();
+    tokio::time::timeout(BOUND, stream.read_to_end(&mut raw)).await.expect("bound").expect("read");
+    assert_eq!(status_of(&raw), 201, "{}", String::from_utf8_lossy(&raw));
+
+    shutdown.shutdown();
+    tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .expect("shutdown bound")
+        .expect("join")
+        .expect("run");
+}
