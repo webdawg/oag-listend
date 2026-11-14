@@ -348,7 +348,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_listing_is_in_insertion_order() {
+    async fn a_listing_is_sorted_so_it_survives_a_restart() {
         let store = Arc::new(Mutex::new(AudioStore::default()));
         let a = crate::wav::generate(10, crate::wav::Sound::Tone);
         let b = crate::wav::generate(11, crate::wav::Sound::Noise);
@@ -359,10 +359,12 @@ mod tests {
             .await
             .published_hash();
         let listing = handle(Request::List, &store).await;
+        let mut expected = vec![ha.clone(), hb.clone()];
+        expected.sort();
         assert_eq!(
             listing,
-            Response::Listing { content_hashes: vec![ha, hb] },
-            "a listing must be reproducible for a client that walks it"
+            Response::Listing { content_hashes: expected },
+            "a listing must be sorted, so the walk is the same across a restart"
         );
     }
 

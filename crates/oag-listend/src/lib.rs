@@ -362,17 +362,17 @@ impl AudioStore {
         self.bytes_held
     }
 
-    /// Every content hash currently held, in the order the items arrived.
+    /// Every content hash currently held, sorted by hash.
     ///
-    /// Order is part of the contract: a client that walks the listing twice must see the same
-    /// walk, and a listing whose order changed between requests would be a reproducibility
-    /// hazard with no benefit.
+    /// Sorted rather than insertion order because a restart rebuilds the store in
+    /// directory-iteration order, which is filesystem-dependent. Insertion order is reproducible
+    /// within a run and not across one; a sorted order is reproducible always, and a listing whose
+    /// walk changes between a client's requests -- or across a daemon restart -- is a
+    /// reproducibility hazard with no benefit.
     pub fn hashes(&self) -> Vec<String> {
-        self.order
-            .iter()
-            .filter(|hash| self.items.contains_key(*hash))
-            .cloned()
-            .collect()
+        let mut hashes: Vec<String> = self.items.keys().cloned().collect();
+        hashes.sort();
+        hashes
     }
 
     /// The backing directory, if this store persists.

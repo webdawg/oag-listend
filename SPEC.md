@@ -144,6 +144,13 @@ The bound is enforced on the way in: `accept` refuses audio larger than `--max-b
 writing it and immediately evicting it, and a startup file larger than the bound is skipped without
 being read. A bound that is only checked after the read or write is not a bound.
 
+## Listing order
+
+The list operation returns content hashes sorted by hash. Insertion order is reproducible within a
+run but not across a restart, because a restart rebuilds the store in directory-iteration order;
+a sorted walk is reproducible always. A listing whose order changes between a client's requests --
+or across a daemon restart -- is a reproducibility hazard with no benefit.
+
 ## The Unix domain socket carrier
 
 `--unix PATH` serves the same frame protocol over a filesystem socket, so a local process reaches

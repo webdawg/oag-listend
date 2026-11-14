@@ -104,3 +104,35 @@ async fn restart(dir: &std::path::Path) {
     shutdown.shutdown();
     tokio::time::timeout(Duration::from_secs(5), run).await.expect("bound").expect("join").expect("run");
 }
+
+/// The listing a client walks must be the same walk after a restart. Insertion order is not
+/// surviveable (a restart rebuilds the store in directory-iteration order), so the listing is
+/// sorted by hash.
+#[tokio::test]
+async fn the_listing_walk_is_the_same_after_a_restart() {
+    let dir = temp_dir("listing");
+    let outcome = tokio::time::timeout(BOUND, listing(&dir)).await;
+    let _ = std::fs::remove_dir_all(&dir);
+    outcome.expect("the listing exchange must complete within the bound")
+}
+
+async fn listing(dir: &std::path::Path) {
+    let mut first_walk;
+    {
+        let (mut store, _) = AudioStore::with_directory(dir, 1024 * 1024).expect("open");
+        for seed in [50, 17, 91, 3] {
+            store.accept(wav::generate(seed, wav::Sound::Tone), None).expect("accept");
+        }
+        first_walk = store.hashes();
+        let mut sorted = first_walk.clone();
+        sorted.sort();
+        assert_eq!(first_walk, sorted, "the listing is sorted");
+    }
+    let (store, report) = AudioStore::with_directory(dir, 1024 * 1024).expect("reopen");
+    assert_eq!(report.loaded, 4);
+    assert_eq!(
+        store.hashes(),
+        first_walk,
+        "a restart must not change the walk a client sees"
+    );
+}
