@@ -177,6 +177,14 @@ async fn shared_store() {
 /// A player or a browser uses ranges to seek and to probe; the carrier must answer with a partial
 /// body, a correct Content-Range, and 416 when the range is unsatisfiable. HEAD must answer with
 /// headers and no body.
+async fn get_query(addr: std::net::SocketAddr, query: &str) -> Vec<u8> {
+    http(
+        addr,
+        &format!("GET /audio?{query} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"),
+    )
+    .await
+}
+
 async fn get_range(addr: std::net::SocketAddr, hash: &str, range: Option<&str>) -> Vec<u8> {
     let mut request = format!("GET /audio/{hash} HTTP/1.1\r\nHost: x\r\n");
     if let Some(range) = range {
@@ -397,6 +405,66 @@ async fn cors() {
             String::from_utf8_lossy(&response)
         );
     }
+
+    shutdown.shutdown();
+    tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .expect("shutdown bound")
+        .expect("join")
+        .expect("run");
+}
+
+/// A query string is not part of the path, and the HTTP listing is paginated like the native one:
+/// `?offset=&limit=` with `X-Total-Count`/`X-Offset` so a client can walk the store.
+#[tokio::test]
+async fn http_query_strings_and_paginated_listing() {
+    tokio::time::timeout(BOUND, query()).await.expect("query exchange within the bound")
+}
+
+async fn query() {
+    let store = Arc::new(Mutex::new(AudioStore::default()));
+    let (carrier, addr) = HttpCarrier::bind_shared("127.0.0.1:0", Arc::clone(&store))
+        .await
+        .expect("bind http");
+    let shutdown = carrier.shutdown_handle();
+    let run = tokio::spawn(async move { carrier.run().await });
+
+    let mut hashes = Vec::new();
+    for seed in 0..3u64 {
+        let wav = wav::generate(seed, wav::Sound::Tone);
+        let posted = http_post(addr, &wav, "audio/wav").await;
+        hashes.push(String::from_utf8_lossy(body_of(&posted)).trim().to_string());
+    }
+    hashes.sort();
+
+    let first = get_query(addr, "offset=0&limit=2").await;
+    assert_eq!(status_of(&first), 200);
+    assert!(head_contains(&first, "x-total-count: 3"), "{}", String::from_utf8_lossy(&first));
+    assert!(head_contains(&first, "x-offset: 0"));
+    assert_eq!(body_of(&first), format!("{}\n{}\n", hashes[0], hashes[1]).as_bytes());
+
+    let second = get_query(addr, "offset=2&limit=2").await;
+    assert!(head_contains(&second, "x-offset: 2"));
+    assert_eq!(body_of(&second), format!("{}\n", hashes[2]).as_bytes());
+
+    // An offset past the end is clamped, not wrapped.
+    let past = get_query(addr, "offset=99&limit=2").await;
+    assert!(head_contains(&past, "x-offset: 3"), "{}", String::from_utf8_lossy(&past));
+    assert!(body_of(&past).is_empty());
+
+    // An unparsable limit falls back rather than failing.
+    let bad = get_query(addr, "limit=abc").await;
+    assert_eq!(String::from_utf8_lossy(body_of(&bad)).lines().count(), 3);
+
+    // A query string on another route is ignored, not a 404.
+    let fetched = http(
+        addr,
+        &format!("GET /audio/{}?x=1 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", hashes[0]),
+    )
+    .await;
+    assert_eq!(status_of(&fetched), 200);
+    let missing = http(addr, "GET /nope?x=1 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").await;
+    assert_eq!(status_of(&missing), 404);
 
     shutdown.shutdown();
     tokio::time::timeout(Duration::from_secs(5), run)

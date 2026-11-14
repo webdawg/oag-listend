@@ -51,6 +51,7 @@ or over HTTP, with any client:
     curl http://127.0.0.1:7101/audio/<hash>                            # -> the same bytes
     curl http://127.0.0.1:7101/                                        # -> what this is
     curl http://127.0.0.1:7101/audio                                  # -> the content hashes, sorted
+    curl "http://127.0.0.1:7101/audio?offset=2&limit=2"               # -> one page, with X-Total-Count
     curl -I http://127.0.0.1:7101/audio/<hash>                         # -> headers, no body
     curl -r 0-1023 http://127.0.0.1:7101/audio/<hash>                  # -> 206, a byte range
 
@@ -94,7 +95,7 @@ return, the Unix socket is removed, and the process exits 0.
 
 ## Status
 
-**Serves, and survives a restart.** Four carriers are live and tested: 37 unit tests plus 13
+**Serves, and survives a restart.** Four carriers are live and tested: 37 unit tests plus 14
 end-to-end tests (`cargo test -p oag-listend`). Runs as a systemd service (`scripts/oag-listend.service`)
 and shuts down cleanly on SIGINT and SIGTERM. The native protocol, HTTP, and UDP share one store,
 and all were verified by hand: audio posted to HTTP came back byte-identical, `push_pull` verified

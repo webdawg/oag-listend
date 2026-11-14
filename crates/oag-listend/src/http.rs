@@ -223,6 +223,9 @@ struct HttpResponse {
     /// HEAD sends the entity's length with no body, so the length is carried explicitly rather
     /// than derived from an emptied body.
     content_length: Option<usize>,
+    /// Listing pagination, for a client that is walking the store.
+    total_count: Option<usize>,
+    offset: Option<usize>,
     body: Vec<u8>,
 }
 
@@ -235,7 +238,13 @@ async fn route(request: HttpRequest, store: &Arc<Mutex<AudioStore>>) -> HttpResp
     let head_only = request.method == "HEAD";
     let method = if head_only { "GET" } else { request.method.as_str() };
 
-    match (method, request.path.as_str()) {
+    // A query string is not part of the path. Without this, `GET /audio?offset=0` is a 404.
+    let (path, query) = match request.path.split_once('?') {
+        Some((path, query)) => (path, Some(query)),
+        None => (request.path.as_str(), None),
+    };
+
+    match (method, path) {
         ("GET", "/") => {
             let count = store.lock().await.len();
             let mut response = HttpResponse::text(
@@ -255,15 +264,23 @@ async fn route(request: HttpRequest, store: &Arc<Mutex<AudioStore>>) -> HttpResp
             response
         }
         ("GET", "/audio") => {
-            // The list operation, on HTTP: a client that only fetches can discover what exists
-            // without already knowing a hash.
+            // The list operation, on HTTP, paginated like the native one: a client that only
+            // fetches can discover what exists without already knowing a hash, and the response
+            // reports where the page starts and how much remains.
+            let (offset, limit) = parse_query(query);
             let hashes = store.lock().await.hashes();
+            let total = hashes.len();
+            let limit = limit.clamp(1, crate::protocol::MAX_LIST_LIMIT);
+            let offset = offset.min(total);
+            let end = (offset + limit).min(total);
             let mut body = String::new();
-            for hash in &hashes {
+            for hash in &hashes[offset..end] {
                 body.push_str(hash);
                 body.push('\n');
             }
             let mut response = HttpResponse::text(200, "OK", body.as_bytes());
+            response.total_count = Some(total);
+            response.offset = Some(offset);
             if head_only {
                 response.content_length = Some(response.body.len());
                 response.body.clear();
@@ -295,6 +312,8 @@ async fn route(request: HttpRequest, store: &Arc<Mutex<AudioStore>>) -> HttpResp
                         content_range: None,
                         accept_ranges: true,
                         content_length: None,
+                        total_count: None,
+                        offset: None,
                         body: item.bytes.clone(),
                     };
                     if head_only {
@@ -310,6 +329,8 @@ async fn route(request: HttpRequest, store: &Arc<Mutex<AudioStore>>) -> HttpResp
                     content_range: Some(format!("bytes */{}", item.bytes.len())),
                     accept_ranges: true,
                     content_length: None,
+                    total_count: None,
+                    offset: None,
                     body: b"range not satisfiable".to_vec(),
                 },
                 Some(Ok((start, end))) => {
@@ -324,6 +345,8 @@ async fn route(request: HttpRequest, store: &Arc<Mutex<AudioStore>>) -> HttpResp
                         )),
                         accept_ranges: true,
                         content_length: None,
+                        total_count: None,
+                        offset: None,
                         body: slice,
                     };
                     if head_only {
@@ -346,6 +369,24 @@ async fn route(request: HttpRequest, store: &Arc<Mutex<AudioStore>>) -> HttpResp
         }
         _ => not_found(),
     }
+}
+
+/// `offset` and `limit` from a query string. An absent or unparsable value falls back to the
+/// default; a `limit` above the carrier's cap is clamped by the caller.
+fn parse_query(query: Option<&str>) -> (usize, usize) {
+    let mut offset = 0usize;
+    let mut limit = crate::protocol::MAX_LIST_LIMIT;
+    let Some(query) = query else { return (offset, limit) };
+    for pair in query.split('&') {
+        if let Some((key, value)) = pair.split_once('=') {
+            if key == "offset" {
+                offset = value.parse().unwrap_or(offset);
+            } else if key == "limit" {
+                limit = value.parse().unwrap_or(limit);
+            }
+        }
+    }
+    (offset, limit)
 }
 
 fn not_found() -> HttpResponse {
@@ -400,6 +441,8 @@ impl HttpResponse {
             content_range: None,
             accept_ranges: false,
             content_length: None,
+            total_count: None,
+            offset: None,
             body: body.to_vec(),
         }
     }
@@ -415,6 +458,12 @@ async fn write_response(stream: &mut TcpStream, response: &HttpResponse) -> std:
         out.extend_from_slice(format!("Content-Range: {range}\r\n").as_bytes());
     } else if response.accept_ranges {
         out.extend_from_slice(b"Accept-Ranges: bytes\r\n");
+    }
+    if let Some(total) = response.total_count {
+        out.extend_from_slice(format!("X-Total-Count: {total}\r\n").as_bytes());
+    }
+    if let Some(offset) = response.offset {
+        out.extend_from_slice(format!("X-Offset: {offset}\r\n").as_bytes());
     }
     // The service holds no credentials and serves public audio, so any origin may read it.
     out.extend_from_slice(b"Access-Control-Allow-Origin: *\r\n");
