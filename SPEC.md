@@ -2,8 +2,11 @@
 
 **License: GNU Affero General Public License v3.0 or later (AGPL-3.0-or-later).**
 
-**Status: founded, not yet implemented.** This file records the idea and the shape it implies.
-No audio is served yet. The status line will change when a carrier serves its first byte.
+**Status: serves.** The TCP carrier is live: the daemon binds, publishes a small seeded set of
+generated sounds, accepts audio over a length-prefixed frame protocol, and serves it back with the
+BLAKE3 of the bytes. The end-to-end test `the_daemon_serves_audio_and_refuses_everything_else` is
+green, and `examples/push_pull.rs` demonstrates it against a running process. The next carrier is
+HTTP; the audio rules have not moved.
 
 ## The idea, recorded verbatim
 
@@ -63,8 +66,24 @@ surface is the guarantee.
 - **Not a single protocol.** The day it is "the HTTP audio server" is the day it has failed the
   founding statement.
 
-## First slice
+## The carrier that exists: TCP
 
-The smallest honest instance: one carrier (TCP, borrowed from the imagination layer's seam), one
-audio item, served end to end with its content hash verified by the receiver. Everything after
-that is another carrier.
+`oag-listend` (the binary) binds an address, and `examples/push_pull.rs` exchanges audio with it.
+The protocol is length-prefixed frames with exactly four operations -- hello, publish, fetch,
+list -- and nothing else. Every inbound publish goes through `AudioStore::accept`; every outbound
+fetch returns the bytes and the hash they must verify against.
+
+    oag-listend --listen 0.0.0.0:7100 --seed 20261112
+    cargo run -p oag-listend --example push_pull -- --addr 127.0.0.1:7100
+
+Bounds: every read and write has a 10 s timeout, a frame may not exceed 16 MiB, the store is
+capped by `--max-bytes` (1 GiB by default), and at most 64 sessions are served at once. A fresh
+daemon publishes four generated sounds (silence, tone, noise) through the same inbound rule a
+client's bytes use, so a fetch-only client still receives audio.
+
+## Next carrier
+
+HTTP: `GET /audio/{hash}` serves the bytes with an audio content type, `POST /audio` accepts a
+body through `AudioStore::accept`. It is a new file and not a new set of rules. After that,
+whatever the imagination layer's `Transport` seam already offers. A new carrier must reuse
+`AudioStore::accept` and must not grow the operation set.

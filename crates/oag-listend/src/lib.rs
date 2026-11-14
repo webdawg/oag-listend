@@ -13,13 +13,22 @@
 //! surface so no carrier can forget it: [`AudioStore::accept`] admits bytes only if they carry a
 //! recognised audio signature, checked on the bytes and never on a declared type.
 //!
-//! **Status: founded.** This crate holds the audio surface -- an item, its content hash, the
-//! inbound rule, and a store that serves it -- and no carrier yet. The first carrier is the next
-//! commit.
+//! The daemon is live: [`server`] runs a TCP carrier, [`protocol`] is the audio-only frame
+//! format, and [`wav`] generates the sounds a fresh daemon publishes. The rules did not move --
+//! every inbound path still goes through [`AudioStore::accept`], checked on bytes.
+//!
+//! **Status: serves.** See `SPEC.md` for the carrier list and the next one.
 
 #![forbid(unsafe_code)]
 
+pub mod protocol;
+pub mod server;
+pub mod wav;
+
 use std::collections::HashMap;
+
+pub use protocol::{Request, Response};
+pub use server::ListendServer;
 
 /// One piece of audio the daemon serves: bytes and the BLAKE3 of those bytes.
 ///
@@ -198,6 +207,19 @@ impl AudioStore {
 
     pub fn bytes_held(&self) -> usize {
         self.bytes_held
+    }
+
+    /// Every content hash currently held, in the order the items arrived.
+    ///
+    /// Order is part of the contract: a client that walks the listing twice must see the same
+    /// walk, and a listing whose order changed between requests would be a reproducibility
+    /// hazard with no benefit.
+    pub fn hashes(&self) -> Vec<String> {
+        self.order
+            .iter()
+            .filter(|hash| self.items.contains_key(*hash))
+            .cloned()
+            .collect()
     }
 }
 

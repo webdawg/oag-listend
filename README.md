@@ -25,11 +25,24 @@ Two rules, both enforced at the surface so no carrier can forget them:
   recognised audio signature -- checked on the bytes, never on a declared type. Everything else is
   rejected before it is stored.
 
+## Turn it on
+
+    cargo run -p oag-listend -- --listen 127.0.0.1:7100 --seed 20261112
+
+The daemon binds, prints four generated sounds, and serves until interrupted. Then exchange audio
+with it:
+
+    cargo run -p oag-listend --example push_pull -- --addr 127.0.0.1:7100
+
+That pushes a generated tone and a generated noise, pulls both back, and verifies the BLAKE3 of
+each on the receiving side. It also pushes HTML labelled `audio/wav` and prints the refusal.
+
 ## Status
 
-Founded. The audio surface exists (`AudioItem`, `AudioStore`, `AudioFormat::sniff`) with 5 tests.
-No carrier is wired yet; the first is TCP, borrowed from the imagination layer's `Transport` seam.
-See `SPEC.md` for the place in the stack and what this explicitly is not.
+**Serves.** The TCP carrier is live and tested: 20 unit tests plus 2 end-to-end tests
+(`cargo test -p oag-listend`). The audio surface (`AudioItem`, `AudioStore`, `AudioFormat::sniff`)
+is unchanged; the rules did not move to the wire, they were already at the surface. See `SPEC.md`
+for the carrier, the bounds, and the next carrier (HTTP).
 
 ## Build
 
