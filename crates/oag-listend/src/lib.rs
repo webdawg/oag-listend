@@ -384,6 +384,11 @@ impl AudioStore {
         hashes
     }
 
+    /// The byte bound this store enforces.
+    pub fn max_bytes(&self) -> usize {
+        self.max_bytes
+    }
+
     /// The backing directory, if this store persists.
     pub fn directory(&self) -> Option<&Path> {
         self.dir.as_deref()

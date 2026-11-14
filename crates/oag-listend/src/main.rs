@@ -198,8 +198,9 @@ async fn main() {
 
     println!("oag-listend listening on {native_addr}");
     note_public_bind(native_addr);
+    let held = store.lock().await.bytes_held();
     println!(
-        "  seed {}  max-bytes {}{}",
+        "  seed {}  max-bytes {}  held {held}{}",
         args.seed,
         args.max_bytes,
         args.dir.as_deref().map(|d| format!("  store {d}")).unwrap_or_default()

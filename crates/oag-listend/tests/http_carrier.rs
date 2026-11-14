@@ -519,6 +519,10 @@ async fn caching() {
     let star = get_with(addr, &url, "If-None-Match: *\r\n").await;
     assert_eq!(status_of(&star), 304, "`*` matches an existing resource");
 
+    // A validator list is the normal form a shared cache sends.
+    let list = get_with(addr, &url, &format!("If-None-Match: \"stale\", {etag}\r\n")).await;
+    assert_eq!(status_of(&list), 304, "a list containing the validator must match");
+
     let head = http(
         addr,
         &format!("HEAD {url} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"),
@@ -526,6 +530,44 @@ async fn caching() {
     .await;
     assert_eq!(status_of(&head), 200);
     assert!(head_contains(&head, &format!("etag: {etag}")));
+
+    shutdown.shutdown();
+    tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .expect("shutdown bound")
+        .expect("join")
+        .expect("run");
+}
+
+/// `GET /` reports the store's byte usage against its bound, so an operator can see the bound
+/// working rather than discovering it when audio stops being accepted.
+#[tokio::test]
+async fn http_root_reports_store_usage() {
+    tokio::time::timeout(BOUND, usage()).await.expect("usage exchange within the bound")
+}
+
+async fn usage() {
+    let store = Arc::new(Mutex::new(AudioStore::with_capacity(10_000)));
+    let (carrier, addr) = HttpCarrier::bind_shared("127.0.0.1:0", Arc::clone(&store))
+        .await
+        .expect("bind http");
+    let shutdown = carrier.shutdown_handle();
+    let run = tokio::spawn(async move { carrier.run().await });
+
+    let root = http(addr, "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").await;
+    let text = String::from_utf8_lossy(&root).into_owned();
+    assert!(text.contains("items: 0"), "{text}");
+    assert!(text.contains("bytes: 0 / 10000"), "{text}");
+
+    let wav = wav::generate(31, wav::Sound::Tone);
+    let len = wav.len();
+    let posted = http_post(addr, &wav, "audio/wav").await;
+    assert_eq!(status_of(&posted), 201);
+
+    let root = http(addr, "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").await;
+    let text = String::from_utf8_lossy(&root).into_owned();
+    assert!(text.contains("items: 1"), "{text}");
+    assert!(text.contains(&format!("bytes: {len} / 10000")), "{text}");
 
     shutdown.shutdown();
     tokio::time::timeout(Duration::from_secs(5), run)

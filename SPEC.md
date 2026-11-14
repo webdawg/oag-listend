@@ -118,12 +118,12 @@ generated sound the store refuses is reported, not dropped.
 ## The HTTP carrier
 
 The same audio surface over HTTP/1.1, so a browser can reach it. `GET /` reports the daemon name,
-the protocol version, and the item count. `GET /audio` lists the content hashes one per line,
+the protocol version, the item count, and the store's byte usage against its bound. `GET /audio` lists the content hashes one per line,
 sorted by hash, paginated with `?offset=&limit=` and reported through `X-Total-Count` and
 `X-Offset` -- so a client that only fetches can discover what exists, and the walk is the same
 across a restart. `GET /audio/{hash}` serves the bytes with a content type derived from the bytes,
 with `Range` (206 and `Content-Range`, or 416), `HEAD`, and an `ETag` (the content hash) with
-`Cache-Control: public, max-age=31536000, immutable` and `If-None-Match` -> 304, since a
+`Cache-Control: public, max-age=31536000, immutable` and `If-None-Match` (including a comma-separated validator list, and `*`) -> 304, since a
 content-addressed item cannot change. `POST /audio` accepts a body through
 `AudioStore::accept` (201 with the content hash, 400 if the bytes are not audio) and answers
 `Expect: 100-continue`. A query string is never part of the path, so `/audio/{hash}?x=1` serves the

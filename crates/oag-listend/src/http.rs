@@ -255,12 +255,14 @@ async fn route(request: HttpRequest, store: &Arc<Mutex<AudioStore>>) -> HttpResp
 
     match (method, path) {
         ("GET", "/") => {
-            let count = store.lock().await.len();
+            let store = store.lock().await;
+            let count = store.len();
+            let (held, max) = (store.bytes_held(), store.max_bytes());
             let mut response = HttpResponse::text(
                 200,
                 "OK",
                 format!(
-                    "oag-listend\nprotocol {}\nitems: {count}\n\
+                    "oag-listend\nprotocol {}\nitems: {count}\nbytes: {held} / {max}\n\
                      GET /audio for the content hashes\nonly audio is accepted\n",
                     crate::protocol::PROTOCOL_VERSION
                 )
@@ -313,11 +315,7 @@ async fn route(request: HttpRequest, store: &Arc<Mutex<AudioStore>>) -> HttpResp
                 .or_else(|| item.media_type.clone())
                 .unwrap_or_else(|| "application/octet-stream".into());
             let etag = format!("\"{hash}\"");
-            let not_modified = request
-                .if_none_match
-                .as_deref()
-                .map(|value| value == etag || value == "*")
-                .unwrap_or(false);
+            let not_modified = etag_matches(request.if_none_match.as_deref(), &etag);
 
             let mut response = match parse_range(request.range.as_deref(), item.bytes.len()) {
                 None => {
@@ -405,6 +403,16 @@ async fn route(request: HttpRequest, store: &Arc<Mutex<AudioStore>>) -> HttpResp
         }
         _ => not_found(),
     }
+}
+
+/// Whether an `If-None-Match` header matches. The header may carry a comma-separated list of
+/// validators, and `*` matches any existing resource.
+fn etag_matches(header: Option<&str>, etag: &str) -> bool {
+    let Some(header) = header else { return false };
+    header
+        .split(',')
+        .map(str::trim)
+        .any(|validator| validator == "*" || validator == etag)
 }
 
 /// `offset` and `limit` from a query string. An absent or unparsable value falls back to the
