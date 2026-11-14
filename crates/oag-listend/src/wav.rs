@@ -37,6 +37,10 @@ fn duration_for(seed: u64) -> f32 {
     0.05 + (seed % 5) as f32 * 0.01
 }
 
+fn sample_count_for(seed: u64) -> usize {
+    ((SAMPLE_RATE as f32) * duration_for(seed)) as usize
+}
+
 /// Write a RIFF/WAVE container around 16-bit PCM samples.
 fn write_wav(samples: &[i16], sample_rate: u32) -> Vec<u8> {
     let data_len = samples.len() * 2;
@@ -63,10 +67,17 @@ fn write_wav(samples: &[i16], sample_rate: u32) -> Vec<u8> {
     out
 }
 
-/// Generate one valid WAV of `kind` from `seed`.
+/// Generate one valid WAV of `kind` from `seed`, at the seed's default short duration.
 pub fn generate(seed: u64, kind: Sound) -> Vec<u8> {
-    let seconds = duration_for(seed);
-    let n = ((SAMPLE_RATE as f32) * seconds) as usize;
+    generate_n(seed, kind, sample_count_for(seed))
+}
+
+/// Generate one valid WAV of `kind` with exactly `samples` PCM frames.
+///
+/// Exposed so a caller can make a sound of a chosen size -- a carrier with a datagram or frame
+/// bound needs a fixture that crosses it, and a test should not have to fake a container.
+pub fn generate_n(seed: u64, kind: Sound, samples: usize) -> Vec<u8> {
+    let n = samples;
     let mut state = seed ^ 0xA5A5_A5A5_A5A5_A5A5;
 
     let samples: Vec<i16> = match kind {
@@ -156,6 +167,14 @@ mod tests {
         assert_eq!(channels, 1);
         assert_eq!(bits, 16);
         assert_eq!(&bytes[36..40], b"data");
+    }
+
+    #[test]
+    fn a_chosen_sample_count_is_honoured() {
+        let bytes = generate_n(4, Sound::Tone, 10_000);
+        assert_eq!(AudioFormat::sniff(&bytes), Some(AudioFormat::Wav));
+        let data_len = u32::from_le_bytes([bytes[40], bytes[41], bytes[42], bytes[43]]) as usize;
+        assert_eq!(data_len, 10_000 * 2);
     }
 
     #[test]

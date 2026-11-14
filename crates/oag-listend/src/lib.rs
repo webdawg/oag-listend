@@ -13,9 +13,10 @@
 //! surface so no carrier can forget it: [`AudioStore::accept`] admits bytes only if they carry a
 //! recognised audio signature, checked on the bytes and never on a declared type.
 //!
-//! The daemon is live: [`server`] runs a TCP carrier, [`protocol`] is the audio-only frame
-//! format, and [`wav`] generates the sounds a fresh daemon publishes. The rules did not move --
-//! every inbound path still goes through [`AudioStore::accept`], checked on bytes.
+//! The daemon is live on three carriers: [`server`] (native TCP frames), [`http`], and [`udp`].
+//! [`protocol`] is the audio-only frame format they share, and [`wav`] generates the sounds a
+//! fresh daemon publishes. The rules did not move -- every inbound path still goes through
+//! [`AudioStore::accept`], checked on bytes.
 //!
 //! **Status: serves.** See `SPEC.md` for the carrier list and the next one.
 
@@ -24,6 +25,7 @@
 pub mod http;
 pub mod protocol;
 pub mod server;
+pub mod udp;
 pub mod wav;
 
 use std::collections::HashMap;

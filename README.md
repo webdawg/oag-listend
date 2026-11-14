@@ -33,12 +33,13 @@ One additional individual directive is recorded for the next implementation step
 
 ## Turn it on
 
-    cargo run -p oag-listend -- --listen 127.0.0.1:7100 --http 127.0.0.1:7101 --seed 20261112
+    cargo run -p oag-listend -- --listen 127.0.0.1:7100 --http 127.0.0.1:7101 --udp 127.0.0.1:7120 --seed 20261112
 
 The daemon binds, prints four generated sounds, and serves until interrupted. Then exchange audio
 with it over the native protocol:
 
     cargo run -p oag-listend --example push_pull -- --addr 127.0.0.1:7100
+    cargo run -p oag-listend --example push_pull -- --udp --addr 127.0.0.1:7120
 
 or over HTTP, with any client:
 
@@ -46,13 +47,14 @@ or over HTTP, with any client:
     curl http://127.0.0.1:7101/audio/<hash>                            # -> the same bytes
     curl http://127.0.0.1:7101/                                        # -> what this is
 
-Both carriers share one store, and both accept audio and nothing else.
+All three carriers share one store, and all accept audio and nothing else.
 
 ## Status
 
-**Serves.** Two carriers are live and tested: 20 unit tests plus 4 end-to-end tests
-(`cargo test -p oag-listend`). The native protocol and HTTP share one store, and both were verified
-by hand: audio posted to HTTP came back byte-identical, and HTML labelled `audio/wav` was refused.
+**Serves.** Three carriers are live and tested: 25 unit tests plus 5 end-to-end tests
+(`cargo test -p oag-listend`). The native protocol, HTTP, and UDP share one store, and all were
+verified by hand: audio posted to HTTP came back byte-identical, `push_pull` verified over TCP and
+UDP, and HTML labelled `audio/wav` was refused on every carrier.
 The audio surface (`AudioItem`, `AudioStore`, `AudioFormat::sniff`) is unchanged; the rules did not
 move to the wire, they were already at the surface. See `SPEC.md` for the carriers and the bounds.
 

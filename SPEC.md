@@ -2,12 +2,12 @@
 
 **License: GNU Affero General Public License v3.0 or later (AGPL-3.0-or-later).**
 
-**Status: serves.** Two carriers are live and share one store: the native length-prefixed protocol
-and HTTP. The daemon binds, publishes a small seeded set of generated sounds, accepts audio, and
-serves it back with the BLAKE3 of the bytes. The end-to-end tests
-`the_daemon_serves_audio_and_refuses_everything_else`, `http_serves_audio_and_refuses_the_rest`, and
-`the_two_carriers_serve_the_same_audio` are green. The next carrier is whatever the imagination
-layer's `Transport` seam already offers; the audio rules have not moved.
+**Status: serves.** Three carriers are live and share one store: the native length-prefixed
+protocol, HTTP, and UDP. The daemon binds, publishes a small seeded set of generated sounds,
+accepts audio, and serves it back with the BLAKE3 of the bytes. The end-to-end tests
+`the_daemon_serves_audio_and_refuses_everything_else`, `http_serves_audio_and_refuses_the_rest`,
+`the_two_carriers_serve_the_same_audio`, and `udp_carries_the_same_audio` are green, and
+`examples/push_pull.rs` works over TCP and UDP. The audio rules have not moved.
 
 ## The idea, recorded verbatim
 
@@ -98,8 +98,9 @@ The protocol is length-prefixed frames with exactly four operations -- hello, pu
 list -- and nothing else. Every inbound publish goes through `AudioStore::accept`; every outbound
 fetch returns the bytes and the hash they must verify against.
 
-    oag-listend --listen 0.0.0.0:7100 --http 0.0.0.0:7101 --seed 20261112
+    oag-listend --listen 0.0.0.0:7100 --http 0.0.0.0:7101 --udp 0.0.0.0:7120 --seed 20261112
     cargo run -p oag-listend --example push_pull -- --addr 127.0.0.1:7100
+    cargo run -p oag-listend --example push_pull -- --udp --addr 127.0.0.1:7120
 
 Bounds: every read and write has a 10 s timeout, a frame may not exceed 16 MiB, the store is
 capped by `--max-bytes` (1 GiB by default), and at most 64 sessions are served at once per carrier.
@@ -115,8 +116,17 @@ anything else is 404. It is a hand-rolled request/response loop with no framewor
 one response, then close. Both carriers bind around one shared `Arc<Mutex<AudioStore>>`, so a
 publish on either is served on either.
 
-## Next carrier
+## The UDP carrier
 
-Whatever the imagination layer's `Transport` seam already offers -- UDP, IPFS, Reticulum. A new
-carrier must reuse `AudioStore::accept`, must not grow the operation set, and must carry its own
-bounds.
+The imagination layer's datagram seam, serving the same audio: one datagram is one request, the
+reply goes back to the sender, and the frame codec is reused unchanged. A datagram is at most
+65,507 bytes, so a fetch whose response does not fit is answered with a rejection -- never a silent
+truncation. Small exchanges (hello, list, a generated tone, a short recording) are this carrier's
+job; a long recording belongs on TCP or HTTP.
+
+## Next
+
+The store is in-memory, so a restart loses the audio. Persistence is the honest next step: write
+each accepted item content-addressed under a directory and load it at startup. After that,
+whatever other carriers the imagination `Transport` seam offers (IPFS, Reticulum), each reusing
+`AudioStore::accept` and adding no operations.
