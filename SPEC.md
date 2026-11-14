@@ -118,12 +118,19 @@ generated sound the store refuses is reported, not dropped.
 ## The HTTP carrier
 
 The same audio surface over HTTP/1.1, so a browser can reach it. `GET /` reports the daemon name,
-the protocol version, and the item count. `GET /` says what it is,
-`GET /audio/{hash}` serves the bytes with the item's media type, `POST /audio` accepts a body
-through `AudioStore::accept` (201 with the content hash, 400 if the bytes are not audio), and
-anything else is 404. It is a hand-rolled request/response loop with no framework: one request,
-one response, then close. Both carriers bind around one shared `Arc<Mutex<AudioStore>>`, so a
-publish on either is served on either.
+the protocol version, and the item count. `GET /audio` lists the content hashes one per line,
+sorted by hash, paginated with `?offset=&limit=` and reported through `X-Total-Count` and
+`X-Offset` -- so a client that only fetches can discover what exists, and the walk is the same
+across a restart. `GET /audio/{hash}` serves the bytes with a content type derived from the bytes,
+with `Range` (206 and `Content-Range`, or 416) and `HEAD`. `POST /audio` accepts a body through
+`AudioStore::accept` (201 with the content hash, 400 if the bytes are not audio) and answers
+`Expect: 100-continue`. A query string is never part of the path, so `/audio/{hash}?x=1` serves the
+audio rather than 404-ing. Every response carries `Access-Control-Allow-Origin: *` and `OPTIONS` is
+answered, so a page on another origin can `fetch()` the audio. Anything else is 404.
+
+It is a hand-rolled request/response loop with no framework: one request, one response, then
+close. All four carriers bind around one shared `Arc<Mutex<AudioStore>>`, so a publish on any is
+served on any.
 
 ## The UDP carrier
 
