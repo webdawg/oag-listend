@@ -167,5 +167,8 @@ Unix socket is removed, and the process exits 0.
 
 ## Next
 
-Whatever other carriers the imagination `Transport` seam offers -- IPFS, Reticulum -- each reusing
-`AudioStore::accept` and adding no operations.
+The remaining imagination carriers are IPFS and Reticulum, and both are deliberately not
+implemented: IPFS needs a Kubo node (external infrastructure) or an embedded libp2p node
+(heavyweight), and Reticulum needs a physical interface. Each would reuse `AudioStore::accept` and
+add no operations, but neither can be tested against a real network from this repository, so the
+honest status is "not built", not "built and untested".

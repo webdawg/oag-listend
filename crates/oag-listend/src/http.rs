@@ -89,6 +89,21 @@ async fn serve_connection(mut stream: TcpStream, store: Arc<Mutex<AudioStore>>) 
         Some(request) => request,
         None => return Ok(()),
     };
+    // A browser page on another origin sends OPTIONS first. Answer it, or the fetch is blocked
+    // before it starts. The service has no credentials, so `*` is the honest allowance.
+    if request.method == "OPTIONS" {
+        let preflight = "HTTP/1.1 204 No Content\r\n\
+                         Access-Control-Allow-Origin: *\r\n\
+                         Access-Control-Allow-Methods: GET, HEAD, POST, OPTIONS\r\n\
+                         Access-Control-Allow-Headers: content-type, range\r\n\
+                         Access-Control-Max-Age: 3600\r\n\
+                         Content-Length: 0\r\n\
+                         Connection: close\r\n\r\n";
+        tokio::time::timeout(IO_TIMEOUT, stream.write_all(preflight.as_bytes()))
+            .await
+            .map_err(|_| timeout_error())??;
+        return Ok(());
+    }
     let response = route(request, &store).await;
     write_response(&mut stream, &response).await
 }
@@ -400,6 +415,8 @@ async fn write_response(stream: &mut TcpStream, response: &HttpResponse) -> std:
     } else if response.accept_ranges {
         out.extend_from_slice(b"Accept-Ranges: bytes\r\n");
     }
+    // The service holds no credentials and serves public audio, so any origin may read it.
+    out.extend_from_slice(b"Access-Control-Allow-Origin: *\r\n");
     out.extend_from_slice(b"Connection: close\r\n\r\n");
     out.extend_from_slice(&response.body);
     tokio::time::timeout(IO_TIMEOUT, stream.write_all(&out))

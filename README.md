@@ -71,7 +71,8 @@ Verified by hand: a 4044-byte WAV against `--max-bytes 100` returned
 
 The HTTP content type comes from the bytes, not from what the publisher claimed; `Range`, `HEAD`,
 `GET /audio`, and `Expect: 100-continue` are supported, so a browser can stream and seek and a
-client can discover what exists. Verified by hand with `curl` and a raw socket.
+client can discover what exists. CORS is allowed (`Access-Control-Allow-Origin: *`) and `OPTIONS`
+is answered, so a page on another origin can `fetch()` the audio. Verified by hand with `curl`.
 
 ## Run it as a service
 
@@ -89,7 +90,7 @@ return, the Unix socket is removed, and the process exits 0.
 
 ## Status
 
-**Serves, and survives a restart.** Four carriers are live and tested: 32 unit tests plus 12
+**Serves, and survives a restart.** Four carriers are live and tested: 32 unit tests plus 13
 end-to-end tests (`cargo test -p oag-listend`). Runs as a systemd service (`scripts/oag-listend.service`)
 and shuts down cleanly on SIGINT and SIGTERM. The native protocol, HTTP, and UDP share one store,
 and all were verified by hand: audio posted to HTTP came back byte-identical, `push_pull` verified

@@ -352,3 +352,56 @@ async fn discover() {
         .expect("join")
         .expect("run");
 }
+
+/// A page on another origin must be able to fetch the audio. That needs CORS headers on the
+/// response and an answer to the OPTIONS preflight, or the browser blocks the request.
+#[tokio::test]
+async fn http_allows_a_cross_origin_browser_client() {
+    tokio::time::timeout(BOUND, cors()).await.expect("cors exchange within the bound")
+}
+
+async fn cors() {
+    let store = Arc::new(Mutex::new(AudioStore::default()));
+    let (carrier, addr) = HttpCarrier::bind_shared("127.0.0.1:0", Arc::clone(&store))
+        .await
+        .expect("bind http");
+    let shutdown = carrier.shutdown_handle();
+    let run = tokio::spawn(async move { carrier.run().await });
+
+    let preflight = http(
+        addr,
+        "OPTIONS /audio HTTP/1.1\r\nHost: x\r\nOrigin: http://example.com\r\n\
+         Access-Control-Request-Method: POST\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    assert_eq!(status_of(&preflight), 204, "{}", String::from_utf8_lossy(&preflight));
+    assert!(head_contains(&preflight, "access-control-allow-origin: *"));
+    assert!(head_contains(&preflight, "access-control-allow-methods: get, head, post, options"));
+    assert!(head_contains(&preflight, "access-control-allow-headers: content-type, range"));
+    assert!(body_of(&preflight).is_empty());
+
+    let tone = wav::generate(13, wav::Sound::Tone);
+    let posted = http_post(addr, &tone, "audio/wav").await;
+    let hash = String::from_utf8_lossy(body_of(&posted)).trim().to_string();
+
+    for path in ["/", "/audio", &format!("/audio/{hash}")] {
+        let response = http(
+            addr,
+            &format!("GET {path} HTTP/1.1\r\nHost: x\r\nOrigin: http://example.com\r\nConnection: close\r\n\r\n"),
+        )
+        .await;
+        assert_eq!(status_of(&response), 200, "{path}");
+        assert!(
+            head_contains(&response, "access-control-allow-origin: *"),
+            "{path} must be readable from another origin: {}",
+            String::from_utf8_lossy(&response)
+        );
+    }
+
+    shutdown.shutdown();
+    tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .expect("shutdown bound")
+        .expect("join")
+        .expect("run");
+}
