@@ -63,13 +63,18 @@ All three carriers share one store, and all accept audio and nothing else.
 Every entry is re-checked on load (name must be the BLAKE3 of the bytes, bytes must sniff as
 audio), and a write failure refuses the inbound rather than losing it silently.
 
+`--max-bytes` is enforced on the way in: audio larger than the bound is refused with `400` rather
+than written and immediately evicted, and an oversized startup file is skipped without being read.
+Verified by hand: a 4044-byte WAV against `--max-bytes 100` returned
+`audio is 4044 bytes, larger than the 100 byte store bound`, while a small WAV was accepted.
+
 The HTTP content type comes from the bytes, not from what the publisher claimed; `Range`, `HEAD`,
 `GET /audio`, and `Expect: 100-continue` are supported, so a browser can stream and seek and a
 client can discover what exists. Verified by hand with `curl` and a raw socket.
 
 ## Status
 
-**Serves, and survives a restart.** Three carriers are live and tested: 30 unit tests plus 9
+**Serves, and survives a restart.** Three carriers are live and tested: 32 unit tests plus 9
 end-to-end tests (`cargo test -p oag-listend`). The native protocol, HTTP, and UDP share one store,
 and all were verified by hand: audio posted to HTTP came back byte-identical, `push_pull` verified
 over TCP and UDP, HTML labelled `audio/wav` was refused on every carrier, and a daemon restarted

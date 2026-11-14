@@ -77,6 +77,10 @@ pub enum ListendError {
     /// worse than one that says so.
     #[error("could not persist the audio: {0}")]
     Persist(String),
+    /// The bytes are audio, but they are larger than the store can hold. Refused rather than
+    /// written and immediately evicted: a bound that is not checked on the way in is not a bound.
+    #[error("audio is {len} bytes, larger than the {max} byte store bound")]
+    TooLarge { len: usize, max: usize },
 }
 
 /// What a directory load found. `skipped` counts entries that were not usable audio -- a file
@@ -242,6 +246,13 @@ impl AudioStore {
                     continue;
                 }
             };
+            // A file larger than the store can hold is skipped without being read: an unbounded
+            // read on the startup path is the same defect as an unbounded network read.
+            let len = entry.metadata().map(|m| m.len() as usize).unwrap_or(0);
+            if len > store.max_bytes {
+                report.skipped += 1;
+                continue;
+            }
             let bytes = match std::fs::read(&path) {
                 Ok(bytes) => bytes,
                 Err(_) => {
@@ -271,6 +282,9 @@ impl AudioStore {
     pub fn accept(&mut self, bytes: Vec<u8>, declared_media_type: Option<String>) -> Result<String, ListendError> {
         if AudioFormat::sniff(&bytes).is_none() {
             return Err(ListendError::NotAudio);
+        }
+        if bytes.len() > self.max_bytes {
+            return Err(ListendError::TooLarge { len: bytes.len(), max: self.max_bytes });
         }
         let item = AudioItem::new(bytes, declared_media_type);
         if self.items.contains_key(&item.content_hash) {
@@ -543,12 +557,47 @@ mod tests {
     }
 
     #[test]
+    fn an_item_larger_than_the_store_bound_is_refused() {
+        let mut store = AudioStore::with_capacity(10);
+        let big = wav::generate_n(1, wav::Sound::Tone, 8); // 44 + 16 = 60 bytes
+        assert!(big.len() > 10);
+        let result = store.accept(big, None);
+        assert!(
+            matches!(result, Err(ListendError::TooLarge { .. })),
+            "an item larger than the bound must be refused, got {result:?}"
+        );
+        assert!(store.is_empty(), "a refused item must not be stored");
+    }
+
+    #[test]
+    fn a_file_larger_than_the_store_bound_is_skipped_without_being_read() {
+        let dir = temp_dir("toolarge");
+        let (mut store, _) = AudioStore::with_directory(&dir, 64).unwrap();
+        // A valid WAV whose bytes exceed the bound, named with its real hash.
+        let big = wav::generate_n(2, wav::Sound::Tone, 64);
+        let hash = blake3::hash(&big).to_hex().to_string();
+        std::fs::write(dir.join(&hash), &big).unwrap();
+        assert!(big.len() > 64);
+
+        // A second, small item so the load has something to accept.
+        let small = wav::generate_n(3, wav::Sound::Tone, 4);
+        let small_hash = store.accept(small, None).unwrap();
+
+        let (reopened, report) = AudioStore::with_directory(&dir, 64).unwrap();
+        assert_eq!(report.loaded, 1, "only the item that fits is loaded");
+        assert_eq!(report.skipped, 1, "the oversized file is skipped and counted");
+        assert!(reopened.serve(&small_hash).is_ok());
+        assert!(reopened.serve(&hash).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_persist_failure_refuses_the_inbound() {
         // A path that is a file cannot be a directory, so create_dir_all fails.
         let blocker = temp_dir("blocked");
         let file = blocker.join("not-a-dir");
         std::fs::write(&file, b"x").unwrap();
-        let mut store = AudioStore::with_directory_path_for_test(file, 1024);
+        let mut store = AudioStore::with_directory_path_for_test(file, 1024 * 1024);
         let result = store.accept(wav::generate(3, wav::Sound::Tone), None);
         assert!(matches!(result, Err(ListendError::Persist(_))), "got {result:?}");
         let _ = std::fs::remove_dir_all(&blocker);

@@ -140,6 +140,10 @@ in. The load is reported (`loaded N skipped M`), never silent.
 Eviction deletes the file, so the directory and the store agree on what is held and the
 `--max-bytes` bound is a bound on disk too, not just memory. Without `--dir` the store is in-memory.
 
+The bound is enforced on the way in: `accept` refuses audio larger than `--max-bytes` rather than
+writing it and immediately evicting it, and a startup file larger than the bound is skipped without
+being read. A bound that is only checked after the read or write is not a bound.
+
 ## Next
 
 Whatever other carriers the imagination `Transport` seam offers -- IPFS, Reticulum -- each reusing
