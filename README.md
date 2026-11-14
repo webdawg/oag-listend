@@ -73,10 +73,25 @@ The HTTP content type comes from the bytes, not from what the publisher claimed;
 `GET /audio`, and `Expect: 100-continue` are supported, so a browser can stream and seek and a
 client can discover what exists. Verified by hand with `curl` and a raw socket.
 
+## Run it as a service
+
+`scripts/oag-listend.service` is a systemd unit for all four carriers with a persistent store.
+Install and start it with:
+
+    cargo build --release -p oag-listend
+    sudo install -m 0755 target/release/oag-listend /usr/local/bin/oag-listend
+    sudo install -m 0644 scripts/oag-listend.service /etc/systemd/system/oag-listend.service
+    sudo systemctl daemon-reload
+    sudo systemctl enable --now oag-listend
+
+The daemon handles both SIGINT and SIGTERM, so `systemctl stop` is a clean stop: the accept loops
+return, the Unix socket is removed, and the process exits 0.
+
 ## Status
 
 **Serves, and survives a restart.** Four carriers are live and tested: 32 unit tests plus 12
-end-to-end tests (`cargo test -p oag-listend`). The native protocol, HTTP, and UDP share one store,
+end-to-end tests (`cargo test -p oag-listend`). Runs as a systemd service (`scripts/oag-listend.service`)
+and shuts down cleanly on SIGINT and SIGTERM. The native protocol, HTTP, and UDP share one store,
 and all were verified by hand: audio posted to HTTP came back byte-identical, `push_pull` verified
 over TCP and UDP, HTML labelled `audio/wav` was refused on every carrier, and a daemon restarted
 with `--dir` loaded 5 items and served the posted WAV byte-identical.

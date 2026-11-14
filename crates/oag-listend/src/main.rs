@@ -190,7 +190,24 @@ async fn main() {
     let udp_run = udp.map(|(carrier, _)| tokio::spawn(async move { carrier.run().await }));
     let unix_run = unix.map(|(carrier, _)| tokio::spawn(async move { carrier.run().await }));
 
-    let _ = tokio::signal::ctrl_c().await;
+    // SIGINT (Ctrl+C) and SIGTERM (`systemctl stop`, `kill`) both shut down cleanly, so the
+    // Unix socket is removed and the operator's stop command is not a crash.
+    #[cfg(unix)]
+    let sigterm = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(_) => std::future::pending().await,
+        }
+    };
+    #[cfg(not(unix))]
+    let sigterm = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = sigterm => {}
+    }
     println!("oag-listend shutting down");
     native_shutdown.shutdown();
     if let Some(handle) = http_shutdown {

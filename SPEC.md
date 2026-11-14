@@ -159,7 +159,13 @@ decide who may connect. It shares the TCP session loop, so the protocol, the bou
 inbound rule are identical by construction. A stale socket file from a killed daemon is removed on
 bind and on shutdown.
 
+## Running it
+
+`scripts/oag-listend.service` runs all four carriers with a persistent store under systemd. The
+daemon handles SIGINT and SIGTERM, so `systemctl stop` is a clean stop: the accept loops return, the
+Unix socket is removed, and the process exits 0.
+
 ## Next
 
 Whatever other carriers the imagination `Transport` seam offers -- IPFS, Reticulum -- each reusing
-`AudioStore::accept` and adding no operations. Then a documented one-command way to run the daemon.
+`AudioStore::accept` and adding no operations.

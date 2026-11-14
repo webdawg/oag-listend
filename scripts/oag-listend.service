@@ -1,0 +1,39 @@
+# oag-listend — the global daemon that serves audio.
+#
+# Install:
+#   cargo build --release -p oag-listend
+#   sudo install -m 0755 target/release/oag-listend /usr/local/bin/oag-listend
+#   sudo install -m 0644 scripts/oag-listend.service /etc/systemd/system/oag-listend.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now oag-listend
+#
+# The daemon accepts audio and nothing else, on four carriers. It shuts down
+# cleanly on SIGTERM, so `systemctl stop` is a clean stop, not a crash.
+
+[Unit]
+Description=oag-listend - the global daemon that serves audio
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/oag-listend \
+    --listen 0.0.0.0:7100 \
+    --http 0.0.0.0:7101 \
+    --udp 0.0.0.0:7120 \
+    --unix /run/oag-listend/audio.sock \
+    --dir /var/lib/oag-listend
+Restart=on-failure
+RestartSec=2
+RuntimeDirectory=oag-listend
+StateDirectory=oag-listend
+# The daemon serves audio to the network by design; run it as a dedicated user.
+User=oag
+Group=oag
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/oag-listend /run/oag-listend
+
+[Install]
+WantedBy=multi-user.target
