@@ -106,6 +106,10 @@ pub struct LoadReport {
 /// not-audio, and no more. It does not decode, and it is deliberately a closed list that grows
 /// only when a real carrier needs a format -- the inbound rule is "audio only", and a sniff that
 /// accepts anything plausible is no rule at all.
+///
+/// For ISO BMFF (`ftyp`) the whole brand list is read, not just the major brand: `isom` and `mp42`
+/// are generic brands that MP4 *video* uses, while ffmpeg-written M4A often has `isom` as the major
+/// brand and `M4A ` among the compatible brands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AudioFormat {
     /// RIFF container with a WAVE form type.

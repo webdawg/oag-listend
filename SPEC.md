@@ -72,7 +72,9 @@ arrives is rejected before it is stored -- not parsed, not forwarded, not logged
 This is enforced at the audio surface, not per carrier, so a new carrier cannot forget it: every
 inbound path goes through `AudioStore::accept`, which admits bytes only if they carry a
 recognised audio signature. The check is on the bytes, never on a declared content type, because a
-declared type is a claim and the bytes are the evidence. A carrier may *additionally* reject
+declared type is a claim and the bytes are the evidence. For ISO BMFF the whole `ftyp` brand list
+is read, so a generic `isom`/`mp42` video is rejected while an M4A that carries `isom` as its major
+brand and `M4A ` as a compatible brand is accepted. A carrier may *additionally* reject
 earlier (an HTTP carrier can refuse a non-audio `Content-Type` before reading the body), but the
 surface is the guarantee.
 
