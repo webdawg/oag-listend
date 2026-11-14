@@ -2,11 +2,12 @@
 
 **License: GNU Affero General Public License v3.0 or later (AGPL-3.0-or-later).**
 
-**Status: serves.** The TCP carrier is live: the daemon binds, publishes a small seeded set of
-generated sounds, accepts audio over a length-prefixed frame protocol, and serves it back with the
-BLAKE3 of the bytes. The end-to-end test `the_daemon_serves_audio_and_refuses_everything_else` is
-green, and `examples/push_pull.rs` demonstrates it against a running process. The next carrier is
-HTTP; the audio rules have not moved.
+**Status: serves.** Two carriers are live and share one store: the native length-prefixed protocol
+and HTTP. The daemon binds, publishes a small seeded set of generated sounds, accepts audio, and
+serves it back with the BLAKE3 of the bytes. The end-to-end tests
+`the_daemon_serves_audio_and_refuses_everything_else`, `http_serves_audio_and_refuses_the_rest`, and
+`the_two_carriers_serve_the_same_audio` are green. The next carrier is whatever the imagination
+layer's `Transport` seam already offers; the audio rules have not moved.
 
 ## The idea, recorded verbatim
 
@@ -73,17 +74,25 @@ The protocol is length-prefixed frames with exactly four operations -- hello, pu
 list -- and nothing else. Every inbound publish goes through `AudioStore::accept`; every outbound
 fetch returns the bytes and the hash they must verify against.
 
-    oag-listend --listen 0.0.0.0:7100 --seed 20261112
+    oag-listend --listen 0.0.0.0:7100 --http 0.0.0.0:7101 --seed 20261112
     cargo run -p oag-listend --example push_pull -- --addr 127.0.0.1:7100
 
 Bounds: every read and write has a 10 s timeout, a frame may not exceed 16 MiB, the store is
-capped by `--max-bytes` (1 GiB by default), and at most 64 sessions are served at once. A fresh
-daemon publishes four generated sounds (silence, tone, noise) through the same inbound rule a
-client's bytes use, so a fetch-only client still receives audio.
+capped by `--max-bytes` (1 GiB by default), and at most 64 sessions are served at once per carrier.
+A fresh daemon publishes four generated sounds (silence, tone, noise) through the same inbound
+rule a client's bytes use, so a fetch-only client still receives audio.
+
+## The HTTP carrier
+
+The same audio surface over HTTP/1.1, so a browser can reach it. `GET /` says what it is,
+`GET /audio/{hash}` serves the bytes with the item's media type, `POST /audio` accepts a body
+through `AudioStore::accept` (201 with the content hash, 400 if the bytes are not audio), and
+anything else is 404. It is a hand-rolled request/response loop with no framework: one request,
+one response, then close. Both carriers bind around one shared `Arc<Mutex<AudioStore>>`, so a
+publish on either is served on either.
 
 ## Next carrier
 
-HTTP: `GET /audio/{hash}` serves the bytes with an audio content type, `POST /audio` accepts a
-body through `AudioStore::accept`. It is a new file and not a new set of rules. After that,
-whatever the imagination layer's `Transport` seam already offers. A new carrier must reuse
-`AudioStore::accept` and must not grow the operation set.
+Whatever the imagination layer's `Transport` seam already offers -- UDP, IPFS, Reticulum. A new
+carrier must reuse `AudioStore::accept`, must not grow the operation set, and must carry its own
+bounds.

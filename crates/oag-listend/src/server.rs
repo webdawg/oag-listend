@@ -34,6 +34,10 @@ pub const STARTUP_SOUNDS: usize = 4;
 pub struct ShutdownHandle(watch::Sender<bool>);
 
 impl ShutdownHandle {
+    pub(crate) fn new(sender: watch::Sender<bool>) -> Self {
+        Self(sender)
+    }
+
     /// Ask every session to stop and the accept loop to return. Idempotent.
     pub fn shutdown(&self) {
         let _ = self.0.send(true);
@@ -60,11 +64,20 @@ impl ListendServer {
         addr: &str,
         store: AudioStore,
     ) -> std::io::Result<(Self, std::net::SocketAddr)> {
+        Self::bind_shared(addr, Arc::new(Mutex::new(store))).await
+    }
+
+    /// Bind around an already-shared store, so two carriers (TCP and HTTP) serve the same audio
+    /// rather than two private stores.
+    pub async fn bind_shared(
+        addr: &str,
+        store: Arc<Mutex<AudioStore>>,
+    ) -> std::io::Result<(Self, std::net::SocketAddr)> {
         let listener = TcpListener::bind(addr).await?;
         let local_addr = listener.local_addr()?;
         let (shutdown_tx, _) = watch::channel(false);
         let server = Self {
-            store: Arc::new(Mutex::new(store)),
+            store,
             listener,
             local_addr,
             read_timeout: READ_TIMEOUT,

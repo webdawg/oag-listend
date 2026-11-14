@@ -1,17 +1,21 @@
 //! `oag-listend` -- run the daemon.
 //!
-//!     oag-listend --listen 0.0.0.0:7100 --seed 20261112
+//!     oag-listend --listen 0.0.0.0:7100 --http 0.0.0.0:7101 --seed 20261112
 //!
 //! It binds, publishes a small seeded set of generated sounds, and serves audio until interrupted.
-//! Every inbound publish still goes through `AudioStore::accept`, so the daemon accepts audio and
-//! nothing else.
+//! Both carriers share one store, and every inbound publish still goes through
+//! `AudioStore::accept`, so the daemon accepts audio and nothing else.
 
+use std::sync::Arc;
 use std::time::Duration;
 
+use oag_listend::http::HttpCarrier;
 use oag_listend::{AudioStore, ListendServer, DEFAULT_MAX_BYTES};
+use tokio::sync::Mutex;
 
 struct Args {
     listen: String,
+    http: Option<String>,
     seed: u64,
     max_bytes: usize,
     no_generate: bool,
@@ -20,6 +24,7 @@ struct Args {
 fn parse_args() -> Args {
     let mut args = Args {
         listen: "0.0.0.0:7100".to_string(),
+        http: None,
         seed: default_seed(),
         max_bytes: DEFAULT_MAX_BYTES,
         no_generate: false,
@@ -27,9 +32,8 @@ fn parse_args() -> Args {
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
-            "--listen" => {
-                args.listen = it.next().expect("--listen needs an address");
-            }
+            "--listen" => args.listen = it.next().expect("--listen needs an address"),
+            "--http" => args.http = Some(it.next().expect("--http needs an address")),
             "--seed" => {
                 args.seed = it
                     .next()
@@ -61,8 +65,9 @@ fn parse_args() -> Args {
 fn usage() -> String {
     format!(
         "oag-listend -- the global daemon that serves audio\n\n\
-         Usage: oag-listend [--listen ADDR] [--seed U64] [--max-bytes N] [--no-generate]\n\n\
-           --listen ADDR    bind address (default 0.0.0.0:7100)\n\
+         Usage: oag-listend [--listen ADDR] [--http ADDR] [--seed U64] [--max-bytes N] [--no-generate]\n\n\
+           --listen ADDR    native protocol bind address (default 0.0.0.0:7100)\n\
+           --http ADDR      also serve HTTP at ADDR (GET /audio/{{hash}}, POST /audio)\n\
            --seed U64       seed for the startup sounds (default: clock)\n\
            --max-bytes N    store bound in bytes (default {DEFAULT_MAX_BYTES})\n\
            --no-generate    do not publish generated sounds at startup\n\n\
@@ -79,37 +84,55 @@ fn default_seed() -> u64 {
     nanos ^ ((std::process::id() as u64) << 32)
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let args = parse_args();
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .expect("tokio runtime");
+    let store = Arc::new(Mutex::new(AudioStore::with_capacity(args.max_bytes)));
 
-    runtime.block_on(async move {
-        let store = AudioStore::with_capacity(args.max_bytes);
-        let (server, addr) = ListendServer::bind(&args.listen, store)
-            .await
-            .unwrap_or_else(|e| {
-                eprintln!("oag-listend: cannot bind {}: {e}", args.listen);
-                std::process::exit(1);
-            });
+    let (server, native_addr) = ListendServer::bind_shared(&args.listen, Arc::clone(&store))
+        .await
+        .unwrap_or_else(|e| {
+            eprintln!("oag-listend: cannot bind {}: {e}", args.listen);
+            std::process::exit(1);
+        });
+    let native_shutdown = server.shutdown_handle();
 
-        if !args.no_generate {
-            for hash in server.publish_generated(args.seed, oag_listend::server::STARTUP_SOUNDS).await {
-                println!("  generated {}", &hash[..16]);
-            }
+    let http = match &args.http {
+        Some(addr) => {
+            let (carrier, http_addr) = HttpCarrier::bind_shared(addr, Arc::clone(&store))
+                .await
+                .unwrap_or_else(|e| {
+                    eprintln!("oag-listend: cannot bind http {addr}: {e}");
+                    std::process::exit(1);
+                });
+            println!("oag-listend http on {http_addr}");
+            Some((carrier, http_addr))
         }
+        None => None,
+    };
+    let http_shutdown = http.as_ref().map(|(carrier, _)| carrier.shutdown_handle());
 
-        println!("oag-listend listening on {addr}");
-        println!("  seed {}  max-bytes {}", args.seed, args.max_bytes);
-        println!("  only audio is accepted; everything else is rejected before it is stored");
+    if !args.no_generate {
+        for hash in server.publish_generated(args.seed, oag_listend::server::STARTUP_SOUNDS).await {
+            println!("  generated {}", &hash[..16]);
+        }
+    }
 
-        let run = tokio::spawn(async move { server.run().await });
-        let _ = tokio::signal::ctrl_c().await;
-        println!("oag-listend shutting down");
-        // The spawned task owns the server; give it a moment to stop accepting.
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        run.abort();
-    });
+    println!("oag-listend listening on {native_addr}");
+    println!("  seed {}  max-bytes {}", args.seed, args.max_bytes);
+    println!("  only audio is accepted; everything else is rejected before it is stored");
+
+    let native_run = tokio::spawn(async move { server.run().await });
+    let http_run = http.map(|(carrier, _)| tokio::spawn(async move { carrier.run().await }));
+
+    let _ = tokio::signal::ctrl_c().await;
+    println!("oag-listend shutting down");
+    native_shutdown.shutdown();
+    if let Some(handle) = http_shutdown {
+        handle.shutdown();
+    }
+    let _ = tokio::time::timeout(Duration::from_secs(5), native_run).await;
+    if let Some(run) = http_run {
+        let _ = tokio::time::timeout(Duration::from_secs(5), run).await;
+    }
 }

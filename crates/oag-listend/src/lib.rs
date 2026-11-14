@@ -21,6 +21,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod http;
 pub mod protocol;
 pub mod server;
 pub mod wav;

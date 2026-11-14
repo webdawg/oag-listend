@@ -1,0 +1,275 @@
+//! The HTTP carrier: the same audio surface over a protocol a browser already speaks.
+//!
+//! This is deliberately a small, hand-rolled HTTP/1.1 server. It parses one request, answers it,
+//! and closes the connection. There is no keep-alive state, no chunked encoding, no TLS, and no
+//! framework: the daemon is a service that serves audio, and a carrier that grew into a web server
+//! would be a different program. Every rule is still `AudioStore`'s -- `POST /audio` goes through
+//! `AudioStore::accept`, and `GET /audio/{hash}` returns the bytes with the item's media type.
+//!
+//! Routes:
+//! - `GET  /`             -- what this is, and how much audio it holds
+//! - `GET  /audio/{hash}` -- the audio bytes (404 if unknown)
+//! - `POST /audio`        -- publish a body (413 if too large, 400 if not audio)
+//! - anything else        -- 404
+
+#![forbid(unsafe_code)]
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Mutex;
+
+use crate::server::ShutdownHandle;
+use crate::{AudioStore, ListendError};
+
+/// Bounds for one HTTP request. The head cap keeps a header flood from allocating; the body cap
+/// matches the native protocol's frame cap so the two carriers accept the same audio.
+pub const MAX_HEAD_BYTES: usize = 16 * 1024;
+pub const MAX_BODY_BYTES: usize = super::protocol::MAX_FRAME_BYTES;
+pub const IO_TIMEOUT: Duration = Duration::from_secs(10);
+pub const MAX_CONNECTIONS: usize = 64;
+
+pub struct HttpCarrier {
+    store: Arc<Mutex<AudioStore>>,
+    listener: TcpListener,
+    local_addr: std::net::SocketAddr,
+    shutdown_tx: tokio::sync::watch::Sender<bool>,
+}
+
+impl HttpCarrier {
+    pub async fn bind_shared(
+        addr: &str,
+        store: Arc<Mutex<AudioStore>>,
+    ) -> std::io::Result<(Self, std::net::SocketAddr)> {
+        let listener = TcpListener::bind(addr).await?;
+        let local_addr = listener.local_addr()?;
+        let (shutdown_tx, _) = tokio::sync::watch::channel(false);
+        Ok((
+            Self { store, listener, local_addr, shutdown_tx },
+            local_addr,
+        ))
+    }
+
+    pub fn local_addr(&self) -> std::net::SocketAddr {
+        self.local_addr
+    }
+
+    pub fn shutdown_handle(&self) -> ShutdownHandle {
+        ShutdownHandle::new(self.shutdown_tx.clone())
+    }
+
+    pub async fn run(&self) -> std::io::Result<()> {
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
+        let mut shutdown_rx = self.shutdown_tx.subscribe();
+        loop {
+            tokio::select! {
+                _ = shutdown_rx.changed() => break,
+                accepted = self.listener.accept() => {
+                    let (stream, _) = match accepted {
+                        Ok(pair) => pair,
+                        Err(_) => continue,
+                    };
+                    let Ok(permit) = semaphore.clone().acquire_owned().await else { break };
+                    let store = Arc::clone(&self.store);
+                    tokio::spawn(async move {
+                        let _permit = permit;
+                        let _ = serve_connection(stream, store).await;
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+async fn serve_connection(mut stream: TcpStream, store: Arc<Mutex<AudioStore>>) -> std::io::Result<()> {
+    let request = match read_request(&mut stream).await? {
+        Some(request) => request,
+        None => return Ok(()),
+    };
+    let response = route(request, &store).await;
+    write_response(&mut stream, &response).await
+}
+
+struct HttpRequest {
+    method: String,
+    path: String,
+    content_type: Option<String>,
+    body: Vec<u8>,
+}
+
+async fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<HttpRequest>> {
+    let mut head = Vec::new();
+    let mut buf = [0u8; 1024];
+    loop {
+        if head.len() > MAX_HEAD_BYTES {
+            return Ok(Some(HttpRequest {
+                method: "BAD".into(),
+                path: String::new(),
+                content_type: None,
+                body: Vec::new(),
+            }));
+        }
+        let n = tokio::time::timeout(IO_TIMEOUT, stream.read(&mut buf))
+            .await
+            .map_err(|_| timeout_error())??;
+        if n == 0 {
+            return Ok(None);
+        }
+        head.extend_from_slice(&buf[..n]);
+        if let Some(pos) = find_headers_end(&head) {
+            let head_str = String::from_utf8_lossy(&head[..pos]).into_owned();
+            let mut lines = head_str.split("\r\n");
+            let request_line = lines.next().unwrap_or("");
+            let mut parts = request_line.split(' ');
+            let method = parts.next().unwrap_or("").to_string();
+            let path = parts.next().unwrap_or("").to_string();
+            if method.is_empty() || path.is_empty() {
+                return Ok(Some(HttpRequest {
+                    method: "BAD".into(),
+                    path: String::new(),
+                    content_type: None,
+                    body: Vec::new(),
+                }));
+            }
+            let mut content_length = 0usize;
+            let mut content_type = None;
+            for line in lines {
+                if let Some((name, value)) = line.split_once(':') {
+                    let value = value.trim();
+                    if name.trim().eq_ignore_ascii_case("content-length") {
+                        content_length = value.parse().unwrap_or(0);
+                    } else if name.trim().eq_ignore_ascii_case("content-type") {
+                        content_type = Some(value.to_string());
+                    }
+                }
+            }
+            let body = head[pos + 4..].to_vec();
+            let mut body = body;
+            if content_length > MAX_BODY_BYTES {
+                return Ok(Some(HttpRequest {
+                    method: "BAD".into(),
+                    path: String::new(),
+                    content_type: None,
+                    body: Vec::new(),
+                }));
+            }
+            while body.len() < content_length {
+                let n = tokio::time::timeout(IO_TIMEOUT, stream.read(&mut buf))
+                    .await
+                    .map_err(|_| timeout_error())??;
+                if n == 0 {
+                    break;
+                }
+                body.extend_from_slice(&buf[..n]);
+            }
+            body.truncate(content_length);
+            return Ok(Some(HttpRequest { method, path, content_type, body }));
+        }
+    }
+}
+
+fn find_headers_end(buf: &[u8]) -> Option<usize> {
+    buf.windows(4).position(|w| w == b"\r\n\r\n")
+}
+
+struct HttpResponse {
+    status: u16,
+    reason: &'static str,
+    content_type: String,
+    body: Vec<u8>,
+}
+
+async fn route(request: HttpRequest, store: &Arc<Mutex<AudioStore>>) -> HttpResponse {
+    if request.method == "BAD" {
+        return HttpResponse {
+            status: 400,
+            reason: "Bad Request",
+            content_type: "text/plain".into(),
+            body: b"bad request".to_vec(),
+        };
+    }
+
+    match (request.method.as_str(), request.path.as_str()) {
+        ("GET", "/") => {
+            let count = store.lock().await.len();
+            HttpResponse {
+                status: 200,
+                reason: "OK",
+                content_type: "text/plain".into(),
+                body: format!("oag-listend\nitems: {count}\nonly audio is accepted\n").into_bytes(),
+            }
+        }
+        ("GET", path) if path.starts_with("/audio/") => {
+            let hash = &path["/audio/".len()..];
+            if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return not_found();
+            }
+            let store = store.lock().await;
+            match store.serve(hash) {
+                Ok(item) => HttpResponse {
+                    status: 200,
+                    reason: "OK",
+                    content_type: item.media_type.clone().unwrap_or_else(|| "application/octet-stream".into()),
+                    body: item.bytes.clone(),
+                },
+                Err(_) => not_found(),
+            }
+        }
+        ("POST", "/audio") => {
+            let mut store = store.lock().await;
+            match store.accept(request.body, request.content_type) {
+                Ok(hash) => HttpResponse {
+                    status: 201,
+                    reason: "Created",
+                    content_type: "text/plain".into(),
+                    body: hash.into_bytes(),
+                },
+                Err(ListendError::NotAudio) => HttpResponse {
+                    status: 400,
+                    reason: "Bad Request",
+                    content_type: "text/plain".into(),
+                    body: ListendError::NotAudio.to_string().into_bytes(),
+                },
+                Err(e) => HttpResponse {
+                    status: 400,
+                    reason: "Bad Request",
+                    content_type: "text/plain".into(),
+                    body: e.to_string().into_bytes(),
+                },
+            }
+        }
+        _ => not_found(),
+    }
+}
+
+fn not_found() -> HttpResponse {
+    HttpResponse {
+        status: 404,
+        reason: "Not Found",
+        content_type: "text/plain".into(),
+        body: b"not found".to_vec(),
+    }
+}
+
+async fn write_response(stream: &mut TcpStream, response: &HttpResponse) -> std::io::Result<()> {
+    let mut out = Vec::new();
+    out.extend_from_slice(format!("HTTP/1.1 {} {}\r\n", response.status, response.reason).as_bytes());
+    out.extend_from_slice(format!("Content-Type: {}\r\n", response.content_type).as_bytes());
+    out.extend_from_slice(format!("Content-Length: {}\r\n", response.body.len()).as_bytes());
+    out.extend_from_slice(b"Connection: close\r\n\r\n");
+    out.extend_from_slice(&response.body);
+    tokio::time::timeout(IO_TIMEOUT, stream.write_all(&out))
+        .await
+        .map_err(|_| timeout_error())??;
+    tokio::time::timeout(IO_TIMEOUT, stream.flush())
+        .await
+        .map_err(|_| timeout_error())??;
+    Ok(())
+}
+
+fn timeout_error() -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::TimedOut, "http io timed out")
+}
