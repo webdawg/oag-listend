@@ -41,6 +41,18 @@ pub const DEFAULT_LIST_LIMIT: usize = 1000;
 /// frame its own client has to reject as too long.
 pub const MAX_LIST_LIMIT: usize = 10_000;
 
+/// The page size for a `limit` of zero or a limit above `max`.
+///
+/// A client that sends `limit: 0` is asking for the default, not for one item; clamping zero to 1
+/// would silently return a page the client did not ask for.
+pub fn normalize_limit(limit: usize, max: usize) -> usize {
+    if limit == 0 {
+        DEFAULT_LIST_LIMIT.min(max)
+    } else {
+        limit.min(max)
+    }
+}
+
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum WireError {
     #[error("the frame is truncated")]
@@ -392,6 +404,16 @@ mod tests {
             offset: 2,
         });
         roundtrip_response(&Response::Published { content_hash: "33".repeat(32) });
+    }
+
+    #[test]
+    fn a_zero_limit_means_the_default_not_one_item() {
+        assert_eq!(normalize_limit(0, MAX_LIST_LIMIT), DEFAULT_LIST_LIMIT);
+        assert_eq!(normalize_limit(5, MAX_LIST_LIMIT), 5);
+        assert_eq!(normalize_limit(20_000, MAX_LIST_LIMIT), MAX_LIST_LIMIT);
+        // A carrier with a smaller cap still honours the default, capped by that carrier.
+        assert_eq!(normalize_limit(0, 100), 100);
+        assert_eq!(normalize_limit(0, 1), 1);
     }
 
     #[test]

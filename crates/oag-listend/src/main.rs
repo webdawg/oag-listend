@@ -89,6 +89,16 @@ fn usage() -> String {
     )
 }
 
+/// Say plainly when a bind address is not loopback. The default is `0.0.0.0`, which serves every
+/// interface; an operator who did not think about that should be told rather than discover it.
+fn note_public_bind(addr: std::net::SocketAddr) {
+    if !addr.ip().is_loopback() {
+        println!(
+            "  note: {addr} is not a loopback address -- this serves audio to that interface"
+        );
+    }
+}
+
 /// A seed from the clock and the process id, so two daemons on one machine do not sound alike.
 fn default_seed() -> u64 {
     let nanos = std::time::SystemTime::now()
@@ -134,6 +144,7 @@ async fn main() {
                     std::process::exit(1);
                 });
             println!("oag-listend http on {http_addr}");
+        note_public_bind(http_addr);
             Some((carrier, http_addr))
         }
         None => None,
@@ -149,6 +160,7 @@ async fn main() {
                     std::process::exit(1);
                 });
             println!("oag-listend udp on {udp_addr}");
+            note_public_bind(udp_addr);
             Some((carrier, udp_addr))
         }
         None => None,
@@ -185,6 +197,7 @@ async fn main() {
     }
 
     println!("oag-listend listening on {native_addr}");
+    note_public_bind(native_addr);
     println!(
         "  seed {}  max-bytes {}{}",
         args.seed,

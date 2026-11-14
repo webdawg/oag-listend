@@ -94,9 +94,12 @@ Install and start it with:
 The daemon handles both SIGINT and SIGTERM, so `systemctl stop` is a clean stop: the accept loops
 return, the Unix socket is removed, and the process exits 0.
 
+The default bind is `0.0.0.0`, which serves every interface; when a carrier binds a non-loopback
+address the daemon prints a note saying so. Use `--listen 127.0.0.1:...` to keep it local.
+
 ## Status
 
-**Serves, and survives a restart.** Four carriers are live and tested: 37 unit tests plus 15
+**Serves, and survives a restart.** Four carriers are live and tested: 38 unit tests plus 15
 end-to-end tests (`cargo test -p oag-listend`). Runs as a systemd service (`scripts/oag-listend.service`)
 and shuts down cleanly on SIGINT and SIGTERM. The native protocol, HTTP, and UDP share one store,
 and all were verified by hand: audio posted to HTTP came back byte-identical, `push_pull` verified

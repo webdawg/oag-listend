@@ -229,7 +229,7 @@ pub(crate) async fn handle(request: Request, store: &Arc<Mutex<AudioStore>>) -> 
             let hashes = store.hashes();
             let total = hashes.len();
             // The page is bounded so the response always fits the frame cap.
-            let limit = limit.clamp(1, crate::protocol::MAX_LIST_LIMIT);
+            let limit = crate::protocol::normalize_limit(limit, crate::protocol::MAX_LIST_LIMIT);
             let offset = offset.min(total);
             let end = (offset + limit).min(total);
             Response::Listing {

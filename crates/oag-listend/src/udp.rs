@@ -104,7 +104,7 @@ async fn handle(datagram: &[u8], store: &Arc<Mutex<AudioStore>>) -> Option<Vec<u
             let store = store.lock().await;
             let hashes = store.hashes();
             let total = hashes.len();
-            let limit = limit.clamp(1, MAX_DATAGRAM_LIST_LIMIT);
+            let limit = crate::protocol::normalize_limit(limit, MAX_DATAGRAM_LIST_LIMIT);
             let offset = offset.min(total);
             let end = (offset + limit).min(total);
             Response::Listing {

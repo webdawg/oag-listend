@@ -279,7 +279,7 @@ async fn route(request: HttpRequest, store: &Arc<Mutex<AudioStore>>) -> HttpResp
             let (offset, limit) = parse_query(query);
             let hashes = store.lock().await.hashes();
             let total = hashes.len();
-            let limit = limit.clamp(1, crate::protocol::MAX_LIST_LIMIT);
+            let limit = crate::protocol::normalize_limit(limit, crate::protocol::MAX_LIST_LIMIT);
             let offset = offset.min(total);
             let end = (offset + limit).min(total);
             let mut body = String::new();
@@ -411,7 +411,9 @@ async fn route(request: HttpRequest, store: &Arc<Mutex<AudioStore>>) -> HttpResp
 /// default; a `limit` above the carrier's cap is clamped by the caller.
 fn parse_query(query: Option<&str>) -> (usize, usize) {
     let mut offset = 0usize;
-    let mut limit = crate::protocol::MAX_LIST_LIMIT;
+    // Zero means "the default", which the caller resolves; starting at the maximum would make an
+    // absent limit return ten thousand entries rather than the default page.
+    let mut limit = 0usize;
     let Some(query) = query else { return (offset, limit) };
     for pair in query.split('&') {
         if let Some((key, value)) = pair.split_once('=') {

@@ -168,7 +168,8 @@ recognisable rather than a protocol error.
 
 ## Listing order and pages
 
-The list operation is paginated: `List { offset, limit }` returns one page and the store's `total`,
+The list operation is paginated: `List { offset, limit }` returns one page and the store's `total`
+(`limit` 0 means the default page, not one item),
 so a client can walk the whole store without guessing. The page is bounded (`MAX_LIST_LIMIT` on a
 stream carrier, a smaller cap on UDP) because an unbounded listing would eventually exceed the frame
 cap -- the daemon would send a frame its own client has to reject.
@@ -185,6 +186,11 @@ the daemon by path rather than by port: no port to allocate or collide, and the 
 decide who may connect. It shares the TCP session loop, so the protocol, the bounds, and the
 inbound rule are identical by construction. A stale socket file from a killed daemon is removed on
 bind and on shutdown.
+
+## Saying what it hears
+
+The default bind is `0.0.0.0`, which serves every interface. When a carrier binds a non-loopback
+address the daemon says so, rather than letting an operator discover it later.
 
 ## Running it
 
