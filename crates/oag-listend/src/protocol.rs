@@ -28,6 +28,12 @@ const OP_RESP_PUBLISHED: u8 = 0x15;
 
 const HASH_LEN: usize = 64;
 
+/// The name this daemon answers with. Part of the hello, so a client can tell what it reached.
+pub const DAEMON_NAME: &str = "oag-listend";
+
+/// The version of the frame protocol. A client that does not recognise it should not guess.
+pub const PROTOCOL_VERSION: u16 = 1;
+
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum WireError {
     #[error("the frame is truncated")]
@@ -59,7 +65,8 @@ pub enum Request {
 /// A daemon response. Every request gets exactly one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Response {
-    Hello { item_count: usize },
+    /// What this daemon is, which protocol it speaks, and how much audio it holds.
+    Hello { name: String, protocol_version: u16, item_count: usize },
     /// Audio bytes, with the hash they must verify against.
     Audio { content_hash: String, bytes: Vec<u8> },
     /// The inbound rule refused these bytes. `reason` describes the refusal, never the bytes.
@@ -222,8 +229,10 @@ pub fn decode_request(body: &[u8]) -> Result<Request, WireError> {
 pub fn encode_response(resp: &Response) -> Vec<u8> {
     let mut out = Vec::new();
     match resp {
-        Response::Hello { item_count } => {
+        Response::Hello { name, protocol_version, item_count } => {
             out.push(OP_RESP_HELLO);
+            put_str(&mut out, name);
+            put_u16(&mut out, *protocol_version);
             put_u32(&mut out, *item_count as u32);
         }
         Response::Audio { content_hash, bytes } => {
@@ -259,7 +268,12 @@ pub fn decode_response(body: &[u8]) -> Result<Response, WireError> {
     let mut r = Reader::new(body);
     let op = r.u8()?;
     match op {
-        OP_RESP_HELLO => Ok(Response::Hello { item_count: r.u32()? as usize }),
+        OP_RESP_HELLO => {
+            let name = r.string()?;
+            let protocol_version = r.u16()?;
+            let item_count = r.u32()? as usize;
+            Ok(Response::Hello { name, protocol_version, item_count })
+        }
         OP_RESP_AUDIO => {
             let content_hash = r.hash()?;
             let len = r.u32()? as usize;
@@ -315,8 +329,33 @@ mod tests {
     }
 
     #[test]
+    fn hello_carries_the_daemon_identity_and_a_future_name_still_decodes() {
+        let hello = Response::Hello {
+            name: DAEMON_NAME.to_string(),
+            protocol_version: PROTOCOL_VERSION,
+            item_count: 7,
+        };
+        let body = encode_response(&hello);
+        assert_eq!(decode_response(&body).unwrap(), hello);
+
+        // A client must be able to recognise a daemon it does not know rather than fail the
+        // decode, or a future version becomes a protocol error.
+        let future = Response::Hello {
+            name: "oag-listend-2".to_string(),
+            protocol_version: PROTOCOL_VERSION + 1,
+            item_count: 0,
+        };
+        let body = encode_response(&future);
+        assert_eq!(decode_response(&body).unwrap(), future);
+    }
+
+    #[test]
     fn responses_round_trip() {
-        roundtrip_response(&Response::Hello { item_count: 3 });
+        roundtrip_response(&Response::Hello {
+            name: DAEMON_NAME.to_string(),
+            protocol_version: PROTOCOL_VERSION,
+            item_count: 3,
+        });
         roundtrip_response(&Response::Audio {
             content_hash: "cd".repeat(32),
             bytes: vec![9, 8, 7],

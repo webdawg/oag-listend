@@ -242,8 +242,9 @@ async fn route(request: HttpRequest, store: &Arc<Mutex<AudioStore>>) -> HttpResp
                 200,
                 "OK",
                 format!(
-                    "oag-listend\nitems: {count}\nGET /audio for the content hashes\n\
-                     only audio is accepted\n"
+                    "oag-listend\nprotocol {}\nitems: {count}\n\
+                     GET /audio for the content hashes\nonly audio is accepted\n",
+                    crate::protocol::PROTOCOL_VERSION
                 )
                 .as_bytes(),
             );

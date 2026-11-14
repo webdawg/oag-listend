@@ -49,7 +49,7 @@ async fn back_and_forth() {
 
     // 1. Hello.
     send(&mut stream, &Request::Hello).await;
-    assert_eq!(recv(&mut stream).await, Response::Hello { item_count: 0 });
+    assert_eq!(recv(&mut stream).await, Response::Hello { name: oag_listend::protocol::DAEMON_NAME.to_string(), protocol_version: oag_listend::protocol::PROTOCOL_VERSION, item_count: 0 });
 
     // 2. Push a generated tone. This is "random generated data ... sounds".
     let tone = wav::generate(2026, wav::Sound::Tone);
@@ -102,7 +102,7 @@ async fn back_and_forth() {
         }
     }
     send(&mut stream, &Request::Hello).await;
-    assert_eq!(recv(&mut stream).await, Response::Hello { item_count: 1 });
+    assert_eq!(recv(&mut stream).await, Response::Hello { name: oag_listend::protocol::DAEMON_NAME.to_string(), protocol_version: oag_listend::protocol::PROTOCOL_VERSION, item_count: 1 });
 
     // 6. An unknown hash is a typed not-found, not a hang.
     send(&mut stream, &Request::Fetch { content_hash: "ab".repeat(32) }).await;

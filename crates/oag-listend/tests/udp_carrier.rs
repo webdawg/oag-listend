@@ -44,7 +44,7 @@ async fn round_trip() {
 
     assert_eq!(
         exchange(&socket, addr, &Request::Hello).await,
-        Response::Hello { item_count: 0 }
+        Response::Hello { name: oag_listend::protocol::DAEMON_NAME.to_string(), protocol_version: oag_listend::protocol::PROTOCOL_VERSION, item_count: 0 }
     );
 
     let tone = wav::generate(23, wav::Sound::Tone);

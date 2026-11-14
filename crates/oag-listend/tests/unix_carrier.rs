@@ -51,7 +51,7 @@ async fn round_trip_test(path: &std::path::Path) {
     let run = tokio::spawn(async move { carrier.run().await });
 
     let mut stream = UnixStream::connect(path).await.expect("connect unix");
-    assert_eq!(round_trip(&mut stream, &Request::Hello).await, Response::Hello { item_count: 0 });
+    assert_eq!(round_trip(&mut stream, &Request::Hello).await, Response::Hello { name: oag_listend::protocol::DAEMON_NAME.to_string(), protocol_version: oag_listend::protocol::PROTOCOL_VERSION, item_count: 0 });
 
     let tone = wav::generate(41, wav::Sound::Tone);
     let hash = match round_trip(

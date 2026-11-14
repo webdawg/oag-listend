@@ -93,7 +93,11 @@ async fn handle(datagram: &[u8], store: &Arc<Mutex<AudioStore>>) -> Option<Vec<u
     };
 
     let response = match request {
-        Request::Hello => Response::Hello { item_count: store.lock().await.len() },
+        Request::Hello => Response::Hello {
+            name: crate::protocol::DAEMON_NAME.to_string(),
+            protocol_version: crate::protocol::PROTOCOL_VERSION,
+            item_count: store.lock().await.len(),
+        },
         Request::List => Response::Listing { content_hashes: store.lock().await.hashes() },
         Request::Fetch { content_hash } => {
             let store = store.lock().await;

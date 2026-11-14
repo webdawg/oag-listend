@@ -114,7 +114,8 @@ rule a client's bytes use, so a fetch-only client still receives audio.
 
 ## The HTTP carrier
 
-The same audio surface over HTTP/1.1, so a browser can reach it. `GET /` says what it is,
+The same audio surface over HTTP/1.1, so a browser can reach it. `GET /` reports the daemon name,
+the protocol version, and the item count. `GET /` says what it is,
 `GET /audio/{hash}` serves the bytes with the item's media type, `POST /audio` accepts a body
 through `AudioStore::accept` (201 with the content hash, 400 if the bytes are not audio), and
 anything else is 404. It is a hand-rolled request/response loop with no framework: one request,
@@ -143,6 +144,13 @@ Eviction deletes the file, so the directory and the store agree on what is held 
 The bound is enforced on the way in: `accept` refuses audio larger than `--max-bytes` rather than
 writing it and immediately evicting it, and a startup file larger than the bound is skipped without
 being read. A bound that is only checked after the read or write is not a bound.
+
+## The hello
+
+`Hello` answers with the daemon name (`oag-listend`), the frame protocol version, and the item
+count. A client can therefore tell what it reached and whether it speaks the same protocol, instead
+of inferring from a bare count. An unrecognised name still decodes, so a future daemon is
+recognisable rather than a protocol error.
 
 ## Listing order
 

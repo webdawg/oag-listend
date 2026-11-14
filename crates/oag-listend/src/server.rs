@@ -194,7 +194,11 @@ pub(crate) async fn handle(request: Request, store: &Arc<Mutex<AudioStore>>) -> 
     match request {
         Request::Hello => {
             let count = store.lock().await.len();
-            Response::Hello { item_count: count }
+            Response::Hello {
+                name: crate::protocol::DAEMON_NAME.to_string(),
+                protocol_version: crate::protocol::PROTOCOL_VERSION,
+                item_count: count,
+            }
         }
         Request::List => {
             let hashes = store.lock().await.hashes();
@@ -293,7 +297,14 @@ mod tests {
         let store = Arc::new(Mutex::new(AudioStore::default()));
         store.lock().await.publish(AudioItem::new(vec![1], None));
         let response = handle(Request::Hello, &store).await;
-        assert_eq!(response, Response::Hello { item_count: 1 });
+        assert_eq!(
+            response,
+            Response::Hello {
+                name: crate::protocol::DAEMON_NAME.to_string(),
+                protocol_version: crate::protocol::PROTOCOL_VERSION,
+                item_count: 1,
+            }
+        );
     }
 
     #[tokio::test]
