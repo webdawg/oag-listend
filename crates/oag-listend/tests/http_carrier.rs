@@ -652,6 +652,9 @@ async fn oversized_expect() {
         oag_listend::http::MAX_BODY_BYTES + 1
     );
     stream.write_all(head.as_bytes()).await.expect("write head");
+    // A body follows the headers; the server refuses on the declared length and must still deliver
+    // the response rather than resetting it away with the unread body.
+    stream.write_all(b"x").await.expect("write body");
     stream.flush().await.expect("flush");
     let mut first = [0u8; 32];
     let n = tokio::time::timeout(BOUND, stream.read_exact(&mut first))

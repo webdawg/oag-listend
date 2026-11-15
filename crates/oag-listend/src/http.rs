@@ -242,7 +242,8 @@ async fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<HttpRequ
                     range: None,
                     if_none_match: None,
                     transfer_encoding: None,
-                    unread_body: false,
+                    // The body was not read, so it must be drained or the 400 is reset away.
+                    unread_body: true,
                     body: Vec::new(),
                 }));
             }
