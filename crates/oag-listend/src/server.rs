@@ -126,7 +126,11 @@ impl ListendServer {
             };
         }
         let mut report = GeneratedReport::default();
-        for bytes in crate::wav::sounds(seed, count) {
+        let mut items = crate::wav::sounds(seed, count);
+        // The canonical ping sound is part of the seed set, so it is durable and fetchable by hash
+        // as well as answerable with a ping.
+        items.push(crate::wav::twinkle());
+        for bytes in items {
             match store.accept(bytes, Some("audio/wav".to_string())).await {
                 Ok(hash) => report.accepted.push(hash),
                 Err(e) => report.rejected.push(e.to_string()),
@@ -246,6 +250,13 @@ pub(crate) async fn handle(request: Request, store: &Arc<Mutex<AudioStore>>) -> 
                 protocol_version: crate::protocol::PROTOCOL_VERSION,
                 item_count: count,
             }
+        }
+        Request::Ping => {
+            // The ping answer is the canonical audio item, generated deterministically, so every
+            // daemon answers with the same bytes and the same hash.
+            let bytes = crate::wav::twinkle();
+            let content_hash = crate::AudioItem::new(bytes.clone(), None).content_hash;
+            Response::Audio { content_hash, bytes }
         }
         Request::List { offset, limit } => {
             let store = store.lock().await;
@@ -546,15 +557,16 @@ mod tests {
         let (server, _addr) = super::ListendServer::bind_shared("127.0.0.1:0", Arc::clone(&store))
             .await
             .unwrap();
+        // Four seeded sounds plus the canonical ping.
         let first = server.publish_generated(1, 4).await;
-        assert_eq!(first.accepted.len(), 4);
+        assert_eq!(first.accepted.len(), 5);
         assert!(!first.skipped_non_empty);
-        assert_eq!(store.lock().await.len(), 4);
+        assert_eq!(store.lock().await.len(), 5);
 
         let second = server.publish_generated(2, 4).await;
         assert!(second.accepted.is_empty());
         assert!(second.skipped_non_empty, "a non-empty store must not be added to");
-        assert_eq!(store.lock().await.len(), 4, "a restart must not grow the store");
+        assert_eq!(store.lock().await.len(), 5, "a restart must not grow the store");
     }
 
     #[tokio::test]
@@ -565,7 +577,7 @@ mod tests {
             .unwrap();
         let report = server.publish_generated(1, 4).await;
         assert!(report.accepted.is_empty());
-        assert_eq!(report.rejected.len(), 4, "every refusal must be reported");
+        assert_eq!(report.rejected.len(), 5, "every refusal must be reported");
         assert!(report.rejected.iter().all(|r| r.contains("larger than")));
     }
 

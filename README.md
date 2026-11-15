@@ -25,11 +25,12 @@ Two implemented rules, both enforced at the surface so no carrier can forget the
   recognised audio signature -- checked on the bytes, never on a declared type. Everything else is
   rejected before it is stored.
 
-One additional individual directive is recorded for the next implementation step:
+One additional individual directive is implemented:
 
-- **Even pings are music:** every liveness ping must answer with audio rather than an empty control
-  pong. The first canonical ping will be a generated WAV rendition of “Twinkle, Twinkle, Little
-  Star.” See `SPEC.md` and `USER_INPUT_RECORD.md` Entry 3.
+- **Even pings are music:** every liveness ping answers with audio rather than an empty control
+  pong. The canonical ping is a generated WAV rendition of “Twinkle, Twinkle, Little Star,” the
+  same bytes and the same content hash on every daemon. Send `Ping` on the native protocol, or
+  `GET /ping` over HTTP. See `SPEC.md` and `USER_INPUT_RECORD.md` Entry 3.
 
 ## Turn it on
 
@@ -55,8 +56,9 @@ or over HTTP, with any client:
     curl -I http://127.0.0.1:7101/audio/<hash>                         # -> headers, no body
     curl -r 0-1023 http://127.0.0.1:7101/audio/<hash>                  # -> 206, a byte range
     curl -H 'If-None-Match: "<hash>"' http://127.0.0.1:7101/audio/<hash> # -> 304, revalidate
+    curl http://127.0.0.1:7101/ping                                       # -> the musical ping
 
-All three carriers share one store, and all accept audio and nothing else.
+All four carriers share one store, and all accept audio and nothing else.
 
 `--dir` persists the audio content-addressed under a directory, so a restart loads it back:
 
@@ -107,10 +109,10 @@ address the daemon prints a note saying so. Use `--listen 127.0.0.1:...` to keep
 
 ## Status
 
-**Serves, and survives a restart.** Four carriers are live and tested: 46 unit tests plus 19
+**Serves, and survives a restart.** Four carriers are live and tested: 47 unit tests plus 21
 end-to-end tests (`cargo test -p oag-listend`). The store mutex covers lookup and insert, not byte
 copies or disk writes, so one slow client does not stall the others. Runs as a systemd service
-(`scripts/oag-listend.service`) and shuts down cleanly on SIGINT and SIGTERM. The native protocol, HTTP, and UDP share one store,
+(`scripts/oag-listend.service`) and shuts down cleanly on SIGINT and SIGTERM. The native protocol, HTTP, UDP, and the Unix socket share one store,
 and all were verified by hand: audio posted to HTTP came back byte-identical, `push_pull` verified
 over TCP and UDP, HTML labelled `audio/wav` was refused on every carrier, and a daemon restarted
 with `--dir` loaded 5 items and served the posted WAV byte-identical.

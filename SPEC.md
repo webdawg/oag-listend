@@ -50,18 +50,16 @@ first canonical ping sound is a generated WAV rendition of the opening phrase of
 Twinkle, Little Star.”** A future carrier may choose a different encoding appropriate to its
 network, but it must preserve the musical content rather than replacing it with an empty pong.
 
-This directive is recorded now but is not implemented by the current carriers yet: the native
-protocol's `Hello` response is metadata, not the future musical ping. Compatibility must be
-preserved by adding an explicit audio ping rather than silently changing the existing `Hello`
-frame.
+Implemented. `wav::twinkle()` generates the melody deterministically; the native protocol's
+`Ping` operation and HTTP's `GET /ping` both answer with that audio item and its BLAKE3 hash. The
+existing `Hello` frame is unchanged, so compatibility is preserved. The canonical ping is also
+part of the startup set, so it is durable and fetchable by hash.
 
-Implementation TODO:
-
-- [ ] Add a deterministic Twinkle melody generator to `crates/oag-listend/src/wav.rs`.
-- [ ] Add a native protocol ping operation whose response is the Twinkle audio item and its BLAKE3
+- [x] Add a deterministic Twinkle melody generator to `crates/oag-listend/src/wav.rs`.
+- [x] Add a native protocol ping operation whose response is the Twinkle audio item and its BLAKE3
       content hash.
-- [ ] Expose the same musical liveness response on HTTP and every later carrier.
-- [ ] Test that a ping response is recognized audio, hash-verifiable, bounded, and never an empty
+- [x] Expose the same musical liveness response on HTTP and every later carrier.
+- [x] Test that a ping response is recognized audio, hash-verifiable, bounded, and never an empty
       metadata-only pong.
 
 ## The inbound rule
@@ -131,7 +129,8 @@ generated sound the store refuses is reported, not dropped.
 ## The HTTP carrier
 
 The same audio surface over HTTP/1.1, so a browser can reach it. `GET /` reports the daemon name,
-the protocol version, the item count, and the store's byte usage against its bound. `GET /audio` lists the content hashes one per line,
+the protocol version, the item count, and the store's byte usage against its bound. `GET /ping`
+answers with the canonical musical liveness item (see above), not a control string. `GET /audio` lists the content hashes one per line,
 sorted by hash, paginated with `?offset=&limit=` and reported through `X-Total-Count` and
 `X-Offset` -- so a client that only fetches can discover what exists, and the walk is the same
 across a restart. `GET /audio/{hash}` serves the bytes with a content type derived from the bytes,

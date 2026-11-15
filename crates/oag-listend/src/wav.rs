@@ -123,6 +123,47 @@ pub fn sounds(seed: u64, count: usize) -> Vec<Vec<u8>> {
         .collect()
 }
 
+/// A deterministic rendition of the opening of "Twinkle, Twinkle, Little Star".
+///
+/// This is the canonical ping sound (operator directive, `USER_INPUT_RECORD.md` Entry 3): a
+/// liveness answer must be audio, not an empty control pong. The melody is fixed -- C C G G A A G |
+/// F F E E D D C -- with a short ramp on each note so the concatenation does not click. No RNG, so
+/// every daemon answers a ping with the same bytes and therefore the same content hash.
+pub fn twinkle() -> Vec<u8> {
+    // (frequency, seconds). Quarter notes at 0.35 s, phrase-ending notes at 0.7 s.
+    const MELODY: [(f32, f32); 14] = [
+        (261.63, 0.35), // C4
+        (261.63, 0.35), // C4
+        (392.00, 0.35), // G4
+        (392.00, 0.35), // G4
+        (440.00, 0.35), // A4
+        (440.00, 0.35), // A4
+        (392.00, 0.70), // G4
+        (349.23, 0.35), // F4
+        (349.23, 0.35), // F4
+        (329.63, 0.35), // E4
+        (329.63, 0.35), // E4
+        (293.66, 0.35), // D4
+        (293.66, 0.35), // D4
+        (261.63, 0.70), // C4
+    ];
+
+    let mut samples: Vec<i16> = Vec::new();
+    for (freq, seconds) in MELODY {
+        let n = ((SAMPLE_RATE as f32) * seconds) as usize;
+        let ramp = (((SAMPLE_RATE as f32) * 0.01) as usize).min(n / 2).max(1);
+        for i in 0..n {
+            let t = i as f32 / SAMPLE_RATE as f32;
+            let fade_in = (i as f32 / ramp as f32).min(1.0);
+            let fade_out = ((n - i) as f32 / ramp as f32).min(1.0);
+            let envelope = fade_in * fade_out;
+            let sample = (2.0 * std::f32::consts::PI * freq * t).sin() * 0.5 * envelope;
+            samples.push((sample * i16::MAX as f32) as i16);
+        }
+    }
+    write_wav(&samples, SAMPLE_RATE)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -167,6 +208,21 @@ mod tests {
         assert_eq!(channels, 1);
         assert_eq!(bits, 16);
         assert_eq!(&bytes[36..40], b"data");
+    }
+
+    #[test]
+    fn the_canonical_ping_is_a_deterministic_wav() {
+        let a = twinkle();
+        let b = twinkle();
+        assert_eq!(a, b, "the ping must be the same bytes on every daemon");
+        assert_eq!(AudioFormat::sniff(&a), Some(AudioFormat::Wav));
+        assert!(!a.is_empty(), "a ping must never be an empty pong");
+        let data_len = u32::from_le_bytes([a[40], a[41], a[42], a[43]]) as usize;
+        // 12 quarter notes at 0.35 s and 2 at 0.7 s, at 8 kHz, 16-bit mono.
+        let expected_samples = (12.0 * 0.35 * SAMPLE_RATE as f32) as usize
+            + (2.0 * 0.70 * SAMPLE_RATE as f32) as usize;
+        assert_eq!(data_len, expected_samples * 2);
+        assert!(data_len < crate::protocol::MAX_SERVABLE_BYTES, "the ping must fit a frame");
     }
 
     #[test]

@@ -100,6 +100,11 @@ async fn handle(datagram: &[u8], store: &Arc<Mutex<AudioStore>>) -> Option<Vec<u
             protocol_version: crate::protocol::PROTOCOL_VERSION,
             item_count: store.lock().await.len(),
         },
+        Request::Ping => {
+            let bytes = crate::wav::twinkle();
+            let content_hash = crate::AudioItem::new(bytes.clone(), None).content_hash;
+            Response::Audio { content_hash, bytes }
+        }
         Request::List { offset, limit } => {
             let store = store.lock().await;
             let hashes = store.hashes();

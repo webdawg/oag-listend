@@ -581,3 +581,42 @@ async fn usage() {
         .expect("join")
         .expect("run");
 }
+
+/// The HTTP liveness response is the same canonical music: `GET /ping` serves audio, not a control
+/// string, with an ETag that names the bytes.
+#[tokio::test]
+async fn http_ping_serves_the_canonical_music() {
+    tokio::time::timeout(BOUND, ping_http()).await.expect("the http ping must complete within the bound")
+}
+
+async fn ping_http() {
+    let store = Arc::new(Mutex::new(AudioStore::default()));
+    // The startup set publishes the canonical ping, so it is a real item.
+    store.lock().await.accept(oag_listend::wav::twinkle(), None).await.unwrap();
+    let (carrier, addr) = HttpCarrier::bind_shared("127.0.0.1:0", Arc::clone(&store))
+        .await
+        .expect("bind http");
+    let shutdown = carrier.shutdown_handle();
+    let run = tokio::spawn(async move { carrier.run().await });
+
+    let response = http(addr, "GET /ping HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").await;
+    assert_eq!(status_of(&response), 200, "{}", String::from_utf8_lossy(&response));
+    assert!(head_contains(&response, "content-type: audio/wav"));
+    let body = body_of(&response);
+    assert!(!body.is_empty(), "a ping must never be an empty pong");
+    assert_eq!(oag_listend::AudioFormat::sniff(body), Some(oag_listend::AudioFormat::Wav));
+    let hash = oag_listend::AudioItem::new(body.to_vec(), None).content_hash;
+    assert!(head_contains(&response, &format!("etag: \"{hash}\"")));
+
+    // The same bytes are a real item: the startup set publishes the canonical ping, so it is
+    // fetchable by hash too.
+    let listed = http(addr, "GET /audio HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").await;
+    assert!(String::from_utf8_lossy(body_of(&listed)).contains(&hash));
+
+    shutdown.shutdown();
+    tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .expect("shutdown bound")
+        .expect("join")
+        .expect("run");
+}

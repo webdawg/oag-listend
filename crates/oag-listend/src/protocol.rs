@@ -18,6 +18,7 @@ const OP_HELLO: u8 = 0x01;
 const OP_PUBLISH: u8 = 0x02;
 const OP_FETCH: u8 = 0x03;
 const OP_LIST: u8 = 0x04;
+const OP_PING: u8 = 0x05;
 
 const OP_RESP_HELLO: u8 = 0x10;
 const OP_RESP_AUDIO: u8 = 0x11;
@@ -83,6 +84,9 @@ pub enum Request {
     Publish { declared_media_type: Option<String>, bytes: Vec<u8> },
     /// Give me the audio with this content hash.
     Fetch { content_hash: String },
+    /// A liveness probe whose answer is audio, not an empty control pong (operator directive:
+    /// "even pings are music"). The response is the canonical ping item and its hash.
+    Ping,
     /// What content hashes do you hold, a page at a time. `offset` is the first index, `limit` the
     /// page size (clamped by the carrier). The response reports the total so a client can tell
     /// whether more pages remain.
@@ -226,6 +230,7 @@ pub fn encode_request(req: &Request) -> Vec<u8> {
     let mut out = Vec::new();
     match req {
         Request::Hello => out.push(OP_HELLO),
+        Request::Ping => out.push(OP_PING),
         Request::List { offset, limit } => {
             out.push(OP_LIST);
             put_u32(&mut out, *offset as u32);
@@ -249,6 +254,7 @@ pub fn decode_request(body: &[u8]) -> Result<Request, WireError> {
     let op = r.u8()?;
     match op {
         OP_HELLO => Ok(Request::Hello),
+        OP_PING => Ok(Request::Ping),
         OP_LIST => {
             let offset = r.u32()? as usize;
             let limit = r.u32()? as usize;
@@ -358,6 +364,7 @@ mod tests {
     #[test]
     fn requests_round_trip() {
         roundtrip_request(&Request::Hello);
+        roundtrip_request(&Request::Ping);
         roundtrip_request(&Request::List { offset: 5, limit: 10 });
         roundtrip_request(&Request::List { offset: 0, limit: 0 });
         roundtrip_request(&Request::Publish { declared_media_type: None, bytes: b"RIFF....WAVE".to_vec() });

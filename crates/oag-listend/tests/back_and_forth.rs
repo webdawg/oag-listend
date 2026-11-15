@@ -6,12 +6,14 @@
 
 #![forbid(unsafe_code)]
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use oag_listend::protocol::{self, Request, Response};
 use oag_listend::{AudioFormat, AudioItem, AudioStore, ListendServer, wav};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::sync::Mutex;
 
 const BOUND: Duration = Duration::from_secs(10);
 
@@ -160,6 +162,42 @@ async fn two_connections() {
 
     drop(first);
     drop(second);
+    shutdown.shutdown();
+    tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .expect("shutdown bound")
+        .expect("join")
+        .expect("run");
+}
+
+/// Operator directive, `USER_INPUT_RECORD.md` Entry 3: "even pings are music". A native ping must
+/// answer with the canonical audio item and its hash -- never an empty control pong.
+#[tokio::test]
+async fn a_native_ping_is_music() {
+    let outcome = tokio::time::timeout(crate::BOUND, ping_native()).await;
+    outcome.expect("the ping exchange must complete within the bound")
+}
+
+async fn ping_native() {
+    use oag_listend::AudioFormat;
+
+    let (server, addr) = ListendServer::bind_shared("127.0.0.1:0", Arc::new(Mutex::new(AudioStore::default())))
+        .await
+        .expect("bind");
+    let shutdown = server.shutdown_handle();
+    let run = tokio::spawn(async move { server.run().await });
+
+    let mut stream = TcpStream::connect(addr).await.expect("connect");
+    send(&mut stream, &Request::Ping).await;
+    match recv(&mut stream).await {
+        Response::Audio { content_hash, bytes } => {
+            assert!(!bytes.is_empty(), "a ping must never be an empty pong");
+            assert_eq!(AudioFormat::sniff(&bytes), Some(AudioFormat::Wav));
+            assert!(AudioItem::verify(&content_hash, &bytes), "the ping must be hash-verifiable");
+        }
+        other => panic!("a ping must answer with audio, got {other:?}"),
+    }
+
     shutdown.shutdown();
     tokio::time::timeout(Duration::from_secs(5), run)
         .await

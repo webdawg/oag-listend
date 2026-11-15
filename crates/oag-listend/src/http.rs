@@ -278,11 +278,40 @@ async fn route(request: HttpRequest, store: &Arc<Mutex<AudioStore>>) -> HttpResp
                 "OK",
                 format!(
                     "oag-listend\nprotocol {}\nitems: {count}\nbytes: {held} / {max}\n\
-                     GET /audio for the content hashes\nonly audio is accepted\n",
+                     GET /audio for the content hashes\nGET /ping for the musical liveness sound\n\
+                     only audio is accepted\n",
                     crate::protocol::PROTOCOL_VERSION
                 )
                 .as_bytes(),
             );
+            if head_only {
+                response.content_length = Some(response.body.len());
+                response.body.clear();
+            }
+            response
+        }
+        ("GET", "/ping") => {
+            // The musical liveness response: the canonical ping item, served as audio.
+            let bytes = crate::wav::twinkle();
+            let hash = crate::AudioItem::new(bytes.clone(), None).content_hash;
+            let mut response = HttpResponse {
+                status: 200,
+                reason: "OK",
+                content_type: "audio/wav".into(),
+                content_range: None,
+                accept_ranges: false,
+                content_length: None,
+                total_count: None,
+                offset: None,
+                extra_headers: vec![
+                    ("ETag".to_string(), format!("\"{hash}\"")),
+                    (
+                        "Content-Disposition".to_string(),
+                        format!("inline; filename=\"{hash}.wav\""),
+                    ),
+                ],
+                body: bytes,
+            };
             if head_only {
                 response.content_length = Some(response.body.len());
                 response.body.clear();
