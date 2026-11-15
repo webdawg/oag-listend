@@ -250,13 +250,14 @@ pub(crate) async fn handle(request: Request, store: &Arc<Mutex<AudioStore>>) -> 
             }
         }
         Request::Fetch { content_hash } => {
-            let store = store.lock().await;
-            match store.serve(&content_hash) {
-                Ok(item) => Response::Audio {
+            // Clone the handle under the lock, then copy the bytes after releasing it.
+            let item = store.lock().await.serve(&content_hash).ok();
+            match item {
+                Some(item) => Response::Audio {
                     content_hash,
                     bytes: item.bytes.clone(),
                 },
-                Err(_) => Response::NotFound { content_hash },
+                None => Response::NotFound { content_hash },
             }
         }
     }

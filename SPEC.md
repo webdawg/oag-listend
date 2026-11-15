@@ -173,6 +173,13 @@ count. A client can therefore tell what it reached and whether it speaks the sam
 of inferring from a bare count. An unrecognised name still decodes, so a future daemon is
 recognisable rather than a protocol error.
 
+## Concurrency
+
+All carriers share one store behind one mutex, so accepts and inserts serialise. The mutex covers
+the lookup and the insert, not the byte copies: `serve` returns an `Arc<AudioItem>`, so a large
+`Fetch` releases the lock before copying the audio, and the persistent write is asynchronous. A
+slow disk or a large item delays the answer that caused it, not every other client.
+
 ## Listing order and pages
 
 The list operation is paginated: `List { offset, limit }` returns one page and the store's `total`

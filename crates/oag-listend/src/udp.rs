@@ -114,10 +114,10 @@ async fn handle(datagram: &[u8], store: &Arc<Mutex<AudioStore>>) -> Option<Vec<u
             }
         }
         Request::Fetch { content_hash } => {
-            let store = store.lock().await;
-            match store.serve(&content_hash) {
-                Ok(item) => Response::Audio { content_hash, bytes: item.bytes.clone() },
-                Err(_) => Response::NotFound { content_hash },
+            let item = store.lock().await.serve(&content_hash).ok();
+            match item {
+                Some(item) => Response::Audio { content_hash, bytes: item.bytes.clone() },
+                None => Response::NotFound { content_hash },
             }
         }
         Request::Publish { declared_media_type, bytes } => {

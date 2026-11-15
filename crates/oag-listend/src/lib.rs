@@ -36,6 +36,7 @@ pub mod wav;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 pub use protocol::{Request, Response};
 pub use server::ListendServer;
@@ -212,7 +213,7 @@ impl AudioFormat {
 /// it is not. Eviction is oldest-first, the honest default for a store with no usage statistics.
 #[derive(Debug)]
 pub struct AudioStore {
-    items: HashMap<String, AudioItem>,
+    items: HashMap<String, Arc<AudioItem>>,
     order: std::collections::VecDeque<String>,
     bytes_held: usize,
     max_bytes: usize,
@@ -378,7 +379,7 @@ impl AudioStore {
             return hash;
         }
         self.bytes_held += item.bytes.len();
-        self.items.insert(hash.clone(), item);
+        self.items.insert(hash.clone(), Arc::new(item));
         self.order.push_back(hash.clone());
         while self.bytes_held > self.max_bytes {
             let Some(oldest) = self.order.pop_front() else { break };
@@ -391,8 +392,15 @@ impl AudioStore {
     }
 
     /// Serves an item by content hash. This is the one operation every carrier wraps.
-    pub fn serve(&self, content_hash: &str) -> Result<&AudioItem, ListendError> {
-        self.items.get(content_hash).ok_or_else(|| ListendError::NotFound(content_hash.to_string()))
+    ///
+    /// Returns an `Arc`, not a reference: the caller clones the handle under the lock and copies
+    /// the bytes after releasing it. A large fetch therefore does not hold the store mutex during
+    /// a multi-megabyte copy, which would stall every other operation.
+    pub fn serve(&self, content_hash: &str) -> Result<Arc<AudioItem>, ListendError> {
+        self.items
+            .get(content_hash)
+            .cloned()
+            .ok_or_else(|| ListendError::NotFound(content_hash.to_string()))
     }
 
     pub fn len(&self) -> usize {
@@ -507,7 +515,7 @@ mod tests {
         let item = AudioItem::new(b"not really audio, but bytes".to_vec(), Some("audio/wav".into()));
         let hash = store.publish(item.clone());
         let served = store.serve(&hash).unwrap();
-        assert_eq!(served, &item);
+        assert_eq!(served.as_ref(), &item);
         assert!(AudioItem::verify(&hash, &served.bytes), "the receiver-side check must pass");
         assert!(!AudioItem::verify(&hash, b"tampered"), "and must fail on different bytes");
     }

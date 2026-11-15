@@ -303,8 +303,7 @@ async fn route(request: HttpRequest, store: &Arc<Mutex<AudioStore>>) -> HttpResp
             if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
                 return not_found();
             }
-            let store = store.lock().await;
-            let item = match store.serve(hash) {
+            let item = match store.lock().await.serve(hash) {
                 Ok(item) => item,
                 Err(_) => return not_found(),
             };
