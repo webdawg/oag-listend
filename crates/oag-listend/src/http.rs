@@ -277,15 +277,21 @@ async fn route(request: HttpRequest, store: &Arc<Mutex<AudioStore>>) -> HttpResp
         ("GET", "/audio") => {
             // The list operation, on HTTP, paginated like the native one: a client that only
             // fetches can discover what exists without already knowing a hash, and the response
-            // reports where the page starts and how much remains.
+            // reports where the page starts and how much remains. The page is copied under the
+            // lock; the body is built after it is released.
             let (offset, limit) = parse_query(query);
-            let hashes = store.lock().await.hashes();
-            let total = hashes.len();
-            let limit = crate::protocol::normalize_limit(limit, crate::protocol::MAX_LIST_LIMIT);
-            let offset = offset.min(total);
-            let end = (offset + limit).min(total);
+            let (page, total, offset) = {
+                let store = store.lock().await;
+                let hashes = store.hashes();
+                let total = hashes.len();
+                let limit =
+                    crate::protocol::normalize_limit(limit, crate::protocol::MAX_LIST_LIMIT);
+                let offset = offset.min(total);
+                let end = (offset + limit).min(total);
+                (hashes[offset..end].to_vec(), total, offset)
+            };
             let mut body = String::new();
-            for hash in &hashes[offset..end] {
+            for hash in &page {
                 body.push_str(hash);
                 body.push('\n');
             }

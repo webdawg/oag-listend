@@ -372,7 +372,9 @@ impl AudioStore {
     ///
     /// Does **not** apply the inbound rule: this is the trusted, local path for audio the
     /// operator already holds. Anything that arrived over a carrier goes through
-    /// [`Self::accept`].
+    /// [`Self::accept`]. The caller is responsible for [`servable_bound`]; the production paths
+    /// (`accept` and the directory load) enforce it, so a direct `publish` of an oversized item
+    /// would be stored but not servable.
     pub fn publish(&mut self, item: AudioItem) -> String {
         let hash = item.content_hash.clone();
         if self.items.contains_key(&hash) {

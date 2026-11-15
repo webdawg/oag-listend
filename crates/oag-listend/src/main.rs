@@ -141,11 +141,11 @@ async fn main() {
     };
 
     if args.check {
-        let held = store.lock().await.bytes_held();
+        let store = store.lock().await;
         println!(
             "store ok: {} items, {} bytes (bound {}, item bound {})",
-            store.lock().await.len(),
-            held,
+            store.len(),
+            store.bytes_held(),
             args.max_bytes,
             oag_listend::servable_bound(args.max_bytes)
         );
