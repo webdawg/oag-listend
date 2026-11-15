@@ -25,6 +25,11 @@ pub const READ_TIMEOUT: Duration = Duration::from_secs(10);
 pub const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Concurrent sessions. A listener that accepts without bound is a memory-exhaustion vector.
 pub const MAX_CONNECTIONS: usize = 64;
+/// A total bound on one session, not just on each read. A client that dribbles a byte every few
+/// seconds would otherwise hold a session open indefinitely, and 64 of them would exhaust the
+/// session cap. A session idle or slow past this is closed. Generous, because a legitimate client
+/// may keep a connection for occasional fetches; still finite.
+pub const SESSION_TIMEOUT: Duration = Duration::from_secs(1800);
 /// How many generated sounds a fresh daemon publishes at startup.
 pub const STARTUP_SOUNDS: usize = 4;
 
@@ -172,6 +177,24 @@ impl ListendServer {
 /// new stream carrier cannot quietly get a different protocol, a different bound, or a different
 /// inbound rule.
 pub(crate) async fn serve_session<S>(
+    stream: S,
+    store: Arc<Mutex<AudioStore>>,
+    read_timeout: Duration,
+    write_timeout: Duration,
+    max_frame: usize,
+) -> std::io::Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    tokio::time::timeout(
+        SESSION_TIMEOUT,
+        serve_session_inner(stream, store, read_timeout, write_timeout, max_frame),
+    )
+    .await
+    .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "session timed out"))?
+}
+
+async fn serve_session_inner<S>(
     mut stream: S,
     store: Arc<Mutex<AudioStore>>,
     read_timeout: Duration,

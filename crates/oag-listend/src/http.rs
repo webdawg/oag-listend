@@ -30,6 +30,11 @@ pub const MAX_HEAD_BYTES: usize = 16 * 1024;
 pub const MAX_BODY_BYTES: usize = super::protocol::MAX_FRAME_BYTES;
 pub const IO_TIMEOUT: Duration = Duration::from_secs(10);
 pub const MAX_CONNECTIONS: usize = 64;
+/// A total bound on reading one request (headers and body), so a client that dribbles bytes cannot
+/// hold a connection open indefinitely. Each individual read also has a timeout. Generous, because
+/// a legitimate client may be uploading the largest item the store accepts over a slow link; still
+/// finite.
+pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(1800);
 
 pub struct HttpCarrier {
     store: Arc<Mutex<AudioStore>>,
@@ -85,9 +90,15 @@ impl HttpCarrier {
 }
 
 async fn serve_connection(mut stream: TcpStream, store: Arc<Mutex<AudioStore>>) -> std::io::Result<()> {
-    let request = match read_request(&mut stream).await? {
-        Some(request) => request,
-        None => return Ok(()),
+    let request = match tokio::time::timeout(REQUEST_TIMEOUT, read_request(&mut stream)).await {
+        Err(_) => {
+            let _ = stream.shutdown().await;
+            return Ok(());
+        }
+        Ok(result) => match result? {
+            Some(request) => request,
+            None => return Ok(()),
+        },
     };
     // A browser page on another origin sends OPTIONS first. Answer it, or the fetch is blocked
     // before it starts. The service has no credentials, so `*` is the honest allowance.
