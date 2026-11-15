@@ -90,9 +90,14 @@ Install and start it with:
 
     cargo build --release -p oag-listend
     sudo install -m 0755 target/release/oag-listend /usr/local/bin/oag-listend
+    sudo useradd --system --no-create-home --shell /usr/sbin/nologin oag
     sudo install -m 0644 scripts/oag-listend.service /etc/systemd/system/oag-listend.service
     sudo systemctl daemon-reload
     sudo systemctl enable --now oag-listend
+
+`--check` opens the store and prints the load report without serving, so a store can be verified
+before the service is started; `--version` prints the binary version and the frame protocol
+version.
 
 The daemon handles both SIGINT and SIGTERM, so `systemctl stop` is a clean stop: the accept loops
 return, the Unix socket is removed, and the process exits 0.

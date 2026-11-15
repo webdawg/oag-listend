@@ -21,6 +21,7 @@ struct Args {
     udp: Option<String>,
     unix: Option<String>,
     dir: Option<String>,
+    check: bool,
     seed: u64,
     max_bytes: usize,
     no_generate: bool,
@@ -33,6 +34,7 @@ fn parse_args() -> Args {
         udp: None,
         unix: None,
         dir: None,
+        check: false,
         seed: default_seed(),
         max_bytes: DEFAULT_MAX_BYTES,
         no_generate: false,
@@ -45,6 +47,15 @@ fn parse_args() -> Args {
             "--udp" => args.udp = Some(it.next().expect("--udp needs an address")),
             "--unix" => args.unix = Some(it.next().expect("--unix needs a socket path")),
             "--dir" => args.dir = Some(it.next().expect("--dir needs a directory")),
+            "--check" => args.check = true,
+            "--version" | "-V" => {
+                println!(
+                    "oag-listend {} (frame protocol {})",
+                    env!("CARGO_PKG_VERSION"),
+                    oag_listend::protocol::PROTOCOL_VERSION
+                );
+                std::process::exit(0);
+            }
             "--seed" => {
                 args.seed = it
                     .next()
@@ -81,7 +92,9 @@ fn usage() -> String {
            --http ADDR      also serve HTTP at ADDR (GET /audio/{{hash}}, POST /audio)
            --udp ADDR       also serve the native protocol over UDP datagrams
            --unix PATH      also serve the native protocol on a Unix domain socket
-           --dir PATH       persist the audio content-addressed under PATH\n\
+           --dir PATH       persist the audio content-addressed under PATH
+           --check          open the store, print the load report, and exit
+           --version        print the version and the frame protocol version\n\
            --seed U64       seed for the startup sounds (default: clock)\n\
            --max-bytes N    store bound in bytes (default {DEFAULT_MAX_BYTES})\n\
            --no-generate    do not publish generated sounds at startup\n\n\
@@ -126,6 +139,18 @@ async fn main() {
         }
         None => Arc::new(Mutex::new(AudioStore::with_capacity(args.max_bytes))),
     };
+
+    if args.check {
+        let held = store.lock().await.bytes_held();
+        println!(
+            "store ok: {} items, {} bytes (bound {}, item bound {})",
+            store.lock().await.len(),
+            held,
+            args.max_bytes,
+            oag_listend::servable_bound(args.max_bytes)
+        );
+        return;
+    }
 
     let (server, native_addr) = ListendServer::bind_shared(&args.listen, Arc::clone(&store))
         .await

@@ -9,6 +9,9 @@
 #
 # The daemon accepts audio and nothing else, on four carriers. It shuts down
 # cleanly on SIGTERM, so `systemctl stop` is a clean stop, not a crash.
+#
+# The unit runs as `oag`; create it first:
+#   sudo useradd --system --no-create-home --shell /usr/sbin/nologin oag
 
 [Unit]
 Description=oag-listend - the global daemon that serves audio
