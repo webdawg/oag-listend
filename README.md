@@ -107,7 +107,7 @@ address the daemon prints a note saying so. Use `--listen 127.0.0.1:...` to keep
 
 ## Status
 
-**Serves, and survives a restart.** Four carriers are live and tested: 45 unit tests plus 19
+**Serves, and survives a restart.** Four carriers are live and tested: 46 unit tests plus 19
 end-to-end tests (`cargo test -p oag-listend`). The store mutex covers lookup and insert, not byte
 copies or disk writes, so one slow client does not stall the others. Runs as a systemd service
 (`scripts/oag-listend.service`) and shuts down cleanly on SIGINT and SIGTERM. The native protocol, HTTP, and UDP share one store,

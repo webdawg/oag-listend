@@ -165,8 +165,9 @@ being metadata-only. On startup every entry is re-checked: the name must be the 
 of the bytes and the bytes must still sniff as audio, so a hand-placed file cannot smuggle anything
 in. The load is reported as `loaded` (entries now held), `skipped` (not read, or rejected), and
 `evicted` (read and accepted, then pushed out by the byte bound while later entries loaded) -- never
-silent, and never counting an evicted entry as held. A sidecar larger than 4 KiB is not a media type
-and is ignored rather than read into memory.
+silent, and never counting an evicted entry as held. Only regular files are read -- a FIFO or
+device named like a hash would block forever, and a directory would error. A sidecar larger than
+4 KiB is not a media type and is ignored rather than read into memory.
 
 Eviction deletes the file, so the directory and the store agree on what is held and the
 `--max-bytes` bound is a bound on disk too, not just memory. If a file is removed out of band, a

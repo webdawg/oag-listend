@@ -307,6 +307,19 @@ impl AudioStore {
             if path.extension().is_some() {
                 continue; // a sidecar, not audio
             }
+            // Only regular files. A FIFO or device named like a hash would make `std::fs::read`
+            // block forever, and a directory would error; both are skipped rather than read.
+            let metadata = match entry.metadata() {
+                Ok(metadata) => metadata,
+                Err(_) => {
+                    report.skipped += 1;
+                    continue;
+                }
+            };
+            if !metadata.is_file() {
+                report.skipped += 1;
+                continue;
+            }
             let hash = match path.file_name().and_then(|n| n.to_str()) {
                 Some(name) if name.len() == 64 && name.bytes().all(|b| b.is_ascii_hexdigit()) => {
                     name.to_string()
@@ -318,7 +331,7 @@ impl AudioStore {
             };
             // A file larger than the store can hold is skipped without being read: an unbounded
             // read on the startup path is the same defect as an unbounded network read.
-            let len = entry.metadata().map(|m| m.len() as usize).unwrap_or(0);
+            let len = metadata.len() as usize;
             if len > servable_bound(store.max_bytes) {
                 report.skipped += 1;
                 continue;
@@ -739,6 +752,20 @@ mod tests {
         let (reopened, report) = AudioStore::with_directory(&dir, 1024 * 1024).unwrap();
         assert_eq!(report.loaded, 1);
         assert!(reopened.serve(&hash).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_non_regular_file_named_like_a_hash_is_skipped_not_read() {
+        let dir = temp_dir("nonregular");
+        // A directory (and, in production, a FIFO or device) named like a hash must be skipped
+        // without being read: reading a FIFO blocks forever.
+        let name = "ab".repeat(32);
+        std::fs::create_dir(dir.join(&name)).unwrap();
+        let (store, report) = AudioStore::with_directory(&dir, 1024 * 1024).unwrap();
+        assert_eq!(report.loaded, 0);
+        assert_eq!(report.skipped, 1);
+        assert!(store.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
