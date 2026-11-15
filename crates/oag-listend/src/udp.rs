@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::net::UdpSocket;
-use tokio::sync::{Mutex, watch};
+use tokio::sync::{watch, Mutex};
 
 use crate::protocol::{self, Request, Response};
 use crate::server::ShutdownHandle;
@@ -45,7 +45,15 @@ impl UdpCarrier {
         let socket = UdpSocket::bind(addr).await?;
         let local_addr = socket.local_addr()?;
         let (shutdown_tx, _) = watch::channel(false);
-        Ok((Self { store, socket, local_addr, shutdown_tx }, local_addr))
+        Ok((
+            Self {
+                store,
+                socket,
+                local_addr,
+                shutdown_tx,
+            },
+            local_addr,
+        ))
     }
 
     pub fn local_addr(&self) -> std::net::SocketAddr {
@@ -103,7 +111,10 @@ async fn handle(datagram: &[u8], store: &Arc<Mutex<AudioStore>>) -> Option<Vec<u
         Request::Ping => {
             let bytes = crate::wav::twinkle();
             let content_hash = crate::AudioItem::new(bytes.clone(), None).content_hash;
-            Response::Audio { content_hash, bytes }
+            Response::Audio {
+                content_hash,
+                bytes,
+            }
         }
         Request::List { offset, limit } => {
             let store = store.lock().await;
@@ -121,18 +132,26 @@ async fn handle(datagram: &[u8], store: &Arc<Mutex<AudioStore>>) -> Option<Vec<u
         Request::Fetch { content_hash } => {
             let item = store.lock().await.serve(&content_hash).ok();
             match item {
-                Some(item) => Response::Audio { content_hash, bytes: item.bytes.clone() },
+                Some(item) => Response::Audio {
+                    content_hash,
+                    bytes: item.bytes.clone(),
+                },
                 None => Response::NotFound { content_hash },
             }
         }
-        Request::Publish { declared_media_type, bytes } => {
+        Request::Publish {
+            declared_media_type,
+            bytes,
+        } => {
             let mut store = store.lock().await;
             match store.accept(bytes, declared_media_type).await {
                 Ok(hash) => Response::Published { content_hash: hash },
                 Err(ListendError::NotAudio) => Response::Rejected {
                     reason: ListendError::NotAudio.to_string(),
                 },
-                Err(e) => Response::Rejected { reason: e.to_string() },
+                Err(e) => Response::Rejected {
+                    reason: e.to_string(),
+                },
             }
         }
     };
@@ -180,7 +199,9 @@ mod tests {
         .await
         .as_deref()
         {
-            Some(frame) => protocol::decode_response(protocol::decode_frame(frame).unwrap()).unwrap(),
+            Some(frame) => {
+                protocol::decode_response(protocol::decode_frame(frame).unwrap()).unwrap()
+            }
             None => panic!("expected a reply"),
         };
         let hash = match published {
@@ -197,12 +218,17 @@ mod tests {
         .await
         .as_deref()
         {
-            Some(frame) => protocol::decode_response(protocol::decode_frame(frame).unwrap()).unwrap(),
+            Some(frame) => {
+                protocol::decode_response(protocol::decode_frame(frame).unwrap()).unwrap()
+            }
             None => panic!("expected a reply"),
         };
         assert_eq!(
             fetched,
-            Response::Audio { content_hash: hash, bytes: tone },
+            Response::Audio {
+                content_hash: hash,
+                bytes: tone
+            },
             "a tone must round-trip over the datagram carrier"
         );
 
@@ -218,7 +244,9 @@ mod tests {
         .await
         .as_deref()
         {
-            Some(frame) => protocol::decode_response(protocol::decode_frame(frame).unwrap()).unwrap(),
+            Some(frame) => {
+                protocol::decode_response(protocol::decode_frame(frame).unwrap()).unwrap()
+            }
             None => panic!("expected a reply"),
         };
         let hash = match published {
@@ -234,13 +262,18 @@ mod tests {
         .await
         .as_deref()
         {
-            Some(frame) => protocol::decode_response(protocol::decode_frame(frame).unwrap()).unwrap(),
+            Some(frame) => {
+                protocol::decode_response(protocol::decode_frame(frame).unwrap()).unwrap()
+            }
             None => panic!("expected a reply"),
         };
         match refused {
             Response::Rejected { reason } => {
                 assert!(reason.contains("datagram"), "{reason}");
-                assert!(!reason.contains(&long.len().to_string()), "no byte counts of the audio");
+                assert!(
+                    !reason.contains(&long.len().to_string()),
+                    "no byte counts of the audio"
+                );
             }
             other => panic!("expected a rejection, got {other:?}"),
         }

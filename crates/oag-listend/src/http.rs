@@ -21,7 +21,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 
-use crate::server::{ShutdownHandle, write_all_bounded};
+use crate::server::{write_all_bounded, ShutdownHandle};
 use crate::{AudioFormat, AudioStore, ListendError};
 
 /// Bounds for one HTTP request. The head cap keeps a header flood from allocating; the body cap
@@ -53,7 +53,12 @@ impl HttpCarrier {
         let local_addr = listener.local_addr()?;
         let (shutdown_tx, _) = tokio::sync::watch::channel(false);
         Ok((
-            Self { store, listener, local_addr, shutdown_tx },
+            Self {
+                store,
+                listener,
+                local_addr,
+                shutdown_tx,
+            },
             local_addr,
         ))
     }
@@ -313,7 +318,11 @@ async fn route(request: HttpRequest, store: &Arc<Mutex<AudioStore>>) -> HttpResp
 
     // A HEAD is a GET with no body; a player and a browser both probe with one before streaming.
     let head_only = request.method == "HEAD";
-    let method = if head_only { "GET" } else { request.method.as_str() };
+    let method = if head_only {
+        "GET"
+    } else {
+        request.method.as_str()
+    };
 
     // A query string is not part of the path. Without this, `GET /audio?offset=0` is a 404.
     let (path, query) = match request.path.split_once('?') {
@@ -512,10 +521,7 @@ async fn route(request: HttpRequest, store: &Arc<Mutex<AudioStore>>) -> HttpResp
                         status: 206,
                         reason: "Partial Content",
                         content_type,
-                        content_range: Some(format!(
-                            "bytes {start}-{end}/{}",
-                            item.bytes.len()
-                        )),
+                        content_range: Some(format!("bytes {start}-{end}/{}", item.bytes.len())),
                         accept_ranges: true,
                         content_length: None,
                         total_count: None,
@@ -575,9 +581,11 @@ async fn route(request: HttpRequest, store: &Arc<Mutex<AudioStore>>) -> HttpResp
             let mut store = store.lock().await;
             match store.accept(request.body, request.content_type).await {
                 Ok(hash) => HttpResponse::text(201, "Created", hash.as_bytes()),
-                Err(ListendError::NotAudio) => {
-                    HttpResponse::text(400, "Bad Request", ListendError::NotAudio.to_string().as_bytes())
-                }
+                Err(ListendError::NotAudio) => HttpResponse::text(
+                    400,
+                    "Bad Request",
+                    ListendError::NotAudio.to_string().as_bytes(),
+                ),
                 Err(e) => HttpResponse::text(400, "Bad Request", e.to_string().as_bytes()),
             }
         }
@@ -602,7 +610,9 @@ fn parse_query(query: Option<&str>) -> (usize, usize) {
     // Zero means "the default", which the caller resolves; starting at the maximum would make an
     // absent limit return ten thousand entries rather than the default page.
     let mut limit = 0usize;
-    let Some(query) = query else { return (offset, limit) };
+    let Some(query) = query else {
+        return (offset, limit);
+    };
     for pair in query.split('&') {
         if let Some((key, value)) = pair.split_once('=') {
             if key == "offset" {
@@ -677,7 +687,9 @@ impl HttpResponse {
 
 async fn write_response(stream: &mut TcpStream, response: &HttpResponse) -> std::io::Result<()> {
     let mut out = Vec::new();
-    out.extend_from_slice(format!("HTTP/1.1 {} {}\r\n", response.status, response.reason).as_bytes());
+    out.extend_from_slice(
+        format!("HTTP/1.1 {} {}\r\n", response.status, response.reason).as_bytes(),
+    );
     out.extend_from_slice(format!("Content-Type: {}\r\n", response.content_type).as_bytes());
     let content_length = response.content_length.unwrap_or(response.body.len());
     out.extend_from_slice(format!("Content-Length: {content_length}\r\n").as_bytes());

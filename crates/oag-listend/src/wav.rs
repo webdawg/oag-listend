@@ -123,7 +123,9 @@ pub fn sounds(seed: u64, count: usize) -> Vec<Vec<u8>> {
     let kinds = [Sound::Silence, Sound::Tone, Sound::Noise];
     (0..count)
         .map(|i| {
-            let item_seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(i as u64 + 1);
+            let item_seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(i as u64 + 1);
             let kind = kinds[i % kinds.len()];
             generate(item_seed, kind)
         })
@@ -175,15 +177,27 @@ mod tests {
     fn generated_audio_is_recognised_as_wav() {
         for kind in [Sound::Silence, Sound::Tone, Sound::Noise] {
             let bytes = generate(42, kind);
-            assert_eq!(AudioFormat::sniff(&bytes), Some(AudioFormat::Wav), "{kind:?} must be a WAV");
+            assert_eq!(
+                AudioFormat::sniff(&bytes),
+                Some(AudioFormat::Wav),
+                "{kind:?} must be a WAV"
+            );
         }
     }
 
     #[test]
     fn generation_is_reproducible_from_the_seed() {
         for kind in [Sound::Silence, Sound::Tone, Sound::Noise] {
-            assert_eq!(generate(7, kind), generate(7, kind), "{kind:?} must be deterministic");
-            assert_ne!(generate(7, kind), generate(8, kind), "{kind:?} must vary with the seed");
+            assert_eq!(
+                generate(7, kind),
+                generate(7, kind),
+                "{kind:?} must be deterministic"
+            );
+            assert_ne!(
+                generate(7, kind),
+                generate(8, kind),
+                "{kind:?} must vary with the seed"
+            );
         }
     }
 
@@ -221,10 +235,13 @@ mod tests {
         assert!(!a.is_empty(), "a ping must never be an empty pong");
         let data_len = u32::from_le_bytes([a[40], a[41], a[42], a[43]]) as usize;
         // Six quarter notes at 0.35 s and one at 0.7 s, at 8 kHz, 16-bit mono.
-        let expected_samples = (6.0 * 0.35 * SAMPLE_RATE as f32) as usize
-            + (0.70 * SAMPLE_RATE as f32) as usize;
+        let expected_samples =
+            (6.0 * 0.35 * SAMPLE_RATE as f32) as usize + (0.70 * SAMPLE_RATE as f32) as usize;
         assert_eq!(data_len, expected_samples * 2);
-        assert!(data_len < crate::protocol::MAX_SERVABLE_BYTES, "the ping must fit a frame");
+        assert!(
+            data_len < crate::protocol::MAX_SERVABLE_BYTES,
+            "the ping must fit a frame"
+        );
         // It must also fit the smallest carrier's datagram, or UDP cannot carry the music.
         assert!(
             a.len() + 75 <= crate::udp::MAX_DATAGRAM_BYTES,
@@ -253,8 +270,13 @@ mod tests {
     fn the_startup_set_is_bounded_and_varied() {
         let set = sounds(99, 6);
         assert_eq!(set.len(), 6);
-        assert!(set.iter().all(|b| AudioFormat::sniff(b) == Some(AudioFormat::Wav)));
+        assert!(set
+            .iter()
+            .all(|b| AudioFormat::sniff(b) == Some(AudioFormat::Wav)));
         let unique: std::collections::HashSet<&Vec<u8>> = set.iter().collect();
-        assert!(unique.len() > 1, "the startup set should not be six copies of one sound");
+        assert!(
+            unique.len() > 1,
+            "the startup set should not be six copies of one sound"
+        );
     }
 }

@@ -12,11 +12,9 @@ use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tokio::sync::{Mutex, Semaphore, watch};
+use tokio::sync::{watch, Mutex, Semaphore};
 
-use crate::protocol::{
-    self, Request, Response, WireError, MAX_FRAME_BYTES,
-};
+use crate::protocol::{self, Request, Response, WireError, MAX_FRAME_BYTES};
 use crate::{AudioStore, ListendError};
 
 /// How long a client may take to send a frame, and how long the daemon may take to answer. A
@@ -226,9 +224,14 @@ where
             Err(WireError::BadHash) => {
                 // A hash-shaped field with the wrong shape is still a protocol error; answer it
                 // rather than dropping the connection, so a buggy client can be fixed.
-                write_response(&mut stream, &Response::Rejected {
-                    reason: WireError::BadHash.to_string(),
-                }, write_timeout).await?;
+                write_response(
+                    &mut stream,
+                    &Response::Rejected {
+                        reason: WireError::BadHash.to_string(),
+                    },
+                    write_timeout,
+                )
+                .await?;
                 continue;
             }
             Err(e) => {
@@ -257,7 +260,10 @@ pub(crate) async fn handle(request: Request, store: &Arc<Mutex<AudioStore>>) -> 
             // daemon answers with the same bytes and the same hash.
             let bytes = crate::wav::twinkle();
             let content_hash = crate::AudioItem::new(bytes.clone(), None).content_hash;
-            Response::Audio { content_hash, bytes }
+            Response::Audio {
+                content_hash,
+                bytes,
+            }
         }
         Request::List { offset, limit } => {
             let store = store.lock().await;
@@ -273,7 +279,10 @@ pub(crate) async fn handle(request: Request, store: &Arc<Mutex<AudioStore>>) -> 
                 offset,
             }
         }
-        Request::Publish { declared_media_type, bytes } => {
+        Request::Publish {
+            declared_media_type,
+            bytes,
+        } => {
             let mut store = store.lock().await;
             match store.accept(bytes, declared_media_type).await {
                 Ok(content_hash) => Response::Published { content_hash },
@@ -281,7 +290,9 @@ pub(crate) async fn handle(request: Request, store: &Arc<Mutex<AudioStore>>) -> 
                 Err(ListendError::NotAudio) => Response::Rejected {
                     reason: ListendError::NotAudio.to_string(),
                 },
-                Err(e) => Response::Rejected { reason: e.to_string() },
+                Err(e) => Response::Rejected {
+                    reason: e.to_string(),
+                },
             }
         }
         Request::Fetch { content_hash } => {
@@ -470,7 +481,10 @@ mod tests {
         let store = Arc::new(Mutex::new(AudioStore::default()));
         let wav = crate::wav::generate(1, crate::wav::Sound::Tone);
         let response = handle(
-            Request::Publish { declared_media_type: Some("audio/wav".into()), bytes: wav.clone() },
+            Request::Publish {
+                declared_media_type: Some("audio/wav".into()),
+                bytes: wav.clone(),
+            },
             &store,
         )
         .await;
@@ -488,27 +502,76 @@ mod tests {
         for seed in 0..5u64 {
             let wav = crate::wav::generate(seed, crate::wav::Sound::Tone);
             hashes.push(
-                handle(Request::Publish { declared_media_type: None, bytes: wav }, &store)
-                    .await
-                    .published_hash(),
+                handle(
+                    Request::Publish {
+                        declared_media_type: None,
+                        bytes: wav,
+                    },
+                    &store,
+                )
+                .await
+                .published_hash(),
             );
         }
         hashes.sort();
 
-        let page = handle(Request::List { offset: 0, limit: 2 }, &store).await;
+        let page = handle(
+            Request::List {
+                offset: 0,
+                limit: 2,
+            },
+            &store,
+        )
+        .await;
         assert_eq!(
             page,
-            Response::Listing { content_hashes: hashes[0..2].to_vec(), total: 5, offset: 0 }
+            Response::Listing {
+                content_hashes: hashes[0..2].to_vec(),
+                total: 5,
+                offset: 0
+            }
         );
-        let page = handle(Request::List { offset: 4, limit: 2 }, &store).await;
+        let page = handle(
+            Request::List {
+                offset: 4,
+                limit: 2,
+            },
+            &store,
+        )
+        .await;
         assert_eq!(
             page,
-            Response::Listing { content_hashes: hashes[4..5].to_vec(), total: 5, offset: 4 }
+            Response::Listing {
+                content_hashes: hashes[4..5].to_vec(),
+                total: 5,
+                offset: 4
+            }
         );
-        let page = handle(Request::List { offset: 5, limit: 2 }, &store).await;
-        assert_eq!(page, Response::Listing { content_hashes: vec![], total: 5, offset: 5 });
+        let page = handle(
+            Request::List {
+                offset: 5,
+                limit: 2,
+            },
+            &store,
+        )
+        .await;
+        assert_eq!(
+            page,
+            Response::Listing {
+                content_hashes: vec![],
+                total: 5,
+                offset: 5
+            }
+        );
         // A limit above the carrier's cap is clamped, not honoured.
-        let page = handle(Request::List { offset: 0, limit: 100_000 }, &store).await;
+        let page = handle(
+            Request::List {
+                offset: 0,
+                limit: 100_000,
+            },
+            &store,
+        )
+        .await;
         match page {
             Response::Listing { content_hashes, .. } => {
                 assert!(content_hashes.len() <= crate::protocol::MAX_LIST_LIMIT)
@@ -521,7 +584,10 @@ mod tests {
     async fn a_non_audio_publish_is_rejected_and_nothing_is_stored() {
         let store = Arc::new(Mutex::new(AudioStore::default()));
         let response = handle(
-            Request::Publish { declared_media_type: Some("audio/wav".into()), bytes: b"<html>".to_vec() },
+            Request::Publish {
+                declared_media_type: Some("audio/wav".into()),
+                bytes: b"<html>".to_vec(),
+            },
             &store,
         )
         .await;
@@ -534,22 +600,46 @@ mod tests {
         let store = Arc::new(Mutex::new(AudioStore::default()));
         let wav = crate::wav::generate(2, crate::wav::Sound::Noise);
         let Response::Published { content_hash } = handle(
-            Request::Publish { declared_media_type: None, bytes: wav.clone() },
+            Request::Publish {
+                declared_media_type: None,
+                bytes: wav.clone(),
+            },
             &store,
         )
-        .await else {
+        .await
+        else {
             panic!("expected Published");
         };
-        let fetched = handle(Request::Fetch { content_hash: content_hash.clone() }, &store).await;
+        let fetched = handle(
+            Request::Fetch {
+                content_hash: content_hash.clone(),
+            },
+            &store,
+        )
+        .await;
         match fetched {
-            Response::Audio { content_hash: got, bytes } => {
+            Response::Audio {
+                content_hash: got,
+                bytes,
+            } => {
                 assert_eq!(got, content_hash);
                 assert_eq!(bytes, wav);
             }
             other => panic!("expected Audio, got {other:?}"),
         }
-        let missing = handle(Request::Fetch { content_hash: "00".repeat(32) }, &store).await;
-        assert_eq!(missing, Response::NotFound { content_hash: "00".repeat(32) });
+        let missing = handle(
+            Request::Fetch {
+                content_hash: "00".repeat(32),
+            },
+            &store,
+        )
+        .await;
+        assert_eq!(
+            missing,
+            Response::NotFound {
+                content_hash: "00".repeat(32)
+            }
+        );
     }
 
     #[tokio::test]
@@ -566,8 +656,15 @@ mod tests {
 
         let second = server.publish_generated(2, 4).await;
         assert!(second.accepted.is_empty());
-        assert!(second.skipped_non_empty, "a non-empty store must not be added to");
-        assert_eq!(store.lock().await.len(), 4, "a restart must not grow the store");
+        assert!(
+            second.skipped_non_empty,
+            "a non-empty store must not be added to"
+        );
+        assert_eq!(
+            store.lock().await.len(),
+            4,
+            "a restart must not grow the store"
+        );
     }
 
     #[tokio::test]
@@ -587,18 +684,41 @@ mod tests {
         let store = Arc::new(Mutex::new(AudioStore::default()));
         let a = crate::wav::generate(10, crate::wav::Sound::Tone);
         let b = crate::wav::generate(11, crate::wav::Sound::Noise);
-        let ha = handle(Request::Publish { declared_media_type: None, bytes: a }, &store)
-            .await
-            .published_hash();
-        let hb = handle(Request::Publish { declared_media_type: None, bytes: b }, &store)
-            .await
-            .published_hash();
-        let listing = handle(Request::List { offset: 0, limit: 100 }, &store).await;
+        let ha = handle(
+            Request::Publish {
+                declared_media_type: None,
+                bytes: a,
+            },
+            &store,
+        )
+        .await
+        .published_hash();
+        let hb = handle(
+            Request::Publish {
+                declared_media_type: None,
+                bytes: b,
+            },
+            &store,
+        )
+        .await
+        .published_hash();
+        let listing = handle(
+            Request::List {
+                offset: 0,
+                limit: 100,
+            },
+            &store,
+        )
+        .await;
         let mut expected = vec![ha.clone(), hb.clone()];
         expected.sort();
         assert_eq!(
             listing,
-            Response::Listing { content_hashes: expected, total: 2, offset: 0 },
+            Response::Listing {
+                content_hashes: expected,
+                total: 2,
+                offset: 0
+            },
             "a listing must be sorted, so the walk is the same across a restart"
         );
     }

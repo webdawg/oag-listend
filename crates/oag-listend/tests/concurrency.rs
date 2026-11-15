@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use oag_listend::protocol::{self, Request, Response};
-use oag_listend::{AudioItem, AudioStore, ListendServer, wav};
+use oag_listend::{wav, AudioItem, AudioStore, ListendServer};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
@@ -35,7 +35,10 @@ async fn publish_and_fetch(addr: std::net::SocketAddr, wav: Vec<u8>) -> String {
     stream.write_all(&frame).await.expect("write fetch");
     stream.flush().await.expect("flush fetch");
     match read_response(&mut stream).await {
-        Response::Audio { content_hash, bytes } => {
+        Response::Audio {
+            content_hash,
+            bytes,
+        } => {
             assert_eq!(content_hash, hash);
             assert_eq!(bytes, wav, "the bytes must come back exactly");
             hash
@@ -49,7 +52,10 @@ async fn read_response(stream: &mut TcpStream) -> Response {
     stream.read_exact(&mut prefix).await.expect("prefix");
     let len = u32::from_be_bytes(prefix) as usize;
     let mut body = vec![0u8; len];
-    tokio::time::timeout(BOUND, stream.read_exact(&mut body)).await.expect("bound").expect("body");
+    tokio::time::timeout(BOUND, stream.read_exact(&mut body))
+        .await
+        .expect("bound")
+        .expect("body");
     protocol::decode_response(&body).expect("decode")
 }
 
@@ -60,9 +66,10 @@ async fn concurrent_publishers_all_land_and_verify() {
 }
 
 async fn concurrent_memory() {
-    let (server, addr) = ListendServer::bind_shared("127.0.0.1:0", Arc::new(Mutex::new(AudioStore::default())))
-        .await
-        .expect("bind");
+    let (server, addr) =
+        ListendServer::bind_shared("127.0.0.1:0", Arc::new(Mutex::new(AudioStore::default())))
+            .await
+            .expect("bind");
     let shutdown = server.shutdown_handle();
     let run = tokio::spawn(async move { server.run().await });
 
@@ -85,7 +92,11 @@ async fn concurrent_memory() {
     }
     assert_eq!(all.len(), 320, "every publish must be answered");
     let unique: std::collections::HashSet<&String> = all.iter().collect();
-    assert_eq!(unique.len(), 320, "distinct audio must yield distinct hashes");
+    assert_eq!(
+        unique.len(),
+        320,
+        "distinct audio must yield distinct hashes"
+    );
 
     let listing = {
         let mut stream = TcpStream::connect(addr).await.expect("connect");
@@ -96,7 +107,11 @@ async fn concurrent_memory() {
         stream.write_all(&frame).await.expect("write list");
         stream.flush().await.expect("flush list");
         match read_response(&mut stream).await {
-            Response::Listing { content_hashes, total, .. } => {
+            Response::Listing {
+                content_hashes,
+                total,
+                ..
+            } => {
                 assert_eq!(total, 320, "the store must hold every item");
                 content_hashes
             }
@@ -106,7 +121,11 @@ async fn concurrent_memory() {
     assert_eq!(listing.len(), 320);
 
     shutdown.shutdown();
-    tokio::time::timeout(Duration::from_secs(5), run).await.expect("bound").expect("join").expect("run");
+    tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .expect("bound")
+        .expect("join")
+        .expect("run");
 }
 
 /// The persistent path does a blocking `std::fs::write` while holding the store mutex. Concurrent
@@ -115,7 +134,10 @@ async fn concurrent_memory() {
 async fn concurrent_publishers_persist_every_item() {
     let dir = std::env::temp_dir().join(format!(
         "oag-listend-concurrent-{}",
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     ));
     std::fs::create_dir_all(&dir).unwrap();
     let outcome = tokio::time::timeout(BOUND, concurrent_persistent(&dir)).await;
@@ -150,13 +172,23 @@ async fn concurrent_persistent(dir: &std::path::Path) {
     assert_eq!(all.len(), 80);
 
     shutdown.shutdown();
-    tokio::time::timeout(Duration::from_secs(5), run).await.expect("bound").expect("join").expect("run");
+    tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .expect("bound")
+        .expect("join")
+        .expect("run");
 
     let (reopened, report) = AudioStore::with_directory(dir, 64 * 1024 * 1024).expect("reopen");
-    assert_eq!(report.loaded, 80, "every concurrently published item must survive");
+    assert_eq!(
+        report.loaded, 80,
+        "every concurrently published item must survive"
+    );
     assert_eq!(report.skipped, 0);
     assert_eq!(reopened.len(), 80);
     for hash in &all {
-        assert!(reopened.serve(hash).is_ok(), "{hash} must be served after a restart");
+        assert!(
+            reopened.serve(hash).is_ok(),
+            "{hash} must be served after a restart"
+        );
     }
 }

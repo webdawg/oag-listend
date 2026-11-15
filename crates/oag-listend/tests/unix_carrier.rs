@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use oag_listend::protocol::{self, Request, Response};
-use oag_listend::{AudioItem, AudioStore, ListendServer, wav};
+use oag_listend::{wav, AudioItem, AudioStore, ListendServer};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::sync::Mutex;
@@ -17,7 +17,10 @@ const BOUND: Duration = Duration::from_secs(10);
 fn socket_path(name: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!(
         "oag-listend-unix-{name}-{}",
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     ))
 }
 
@@ -29,7 +32,10 @@ async fn round_trip(stream: &mut UnixStream, request: &Request) -> Response {
     stream.read_exact(&mut prefix).await.expect("prefix");
     let len = u32::from_be_bytes(prefix) as usize;
     let mut body = vec![0u8; len];
-    tokio::time::timeout(BOUND, stream.read_exact(&mut body)).await.expect("bound").expect("body");
+    tokio::time::timeout(BOUND, stream.read_exact(&mut body))
+        .await
+        .expect("bound")
+        .expect("body");
     protocol::decode_response(&body).expect("decode")
 }
 
@@ -51,12 +57,22 @@ async fn round_trip_test(path: &std::path::Path) {
     let run = tokio::spawn(async move { carrier.run().await });
 
     let mut stream = UnixStream::connect(path).await.expect("connect unix");
-    assert_eq!(round_trip(&mut stream, &Request::Hello).await, Response::Hello { name: oag_listend::protocol::DAEMON_NAME.to_string(), protocol_version: oag_listend::protocol::PROTOCOL_VERSION, item_count: 0 });
+    assert_eq!(
+        round_trip(&mut stream, &Request::Hello).await,
+        Response::Hello {
+            name: oag_listend::protocol::DAEMON_NAME.to_string(),
+            protocol_version: oag_listend::protocol::PROTOCOL_VERSION,
+            item_count: 0
+        }
+    );
 
     let tone = wav::generate(41, wav::Sound::Tone);
     let hash = match round_trip(
         &mut stream,
-        &Request::Publish { declared_media_type: Some("audio/wav".into()), bytes: tone.clone() },
+        &Request::Publish {
+            declared_media_type: Some("audio/wav".into()),
+            bytes: tone.clone(),
+        },
     )
     .await
     {
@@ -72,7 +88,10 @@ async fn round_trip_test(path: &std::path::Path) {
 
     // The musical ping is exposed on the Unix carrier too.
     match round_trip(&mut stream, &Request::Ping).await {
-        Response::Audio { content_hash, bytes } => {
+        Response::Audio {
+            content_hash,
+            bytes,
+        } => {
             assert!(!bytes.is_empty());
             assert!(AudioItem::verify(&content_hash, &bytes));
         }
@@ -81,7 +100,10 @@ async fn round_trip_test(path: &std::path::Path) {
 
     match round_trip(
         &mut stream,
-        &Request::Publish { declared_media_type: Some("audio/wav".into()), bytes: b"<html>".to_vec() },
+        &Request::Publish {
+            declared_media_type: Some("audio/wav".into()),
+            bytes: b"<html>".to_vec(),
+        },
     )
     .await
     {
@@ -124,7 +146,10 @@ async fn shared(path: &std::path::Path) {
     let mut stream = UnixStream::connect(path).await.expect("connect unix");
     let hash = match round_trip(
         &mut stream,
-        &Request::Publish { declared_media_type: None, bytes: tone.clone() },
+        &Request::Publish {
+            declared_media_type: None,
+            bytes: tone.clone(),
+        },
     )
     .await
     {
@@ -132,17 +157,25 @@ async fn shared(path: &std::path::Path) {
         other => panic!("expected Published, got {other:?}"),
     };
 
-    let mut tcp = tokio::net::TcpStream::connect(tcp_addr).await.expect("connect tcp");
+    let mut tcp = tokio::net::TcpStream::connect(tcp_addr)
+        .await
+        .expect("connect tcp");
     let frame = protocol::encode_frame(&protocol::encode_request(&Request::Fetch {
         content_hash: hash,
     }));
     tcp.write_all(&frame).await.expect("write tcp");
     tcp.flush().await.expect("flush tcp");
     let mut prefix = [0u8; 4];
-    tokio::time::timeout(BOUND, tcp.read_exact(&mut prefix)).await.expect("bound").expect("read");
+    tokio::time::timeout(BOUND, tcp.read_exact(&mut prefix))
+        .await
+        .expect("bound")
+        .expect("read");
     let len = u32::from_be_bytes(prefix) as usize;
     let mut body = vec![0u8; len];
-    tokio::time::timeout(BOUND, tcp.read_exact(&mut body)).await.expect("bound").expect("read");
+    tokio::time::timeout(BOUND, tcp.read_exact(&mut body))
+        .await
+        .expect("bound")
+        .expect("read");
     match protocol::decode_response(&body).expect("decode") {
         Response::Audio { bytes, .. } => assert_eq!(bytes, tone),
         other => panic!("expected Audio, got {other:?}"),
@@ -150,8 +183,16 @@ async fn shared(path: &std::path::Path) {
 
     unix_shutdown.shutdown();
     tcp_shutdown.shutdown();
-    tokio::time::timeout(Duration::from_secs(5), unix_run).await.expect("bound").expect("join").expect("run");
-    tokio::time::timeout(Duration::from_secs(5), tcp_run).await.expect("bound").expect("join").expect("run");
+    tokio::time::timeout(Duration::from_secs(5), unix_run)
+        .await
+        .expect("bound")
+        .expect("join")
+        .expect("run");
+    tokio::time::timeout(Duration::from_secs(5), tcp_run)
+        .await
+        .expect("bound")
+        .expect("join")
+        .expect("run");
 }
 
 /// A second daemon must not steal a socket that is already being served; two daemons on one path
@@ -172,7 +213,11 @@ async fn steal(path: &std::path::Path) {
     let shutdown = carrier.shutdown_handle();
     let run = tokio::spawn(async move { carrier.run().await });
 
-    let second = oag_listend::unix::UnixCarrier::bind_shared(path, Arc::new(Mutex::new(AudioStore::default()))).await;
+    let second = oag_listend::unix::UnixCarrier::bind_shared(
+        path,
+        Arc::new(Mutex::new(AudioStore::default())),
+    )
+    .await;
     assert!(second.is_err(), "a live socket must not be stolen");
 
     shutdown.shutdown();
@@ -204,6 +249,10 @@ async fn refuse(path: &std::path::Path) {
         Err(error) => error,
     };
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
-    assert_eq!(std::fs::read(path).unwrap(), b"precious", "the file must be left alone");
+    assert_eq!(
+        std::fs::read(path).unwrap(),
+        b"precious",
+        "the file must be left alone"
+    );
     let _ = std::fs::remove_file(path);
 }

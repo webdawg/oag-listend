@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use oag_listend::protocol::{self, Request, Response};
 use oag_listend::udp::MAX_DATAGRAM_BYTES;
-use oag_listend::{AudioItem, wav};
+use oag_listend::{wav, AudioItem};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
 
@@ -23,7 +23,11 @@ struct Args {
 }
 
 fn parse_args() -> Args {
-    let mut args = Args { addr: "127.0.0.1:7100".into(), udp: false, seed: 1 };
+    let mut args = Args {
+        addr: "127.0.0.1:7100".into(),
+        udp: false,
+        seed: 1,
+    };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -66,14 +70,20 @@ async fn round_trip(args: &Args, request: &Request) -> std::io::Result<Response>
         if frame.len() > MAX_DATAGRAM_BYTES {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                format!("frame is {} bytes, larger than a {} byte datagram", frame.len(), MAX_DATAGRAM_BYTES),
+                format!(
+                    "frame is {} bytes, larger than a {} byte datagram",
+                    frame.len(),
+                    MAX_DATAGRAM_BYTES
+                ),
             ));
         }
         socket.send_to(&frame, addr).await?;
         let mut buf = vec![0u8; MAX_DATAGRAM_BYTES];
         let (len, _) = tokio::time::timeout(Duration::from_secs(10), socket.recv_from(&mut buf))
             .await
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "udp read timed out"))??;
+            .map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::TimedOut, "udp read timed out")
+            })??;
         decode_frame_bytes(&buf[..len])
     } else {
         let mut stream = TcpStream::connect(&args.addr).await?;
@@ -111,7 +121,10 @@ async fn exchange(args: &Args) -> std::io::Result<()> {
 
     // The musical liveness answer (operator directive: even pings are music).
     match round_trip(args, &Request::Ping).await? {
-        Response::Audio { content_hash, bytes } => println!(
+        Response::Audio {
+            content_hash,
+            bytes,
+        } => println!(
             "ping:    {} ({} bytes, verified={})",
             &content_hash[..16],
             bytes.len(),
@@ -141,13 +154,27 @@ async fn exchange(args: &Args) -> std::io::Result<()> {
         };
         println!("published {label}: {} ({} bytes)", &hash[..16], bytes.len());
 
-        match round_trip(args, &Request::Fetch { content_hash: hash.clone() }).await? {
-            Response::Audio { content_hash, bytes: fetched } => {
+        match round_trip(
+            args,
+            &Request::Fetch {
+                content_hash: hash.clone(),
+            },
+        )
+        .await?
+        {
+            Response::Audio {
+                content_hash,
+                bytes: fetched,
+            } => {
                 let verified = AudioItem::verify(&content_hash, &fetched);
                 println!(
                     "fetched {label}: {} {} {} bytes verified={}",
                     &content_hash[..16],
-                    if content_hash == hash { "same-hash" } else { "HASH-MISMATCH" },
+                    if content_hash == hash {
+                        "same-hash"
+                    } else {
+                        "HASH-MISMATCH"
+                    },
                     fetched.len(),
                     verified
                 );

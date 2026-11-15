@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use oag_listend::protocol::{self, Request, Response};
-use oag_listend::{AudioFormat, AudioItem, AudioStore, ListendServer, wav};
+use oag_listend::{wav, AudioFormat, AudioItem, AudioStore, ListendServer};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
@@ -27,7 +27,10 @@ async fn recv(stream: &mut TcpStream) -> Response {
     let mut prefix = [0u8; 4];
     stream.read_exact(&mut prefix).await.expect("read prefix");
     let len = u32::from_be_bytes(prefix) as usize;
-    assert!(len <= protocol::MAX_FRAME_BYTES, "frame {len} exceeds the cap");
+    assert!(
+        len <= protocol::MAX_FRAME_BYTES,
+        "frame {len} exceeds the cap"
+    );
     let mut body = vec![0u8; len];
     stream.read_exact(&mut body).await.expect("read body");
     protocol::decode_response(&body).expect("decode response")
@@ -47,30 +50,54 @@ async fn back_and_forth() {
     let shutdown = server.shutdown_handle();
     let run = tokio::spawn(async move { server.run().await });
 
-    let mut stream = TcpStream::connect(addr).await.expect("connect to the daemon");
+    let mut stream = TcpStream::connect(addr)
+        .await
+        .expect("connect to the daemon");
 
     // 1. Hello.
     send(&mut stream, &Request::Hello).await;
-    assert_eq!(recv(&mut stream).await, Response::Hello { name: oag_listend::protocol::DAEMON_NAME.to_string(), protocol_version: oag_listend::protocol::PROTOCOL_VERSION, item_count: 0 });
+    assert_eq!(
+        recv(&mut stream).await,
+        Response::Hello {
+            name: oag_listend::protocol::DAEMON_NAME.to_string(),
+            protocol_version: oag_listend::protocol::PROTOCOL_VERSION,
+            item_count: 0
+        }
+    );
 
     // 2. Push a generated tone. This is "random generated data ... sounds".
     let tone = wav::generate(2026, wav::Sound::Tone);
     assert_eq!(AudioFormat::sniff(&tone), Some(AudioFormat::Wav));
     send(
         &mut stream,
-        &Request::Publish { declared_media_type: Some("audio/wav".into()), bytes: tone.clone() },
+        &Request::Publish {
+            declared_media_type: Some("audio/wav".into()),
+            bytes: tone.clone(),
+        },
     )
     .await;
     let hash = match recv(&mut stream).await {
         Response::Published { content_hash } => content_hash,
         other => panic!("expected Published, got {other:?}"),
     };
-    assert!(AudioItem::verify(&hash, &tone), "the published hash must name the pushed bytes");
+    assert!(
+        AudioItem::verify(&hash, &tone),
+        "the published hash must name the pushed bytes"
+    );
 
     // 3. Pull it back and verify on the receiving side.
-    send(&mut stream, &Request::Fetch { content_hash: hash.clone() }).await;
+    send(
+        &mut stream,
+        &Request::Fetch {
+            content_hash: hash.clone(),
+        },
+    )
+    .await;
     match recv(&mut stream).await {
-        Response::Audio { content_hash, bytes } => {
+        Response::Audio {
+            content_hash,
+            bytes,
+        } => {
             assert_eq!(content_hash, hash);
             assert_eq!(bytes, tone, "audio out must be the audio that went in");
             assert!(AudioItem::verify(&content_hash, &bytes));
@@ -79,10 +106,21 @@ async fn back_and_forth() {
     }
 
     // 4. The listing carries what was published.
-    send(&mut stream, &Request::List { offset: 0, limit: 100 }).await;
+    send(
+        &mut stream,
+        &Request::List {
+            offset: 0,
+            limit: 100,
+        },
+    )
+    .await;
     assert_eq!(
         recv(&mut stream).await,
-        Response::Listing { content_hashes: vec![hash.clone()], total: 1, offset: 0 }
+        Response::Listing {
+            content_hashes: vec![hash.clone()],
+            total: 1,
+            offset: 0
+        }
     );
 
     // 5. Non-audio is refused, however it is labelled, and nothing is stored.
@@ -93,27 +131,48 @@ async fn back_and_forth() {
         (Vec::new(), "audio/wav"),
         (b"plain text".to_vec(), "audio/mpeg"),
     ] {
-        send(&mut stream, &Request::Publish {
-            declared_media_type: Some(label.into()),
-            bytes,
-        })
+        send(
+            &mut stream,
+            &Request::Publish {
+                declared_media_type: Some(label.into()),
+                bytes,
+            },
+        )
         .await;
         match recv(&mut stream).await {
             Response::Rejected { reason } => {
                 assert!(!reason.is_empty());
-                assert!(!reason.contains("html"), "a rejection must not echo the refused bytes");
+                assert!(
+                    !reason.contains("html"),
+                    "a rejection must not echo the refused bytes"
+                );
             }
             other => panic!("{label} must be rejected, got {other:?}"),
         }
     }
     send(&mut stream, &Request::Hello).await;
-    assert_eq!(recv(&mut stream).await, Response::Hello { name: oag_listend::protocol::DAEMON_NAME.to_string(), protocol_version: oag_listend::protocol::PROTOCOL_VERSION, item_count: 1 });
-
-    // 6. An unknown hash is a typed not-found, not a hang.
-    send(&mut stream, &Request::Fetch { content_hash: "ab".repeat(32) }).await;
     assert_eq!(
         recv(&mut stream).await,
-        Response::NotFound { content_hash: "ab".repeat(32) }
+        Response::Hello {
+            name: oag_listend::protocol::DAEMON_NAME.to_string(),
+            protocol_version: oag_listend::protocol::PROTOCOL_VERSION,
+            item_count: 1
+        }
+    );
+
+    // 6. An unknown hash is a typed not-found, not a hang.
+    send(
+        &mut stream,
+        &Request::Fetch {
+            content_hash: "ab".repeat(32),
+        },
+    )
+    .await;
+    assert_eq!(
+        recv(&mut stream).await,
+        Response::NotFound {
+            content_hash: "ab".repeat(32)
+        }
     );
 
     // 7. Shut down and confirm the accept loop actually stops.
@@ -145,7 +204,10 @@ async fn two_connections() {
     let noise = wav::generate(77, wav::Sound::Noise);
     send(
         &mut first,
-        &Request::Publish { declared_media_type: None, bytes: noise.clone() },
+        &Request::Publish {
+            declared_media_type: None,
+            bytes: noise.clone(),
+        },
     )
     .await;
     let hash = match recv(&mut first).await {
@@ -181,19 +243,26 @@ async fn a_native_ping_is_music() {
 async fn ping_native() {
     use oag_listend::AudioFormat;
 
-    let (server, addr) = ListendServer::bind_shared("127.0.0.1:0", Arc::new(Mutex::new(AudioStore::default())))
-        .await
-        .expect("bind");
+    let (server, addr) =
+        ListendServer::bind_shared("127.0.0.1:0", Arc::new(Mutex::new(AudioStore::default())))
+            .await
+            .expect("bind");
     let shutdown = server.shutdown_handle();
     let run = tokio::spawn(async move { server.run().await });
 
     let mut stream = TcpStream::connect(addr).await.expect("connect");
     send(&mut stream, &Request::Ping).await;
     match recv(&mut stream).await {
-        Response::Audio { content_hash, bytes } => {
+        Response::Audio {
+            content_hash,
+            bytes,
+        } => {
             assert!(!bytes.is_empty(), "a ping must never be an empty pong");
             assert_eq!(AudioFormat::sniff(&bytes), Some(AudioFormat::Wav));
-            assert!(AudioItem::verify(&content_hash, &bytes), "the ping must be hash-verifiable");
+            assert!(
+                AudioItem::verify(&content_hash, &bytes),
+                "the ping must be hash-verifiable"
+            );
         }
         other => panic!("a ping must answer with audio, got {other:?}"),
     }

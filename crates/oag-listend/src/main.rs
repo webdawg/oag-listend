@@ -106,9 +106,7 @@ fn usage() -> String {
 /// interface; an operator who did not think about that should be told rather than discover it.
 fn note_public_bind(addr: std::net::SocketAddr) {
     if !addr.ip().is_loopback() {
-        println!(
-            "  note: {addr} is not a loopback address -- this serves audio to that interface"
-        );
+        println!("  note: {addr} is not a loopback address -- this serves audio to that interface");
     }
 }
 
@@ -176,7 +174,7 @@ async fn main() {
                     std::process::exit(1);
                 });
             println!("oag-listend http on {http_addr}");
-        note_public_bind(http_addr);
+            note_public_bind(http_addr);
             Some((carrier, http_addr))
         }
         None => None,
@@ -215,8 +213,9 @@ async fn main() {
     let unix_shutdown = unix.as_ref().map(|(carrier, _)| carrier.shutdown_handle());
 
     if !args.no_generate {
-        let generated =
-            server.publish_generated(args.seed, oag_listend::server::STARTUP_SOUNDS).await;
+        let generated = server
+            .publish_generated(args.seed, oag_listend::server::STARTUP_SOUNDS)
+            .await;
         for hash in &generated.accepted {
             println!("  generated {}", &hash[..16]);
         }
@@ -235,7 +234,10 @@ async fn main() {
         "  seed {}  max-bytes {}  held {held}{}",
         args.seed,
         args.max_bytes,
-        args.dir.as_deref().map(|d| format!("  store {d}")).unwrap_or_default()
+        args.dir
+            .as_deref()
+            .map(|d| format!("  store {d}"))
+            .unwrap_or_default()
     );
     println!("  only audio is accepted; everything else is rejected before it is stored");
 

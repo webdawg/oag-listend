@@ -57,7 +57,11 @@ pub struct AudioItem {
 impl AudioItem {
     pub fn new(bytes: Vec<u8>, media_type: Option<String>) -> Self {
         let content_hash = blake3::hash(&bytes).to_hex().to_string();
-        Self { content_hash, bytes, media_type }
+        Self {
+            content_hash,
+            bytes,
+            media_type,
+        }
     }
 
     /// Whether `bytes` are the bytes this item's hash names -- the receiver-side check.
@@ -169,7 +173,10 @@ impl AudioFormat {
         if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WAVE" {
             return Some(Self::Wav);
         }
-        if bytes.len() >= 12 && &bytes[0..4] == b"FORM" && (&bytes[8..12] == b"AIFF" || &bytes[8..12] == b"AIFC") {
+        if bytes.len() >= 12
+            && &bytes[0..4] == b"FORM"
+            && (&bytes[8..12] == b"AIFF" || &bytes[8..12] == b"AIFC")
+        {
             return Some(Self::Aiff);
         }
         if bytes.starts_with(b"fLaC") {
@@ -207,7 +214,14 @@ impl AudioFormat {
                         bytes[16], bytes[17], bytes[18], bytes[19], bytes[20], bytes[21],
                         bytes[22], bytes[23],
                     ]) as usize;
-                    (if large == 0 { bytes.len() } else { large.min(bytes.len()) }, 24)
+                    (
+                        if large == 0 {
+                            bytes.len()
+                        } else {
+                            large.min(bytes.len())
+                        },
+                        24,
+                    )
                 }
                 _ => (size.min(bytes.len()), 16),
             };
@@ -296,7 +310,10 @@ impl AudioStore {
     /// hand-placed file cannot smuggle anything into the store.
     ///
     /// The load is reported, not silent: an entry that fails either check is skipped and counted.
-    pub fn with_directory(dir: impl Into<PathBuf>, max_bytes: usize) -> std::io::Result<(Self, LoadReport)> {
+    pub fn with_directory(
+        dir: impl Into<PathBuf>,
+        max_bytes: usize,
+    ) -> std::io::Result<(Self, LoadReport)> {
         Self::load_dir(dir, max_bytes, MAX_LOAD_ENTRIES)
     }
 
@@ -378,7 +395,11 @@ impl AudioStore {
                 continue;
             }
             let media_type = read_sidecar(&dir, &hash);
-            store.publish(AudioItem { content_hash: hash, bytes, media_type });
+            store.publish(AudioItem {
+                content_hash: hash,
+                bytes,
+                media_type,
+            });
             inserted += 1;
         }
 
@@ -394,13 +415,20 @@ impl AudioStore {
     /// for a carrier that does not exist yet. The check is on the bytes, never on
     /// `declared_media_type`: a declared type is a claim and the bytes are the evidence. The
     /// declared type is kept on the item as metadata only if the bytes agree it is audio at all.
-    pub async fn accept(&mut self, bytes: Vec<u8>, declared_media_type: Option<String>) -> Result<String, ListendError> {
+    pub async fn accept(
+        &mut self,
+        bytes: Vec<u8>,
+        declared_media_type: Option<String>,
+    ) -> Result<String, ListendError> {
         if AudioFormat::sniff(&bytes).is_none() {
             return Err(ListendError::NotAudio);
         }
         let bound = servable_bound(self.max_bytes);
         if bytes.len() > bound {
-            return Err(ListendError::TooLarge { len: bytes.len(), max: bound });
+            return Err(ListendError::TooLarge {
+                len: bytes.len(),
+                max: bound,
+            });
         }
         let item = AudioItem::new(bytes, declared_media_type);
         if let Some(existing) = self.items.get(&item.content_hash).cloned() {
@@ -475,7 +503,9 @@ impl AudioStore {
         self.items.insert(hash.clone(), Arc::new(item));
         self.order.push_back(hash.clone());
         while self.bytes_held > self.max_bytes {
-            let Some(oldest) = self.order.pop_front() else { break };
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
             if let Some(evicted) = self.items.remove(&oldest) {
                 self.bytes_held -= evicted.bytes.len();
                 self.forget(&oldest);
@@ -620,12 +650,21 @@ mod tests {
     #[test]
     fn an_item_is_served_by_its_content_hash_and_verifies() {
         let mut store = AudioStore::default();
-        let item = AudioItem::new(b"not really audio, but bytes".to_vec(), Some("audio/wav".into()));
+        let item = AudioItem::new(
+            b"not really audio, but bytes".to_vec(),
+            Some("audio/wav".into()),
+        );
         let hash = store.publish(item.clone());
         let served = store.serve(&hash).unwrap();
         assert_eq!(served.as_ref(), &item);
-        assert!(AudioItem::verify(&hash, &served.bytes), "the receiver-side check must pass");
-        assert!(!AudioItem::verify(&hash, b"tampered"), "and must fail on different bytes");
+        assert!(
+            AudioItem::verify(&hash, &served.bytes),
+            "the receiver-side check must pass"
+        );
+        assert!(
+            !AudioItem::verify(&hash, b"tampered"),
+            "and must fail on different bytes"
+        );
     }
 
     /// The inbound rule, as a property: a recognised audio signature is accepted, anything else
@@ -639,23 +678,47 @@ mod tests {
         wav.extend_from_slice(&[0, 0, 0, 0]);
         wav.extend_from_slice(b"WAVE");
         wav.extend_from_slice(b"fmt ");
-        assert!(store.accept(wav.clone(), None).await.is_ok(), "a WAV signature is audio");
+        assert!(
+            store.accept(wav.clone(), None).await.is_ok(),
+            "a WAV signature is audio"
+        );
 
-        assert!(store.accept(b"fLaC\0\0\0\x22".to_vec(), None).await.is_ok(), "FLAC is audio");
+        assert!(
+            store.accept(b"fLaC\0\0\0\x22".to_vec(), None).await.is_ok(),
+            "FLAC is audio"
+        );
         assert!(
             store.accept(ogg_bos(b"\x01vorbis"), None).await.is_ok(),
             "Ogg Vorbis is audio"
         );
-        assert!(store.accept(ogg_bos(b"OpusHead"), None).await.is_ok(), "Ogg Opus is audio");
         assert!(
-            matches!(store.accept(ogg_bos(b"\x80theora"), None).await, Err(ListendError::NotAudio)),
+            store.accept(ogg_bos(b"OpusHead"), None).await.is_ok(),
+            "Ogg Opus is audio"
+        );
+        assert!(
+            matches!(
+                store.accept(ogg_bos(b"\x80theora"), None).await,
+                Err(ListendError::NotAudio)
+            ),
             "Ogg Theora is video, not audio"
         );
-        assert!(store.accept(b"ID3\x04\0\0".to_vec(), None).await.is_ok(), "an ID3 tag is MPEG audio");
-        assert!(store.accept(vec![0xFF, 0xFB, 0x90, 0x00], None).await.is_ok(), "a raw MPEG frame is audio");
+        assert!(
+            store.accept(b"ID3\x04\0\0".to_vec(), None).await.is_ok(),
+            "an ID3 tag is MPEG audio"
+        );
+        assert!(
+            store
+                .accept(vec![0xFF, 0xFB, 0x90, 0x00], None)
+                .await
+                .is_ok(),
+            "a raw MPEG frame is audio"
+        );
         let mut m4a = vec![0, 0, 0, 0x20];
         m4a.extend_from_slice(b"ftypM4A ");
-        assert!(store.accept(m4a, None).await.is_ok(), "an M4A brand is audio");
+        assert!(
+            store.accept(m4a, None).await.is_ok(),
+            "an M4A brand is audio"
+        );
         let before = store.len();
 
         // Not audio, however it is labelled.
@@ -678,27 +741,39 @@ mod tests {
         // A video brand is ISO BMFF but not audio.
         let mut mp4_video = vec![0, 0, 0, 0x20];
         mp4_video.extend_from_slice(b"ftypavc1");
-        assert!(matches!(store.accept(mp4_video, None).await, Err(ListendError::NotAudio)));
+        assert!(matches!(
+            store.accept(mp4_video, None).await,
+            Err(ListendError::NotAudio)
+        ));
 
         // A generic `isom` major brand with no audio brand anywhere is video, not audio.
         let mut isom_video = vec![0, 0, 0, 0x20];
         isom_video.extend_from_slice(b"ftypisom");
         isom_video.extend_from_slice(&[0, 0, 0, 1]);
         isom_video.extend_from_slice(b"avc1");
-        assert!(matches!(store.accept(isom_video, None).await, Err(ListendError::NotAudio)));
+        assert!(matches!(
+            store.accept(isom_video, None).await,
+            Err(ListendError::NotAudio)
+        ));
 
         // The same generic major brand with `M4A ` among the compatible brands is audio.
         let mut isom_m4a = vec![0, 0, 0, 0x24];
         isom_m4a.extend_from_slice(b"ftypisom");
         isom_m4a.extend_from_slice(&[0, 0, 0, 1]);
         isom_m4a.extend_from_slice(b"M4A ");
-        assert!(store.accept(isom_m4a, None).await.is_ok(), "an audio compatible brand must be accepted");
+        assert!(
+            store.accept(isom_m4a, None).await.is_ok(),
+            "an audio compatible brand must be accepted"
+        );
     }
 
     #[test]
     fn an_unknown_hash_is_a_typed_error() {
         let store = AudioStore::default();
-        assert!(matches!(store.serve("nope"), Err(ListendError::NotFound(_))));
+        assert!(matches!(
+            store.serve("nope"),
+            Err(ListendError::NotFound(_))
+        ));
     }
 
     #[test]
@@ -745,14 +820,24 @@ mod tests {
         let wav = wav::generate(1, wav::Sound::Tone);
         {
             let (mut store, _) = AudioStore::with_directory(&dir, 1024 * 1024).unwrap();
-            let hash = store.accept(wav.clone(), Some("audio/wav".into())).await.unwrap();
+            let hash = store
+                .accept(wav.clone(), Some("audio/wav".into()))
+                .await
+                .unwrap();
             assert_eq!(store.serve(&hash).unwrap().bytes, wav);
         }
         let (store, report) = AudioStore::with_directory(&dir, 1024 * 1024).unwrap();
         assert_eq!(report.loaded, 1);
         assert_eq!(report.skipped, 0);
         assert_eq!(store.serve(&store.hashes()[0]).unwrap().bytes, wav);
-        assert_eq!(store.serve(&store.hashes()[0]).unwrap().media_type.as_deref(), Some("audio/wav"));
+        assert_eq!(
+            store
+                .serve(&store.hashes()[0])
+                .unwrap()
+                .media_type
+                .as_deref(),
+            Some("audio/wav")
+        );
         let _ = store;
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -785,7 +870,10 @@ mod tests {
         // restored rather than the item becoming one a restart would lose.
         let again = store.accept(wav, None).await.unwrap();
         assert_eq!(again, hash);
-        assert!(dir.join(&hash).exists(), "a republish must restore the file");
+        assert!(
+            dir.join(&hash).exists(),
+            "a republish must restore the file"
+        );
 
         let (reopened, report) = AudioStore::with_directory(&dir, 1024 * 1024).unwrap();
         assert_eq!(report.loaded, 1);
@@ -833,7 +921,8 @@ mod tests {
         let (reopened, report) = AudioStore::with_directory(&dir, 1024 * 1024).unwrap();
         assert_eq!(report.loaded, 1);
         assert_eq!(
-            reopened.serve(&hash).unwrap().media_type, None,
+            reopened.serve(&hash).unwrap().media_type,
+            None,
             "an oversized sidecar is ignored, not trusted"
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -862,9 +951,15 @@ mod tests {
         assert!(dir.join(&first_hash).exists());
         let second_hash = store.accept(second, None).await.unwrap();
 
-        assert!(store.serve(&first_hash).is_err(), "the first item must be evicted");
+        assert!(
+            store.serve(&first_hash).is_err(),
+            "the first item must be evicted"
+        );
         assert!(store.serve(&second_hash).is_ok());
-        assert!(!dir.join(&first_hash).exists(), "eviction must delete the file, not orphan it");
+        assert!(
+            !dir.join(&first_hash).exists(),
+            "eviction must delete the file, not orphan it"
+        );
         assert!(dir.join(&second_hash).exists());
         assert!(store.bytes_held() <= 60);
         let _ = std::fs::remove_dir_all(&dir);
@@ -909,7 +1004,10 @@ mod tests {
         }
         let (reopened, report) = AudioStore::with_directory(&dir, 120).unwrap();
         assert_eq!(report.loaded, 2, "only what the bound holds is loaded");
-        assert_eq!(report.evicted, 1, "the pushed-out entry is reported, not hidden");
+        assert_eq!(
+            report.evicted, 1,
+            "the pushed-out entry is reported, not hidden"
+        );
         assert_eq!(reopened.len(), 2);
         assert!(hashes.iter().any(|h| reopened.serve(h).is_err()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -931,7 +1029,10 @@ mod tests {
 
         let (reopened, report) = AudioStore::with_directory(&dir, 64).unwrap();
         assert_eq!(report.loaded, 1, "only the item that fits is loaded");
-        assert_eq!(report.skipped, 1, "the oversized file is skipped and counted");
+        assert_eq!(
+            report.skipped, 1,
+            "the oversized file is skipped and counted"
+        );
         assert!(reopened.serve(&small_hash).is_ok());
         assert!(reopened.serve(&hash).is_err());
         let _ = std::fs::remove_dir_all(&dir);
@@ -945,7 +1046,10 @@ mod tests {
         std::fs::write(&file, b"x").unwrap();
         let mut store = AudioStore::with_directory_path_for_test(file, 1024 * 1024);
         let result = store.accept(wav::generate(3, wav::Sound::Tone), None).await;
-        assert!(matches!(result, Err(ListendError::Persist(_))), "got {result:?}");
+        assert!(
+            matches!(result, Err(ListendError::Persist(_))),
+            "got {result:?}"
+        );
         let _ = std::fs::remove_dir_all(&blocker);
     }
 
@@ -954,7 +1058,10 @@ mod tests {
         let mut store = AudioStore::with_capacity(10);
         let first = store.publish(AudioItem::new(vec![0; 6], None));
         let second = store.publish(AudioItem::new(vec![1; 6], None));
-        assert!(store.serve(&first).is_err(), "the oldest item must be evicted past the byte cap");
+        assert!(
+            store.serve(&first).is_err(),
+            "the oldest item must be evicted past the byte cap"
+        );
         assert!(store.serve(&second).is_ok());
         assert!(store.bytes_held() <= 10);
     }

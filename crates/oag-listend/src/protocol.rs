@@ -81,7 +81,10 @@ pub enum Request {
     Hello,
     /// Here are audio bytes. `declared_media_type` is metadata the client claims; the daemon
     /// decides on the bytes.
-    Publish { declared_media_type: Option<String>, bytes: Vec<u8> },
+    Publish {
+        declared_media_type: Option<String>,
+        bytes: Vec<u8>,
+    },
     /// Give me the audio with this content hash.
     Fetch { content_hash: String },
     /// A liveness probe whose answer is audio, not an empty control pong (operator directive:
@@ -97,16 +100,33 @@ pub enum Request {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Response {
     /// What this daemon is, which protocol it speaks, and how much audio it holds.
-    Hello { name: String, protocol_version: u16, item_count: usize },
+    Hello {
+        name: String,
+        protocol_version: u16,
+        item_count: usize,
+    },
     /// Audio bytes, with the hash they must verify against.
-    Audio { content_hash: String, bytes: Vec<u8> },
+    Audio {
+        content_hash: String,
+        bytes: Vec<u8>,
+    },
     /// The inbound rule refused these bytes. `reason` describes the refusal, never the bytes.
-    Rejected { reason: String },
-    NotFound { content_hash: String },
+    Rejected {
+        reason: String,
+    },
+    NotFound {
+        content_hash: String,
+    },
     /// One page of the listing. `total` is the whole store's size, `offset` the index this page
     /// starts at, so a client can walk the store without guessing.
-    Listing { content_hashes: Vec<String>, total: usize, offset: usize },
-    Published { content_hash: String },
+    Listing {
+        content_hashes: Vec<String>,
+        total: usize,
+        offset: usize,
+    },
+    Published {
+        content_hash: String,
+    },
 }
 
 // ---------------------------------------------------------------- encoding
@@ -208,7 +228,9 @@ impl<'a> Reader<'a> {
             return Err(WireError::BadString);
         }
         let bytes = self.take(len)?;
-        Ok(Some(String::from_utf8(bytes.to_vec()).map_err(|_| WireError::BadString)?))
+        Ok(Some(
+            String::from_utf8(bytes.to_vec()).map_err(|_| WireError::BadString)?,
+        ))
     }
 
     fn hash(&mut self) -> Result<String, WireError> {
@@ -236,7 +258,10 @@ pub fn encode_request(req: &Request) -> Vec<u8> {
             put_u32(&mut out, *offset as u32);
             put_u32(&mut out, *limit as u32);
         }
-        Request::Publish { declared_media_type, bytes } => {
+        Request::Publish {
+            declared_media_type,
+            bytes,
+        } => {
             out.push(OP_PUBLISH);
             put_opt_str(&mut out, declared_media_type);
             out.extend_from_slice(bytes);
@@ -262,9 +287,14 @@ pub fn decode_request(body: &[u8]) -> Result<Request, WireError> {
         }
         OP_PUBLISH => {
             let declared_media_type = r.opt_string()?;
-            Ok(Request::Publish { declared_media_type, bytes: r.rest().to_vec() })
+            Ok(Request::Publish {
+                declared_media_type,
+                bytes: r.rest().to_vec(),
+            })
         }
-        OP_FETCH => Ok(Request::Fetch { content_hash: r.hash()? }),
+        OP_FETCH => Ok(Request::Fetch {
+            content_hash: r.hash()?,
+        }),
         other => Err(WireError::UnknownOp(other)),
     }
 }
@@ -272,13 +302,20 @@ pub fn decode_request(body: &[u8]) -> Result<Request, WireError> {
 pub fn encode_response(resp: &Response) -> Vec<u8> {
     let mut out = Vec::new();
     match resp {
-        Response::Hello { name, protocol_version, item_count } => {
+        Response::Hello {
+            name,
+            protocol_version,
+            item_count,
+        } => {
             out.push(OP_RESP_HELLO);
             put_str(&mut out, name);
             put_u16(&mut out, *protocol_version);
             put_u32(&mut out, *item_count as u32);
         }
-        Response::Audio { content_hash, bytes } => {
+        Response::Audio {
+            content_hash,
+            bytes,
+        } => {
             out.push(OP_RESP_AUDIO);
             put_str(&mut out, content_hash);
             put_u32(&mut out, bytes.len() as u32);
@@ -292,7 +329,11 @@ pub fn encode_response(resp: &Response) -> Vec<u8> {
             out.push(OP_RESP_NOT_FOUND);
             put_str(&mut out, content_hash);
         }
-        Response::Listing { content_hashes, total, offset } => {
+        Response::Listing {
+            content_hashes,
+            total,
+            offset,
+        } => {
             out.push(OP_RESP_LISTING);
             put_u32(&mut out, *total as u32);
             put_u32(&mut out, *offset as u32);
@@ -317,7 +358,11 @@ pub fn decode_response(body: &[u8]) -> Result<Response, WireError> {
             let name = r.string()?;
             let protocol_version = r.u16()?;
             let item_count = r.u32()? as usize;
-            Ok(Response::Hello { name, protocol_version, item_count })
+            Ok(Response::Hello {
+                name,
+                protocol_version,
+                item_count,
+            })
         }
         OP_RESP_AUDIO => {
             let content_hash = r.hash()?;
@@ -325,10 +370,17 @@ pub fn decode_response(body: &[u8]) -> Result<Response, WireError> {
             if len > r.buf.len() {
                 return Err(WireError::Truncated);
             }
-            Ok(Response::Audio { content_hash, bytes: r.take(len)?.to_vec() })
+            Ok(Response::Audio {
+                content_hash,
+                bytes: r.take(len)?.to_vec(),
+            })
         }
-        OP_RESP_REJECTED => Ok(Response::Rejected { reason: r.string()? }),
-        OP_RESP_NOT_FOUND => Ok(Response::NotFound { content_hash: r.hash()? }),
+        OP_RESP_REJECTED => Ok(Response::Rejected {
+            reason: r.string()?,
+        }),
+        OP_RESP_NOT_FOUND => Ok(Response::NotFound {
+            content_hash: r.hash()?,
+        }),
         OP_RESP_LISTING => {
             let total = r.u32()? as usize;
             let offset = r.u32()? as usize;
@@ -340,9 +392,15 @@ pub fn decode_response(body: &[u8]) -> Result<Response, WireError> {
             for _ in 0..count {
                 content_hashes.push(r.hash()?);
             }
-            Ok(Response::Listing { content_hashes, total, offset })
+            Ok(Response::Listing {
+                content_hashes,
+                total,
+                offset,
+            })
         }
-        OP_RESP_PUBLISHED => Ok(Response::Published { content_hash: r.hash()? }),
+        OP_RESP_PUBLISHED => Ok(Response::Published {
+            content_hash: r.hash()?,
+        }),
         other => Err(WireError::UnknownOp(other)),
     }
 }
@@ -365,9 +423,18 @@ mod tests {
     fn requests_round_trip() {
         roundtrip_request(&Request::Hello);
         roundtrip_request(&Request::Ping);
-        roundtrip_request(&Request::List { offset: 5, limit: 10 });
-        roundtrip_request(&Request::List { offset: 0, limit: 0 });
-        roundtrip_request(&Request::Publish { declared_media_type: None, bytes: b"RIFF....WAVE".to_vec() });
+        roundtrip_request(&Request::List {
+            offset: 5,
+            limit: 10,
+        });
+        roundtrip_request(&Request::List {
+            offset: 0,
+            limit: 0,
+        });
+        roundtrip_request(&Request::Publish {
+            declared_media_type: None,
+            bytes: b"RIFF....WAVE".to_vec(),
+        });
         roundtrip_request(&Request::Publish {
             declared_media_type: Some("audio/wav".into()),
             bytes: vec![1, 2, 3],
@@ -409,14 +476,20 @@ mod tests {
             content_hash: "cd".repeat(32),
             bytes: vec![9, 8, 7],
         });
-        roundtrip_response(&Response::Rejected { reason: "input is not audio".into() });
-        roundtrip_response(&Response::NotFound { content_hash: "00".repeat(32) });
+        roundtrip_response(&Response::Rejected {
+            reason: "input is not audio".into(),
+        });
+        roundtrip_response(&Response::NotFound {
+            content_hash: "00".repeat(32),
+        });
         roundtrip_response(&Response::Listing {
             content_hashes: vec!["11".repeat(32), "22".repeat(32)],
             total: 7,
             offset: 2,
         });
-        roundtrip_response(&Response::Published { content_hash: "33".repeat(32) });
+        roundtrip_response(&Response::Published {
+            content_hash: "33".repeat(32),
+        });
     }
 
     #[test]
@@ -433,7 +506,10 @@ mod tests {
     fn a_frame_longer_than_the_cap_is_refused_before_it_is_trusted() {
         let mut buf = Vec::new();
         buf.extend_from_slice(&((MAX_FRAME_BYTES + 1) as u32).to_be_bytes());
-        assert_eq!(decode_frame(&buf), Err(WireError::TooLong(MAX_FRAME_BYTES + 1)));
+        assert_eq!(
+            decode_frame(&buf),
+            Err(WireError::TooLong(MAX_FRAME_BYTES + 1))
+        );
     }
 
     #[test]

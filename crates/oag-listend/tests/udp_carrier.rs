@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use oag_listend::protocol::{self, Request, Response};
 use oag_listend::udp::{UdpCarrier, MAX_DATAGRAM_BYTES};
-use oag_listend::{AudioItem, AudioStore, wav};
+use oag_listend::{wav, AudioItem, AudioStore};
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 
@@ -16,7 +16,10 @@ const BOUND: Duration = Duration::from_secs(10);
 
 async fn exchange(socket: &UdpSocket, addr: std::net::SocketAddr, request: &Request) -> Response {
     let frame = protocol::encode_frame(&protocol::encode_request(request));
-    assert!(frame.len() <= MAX_DATAGRAM_BYTES, "request must fit a datagram");
+    assert!(
+        frame.len() <= MAX_DATAGRAM_BYTES,
+        "request must fit a datagram"
+    );
     socket.send_to(&frame, addr).await.expect("send datagram");
     let mut buf = vec![0u8; MAX_DATAGRAM_BYTES];
     let (len, from) = tokio::time::timeout(BOUND, socket.recv_from(&mut buf))
@@ -24,12 +27,15 @@ async fn exchange(socket: &UdpSocket, addr: std::net::SocketAddr, request: &Requ
         .expect("datagram within the bound")
         .expect("recv");
     assert_eq!(from, addr, "the reply comes from the daemon");
-    protocol::decode_response(protocol::decode_frame(&buf[..len]).expect("frame")).expect("response")
+    protocol::decode_response(protocol::decode_frame(&buf[..len]).expect("frame"))
+        .expect("response")
 }
 
 #[tokio::test]
 async fn udp_carries_the_same_audio() {
-    tokio::time::timeout(BOUND, round_trip()).await.expect("udp exchange within the bound")
+    tokio::time::timeout(BOUND, round_trip())
+        .await
+        .expect("udp exchange within the bound")
 }
 
 async fn round_trip() {
@@ -44,14 +50,21 @@ async fn round_trip() {
 
     assert_eq!(
         exchange(&socket, addr, &Request::Hello).await,
-        Response::Hello { name: oag_listend::protocol::DAEMON_NAME.to_string(), protocol_version: oag_listend::protocol::PROTOCOL_VERSION, item_count: 0 }
+        Response::Hello {
+            name: oag_listend::protocol::DAEMON_NAME.to_string(),
+            protocol_version: oag_listend::protocol::PROTOCOL_VERSION,
+            item_count: 0
+        }
     );
 
     let tone = wav::generate(23, wav::Sound::Tone);
     let hash = match exchange(
         &socket,
         addr,
-        &Request::Publish { declared_media_type: Some("audio/wav".into()), bytes: tone.clone() },
+        &Request::Publish {
+            declared_media_type: Some("audio/wav".into()),
+            bytes: tone.clone(),
+        },
     )
     .await
     {
@@ -60,8 +73,19 @@ async fn round_trip() {
     };
     assert!(AudioItem::verify(&hash, &tone));
 
-    match exchange(&socket, addr, &Request::Fetch { content_hash: hash.clone() }).await {
-        Response::Audio { content_hash, bytes } => {
+    match exchange(
+        &socket,
+        addr,
+        &Request::Fetch {
+            content_hash: hash.clone(),
+        },
+    )
+    .await
+    {
+        Response::Audio {
+            content_hash,
+            bytes,
+        } => {
             assert_eq!(content_hash, hash);
             assert_eq!(bytes, tone, "the datagram must carry the same audio");
         }
@@ -70,9 +94,15 @@ async fn round_trip() {
 
     // The musical ping is exposed here too (operator directive: every carrier).
     match exchange(&socket, addr, &Request::Ping).await {
-        Response::Audio { content_hash, bytes } => {
+        Response::Audio {
+            content_hash,
+            bytes,
+        } => {
             assert!(!bytes.is_empty(), "a ping must never be an empty pong");
-            assert_eq!(oag_listend::AudioFormat::sniff(&bytes), Some(oag_listend::AudioFormat::Wav));
+            assert_eq!(
+                oag_listend::AudioFormat::sniff(&bytes),
+                Some(oag_listend::AudioFormat::Wav)
+            );
             assert!(AudioItem::verify(&content_hash, &bytes));
         }
         other => panic!("a ping must answer with audio, got {other:?}"),
@@ -82,7 +112,10 @@ async fn round_trip() {
     match exchange(
         &socket,
         addr,
-        &Request::Publish { declared_media_type: Some("audio/wav".into()), bytes: b"<html>".to_vec() },
+        &Request::Publish {
+            declared_media_type: Some("audio/wav".into()),
+            bytes: b"<html>".to_vec(),
+        },
     )
     .await
     {
@@ -91,8 +124,20 @@ async fn round_trip() {
     }
 
     assert_eq!(
-        exchange(&socket, addr, &Request::List { offset: 0, limit: 100 }).await,
-        Response::Listing { content_hashes: vec![hash], total: 1, offset: 0 }
+        exchange(
+            &socket,
+            addr,
+            &Request::List {
+                offset: 0,
+                limit: 100
+            }
+        )
+        .await,
+        Response::Listing {
+            content_hashes: vec![hash],
+            total: 1,
+            offset: 0
+        }
     );
 
     shutdown.shutdown();

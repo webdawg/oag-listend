@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use oag_listend::http::HttpCarrier;
-use oag_listend::{AudioStore, AudioItem, wav};
+use oag_listend::{wav, AudioItem, AudioStore};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
@@ -21,7 +21,10 @@ async fn http(addr: std::net::SocketAddr, request: &str) -> Vec<u8> {
     stream.write_all(request.as_bytes()).await.expect("write");
     stream.flush().await.expect("flush");
     let mut out = Vec::new();
-    tokio::time::timeout(BOUND, stream.read_to_end(&mut out)).await.expect("read bound").expect("read");
+    tokio::time::timeout(BOUND, stream.read_to_end(&mut out))
+        .await
+        .expect("read bound")
+        .expect("read");
     out
 }
 
@@ -35,7 +38,10 @@ async fn http_post(addr: std::net::SocketAddr, body: &[u8], content_type: &str) 
     stream.write_all(body).await.expect("write body");
     stream.flush().await.expect("flush");
     let mut out = Vec::new();
-    tokio::time::timeout(BOUND, stream.read_to_end(&mut out)).await.expect("read bound").expect("read");
+    tokio::time::timeout(BOUND, stream.read_to_end(&mut out))
+        .await
+        .expect("read bound")
+        .expect("read");
     out
 }
 
@@ -57,8 +63,13 @@ fn body_of(response: &[u8]) -> &[u8] {
 }
 
 fn head_contains(response: &[u8], needle: &str) -> bool {
-    let pos = response.windows(4).position(|w| w == b"\r\n\r\n").unwrap_or(response.len());
-    String::from_utf8_lossy(&response[..pos]).to_ascii_lowercase().contains(needle)
+    let pos = response
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .unwrap_or(response.len());
+    String::from_utf8_lossy(&response[..pos])
+        .to_ascii_lowercase()
+        .contains(needle)
 }
 
 #[tokio::test]
@@ -77,16 +88,30 @@ async fn exchange() {
     let run = tokio::spawn(async move { carrier.run().await });
 
     // GET / -- what this is.
-    let root = http(addr, "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").await;
+    let root = http(
+        addr,
+        "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+    )
+    .await;
     assert_eq!(status_of(&root), 200, "{}", String::from_utf8_lossy(&root));
     assert!(String::from_utf8_lossy(&root).contains("oag-listend"));
 
     // POST /audio -- a generated tone, labelled as WAV.
     let tone = wav::generate(5, wav::Sound::Tone);
     let posted = http_post(addr, &tone, "audio/wav").await;
-    assert_eq!(status_of(&posted), 201, "{}", String::from_utf8_lossy(&posted));
+    assert_eq!(
+        status_of(&posted),
+        201,
+        "{}",
+        String::from_utf8_lossy(&posted)
+    );
     let hash = String::from_utf8_lossy(body_of(&posted)).trim().to_string();
-    assert_eq!(hash.len(), 64, "the body is the content hash: {}", String::from_utf8_lossy(&posted));
+    assert_eq!(
+        hash.len(),
+        64,
+        "the body is the content hash: {}",
+        String::from_utf8_lossy(&posted)
+    );
     assert!(AudioItem::verify(&hash, &tone));
 
     // GET /audio/{hash} -- the same bytes, with an audio content type.
@@ -95,29 +120,67 @@ async fn exchange() {
         &format!("GET /audio/{hash} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"),
     )
     .await;
-    assert_eq!(status_of(&fetched), 200, "{}", String::from_utf8_lossy(&fetched));
-    assert!(head_contains(&fetched, "content-type: audio/wav"), "{}", String::from_utf8_lossy(&fetched));
-    assert_eq!(body_of(&fetched), tone.as_slice(), "the bytes over http must be the bytes that were posted");
+    assert_eq!(
+        status_of(&fetched),
+        200,
+        "{}",
+        String::from_utf8_lossy(&fetched)
+    );
+    assert!(
+        head_contains(&fetched, "content-type: audio/wav"),
+        "{}",
+        String::from_utf8_lossy(&fetched)
+    );
+    assert_eq!(
+        body_of(&fetched),
+        tone.as_slice(),
+        "the bytes over http must be the bytes that were posted"
+    );
 
     // POST /audio -- HTML labelled audio/wav is refused.
     let html = b"<html><body>hello</body></html>";
     let refused = http_post(addr, html, "audio/wav").await;
-    assert_eq!(status_of(&refused), 400, "{}", String::from_utf8_lossy(&refused));
+    assert_eq!(
+        status_of(&refused),
+        400,
+        "{}",
+        String::from_utf8_lossy(&refused)
+    );
     let refusal = String::from_utf8_lossy(&refused).to_ascii_lowercase();
     assert!(refusal.contains("not audio"), "{}", refusal);
-    assert!(!refusal.contains("<html>"), "a refusal must not echo the refused bytes");
+    assert!(
+        !refusal.contains("<html>"),
+        "a refusal must not echo the refused bytes"
+    );
 
     // GET an unknown hash -- 404, not a hang.
     let missing = http(
         addr,
-        &format!("GET /audio/{} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", "ab".repeat(32)),
+        &format!(
+            "GET /audio/{} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+            "ab".repeat(32)
+        ),
     )
     .await;
-    assert_eq!(status_of(&missing), 404, "{}", String::from_utf8_lossy(&missing));
+    assert_eq!(
+        status_of(&missing),
+        404,
+        "{}",
+        String::from_utf8_lossy(&missing)
+    );
 
     // An unknown route is 404.
-    let route = http(addr, "GET /nope HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").await;
-    assert_eq!(status_of(&route), 404, "{}", String::from_utf8_lossy(&route));
+    let route = http(
+        addr,
+        "GET /nope HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    assert_eq!(
+        status_of(&route),
+        404,
+        "{}",
+        String::from_utf8_lossy(&route)
+    );
 
     shutdown.shutdown();
     tokio::time::timeout(Duration::from_secs(5), run)
@@ -130,7 +193,9 @@ async fn exchange() {
 /// The HTTP and native carriers share one store: a publish on one is fetchable on the other.
 #[tokio::test]
 async fn the_two_carriers_serve_the_same_audio() {
-    tokio::time::timeout(BOUND, shared_store()).await.expect("shared-store exchange within bound")
+    tokio::time::timeout(BOUND, shared_store())
+        .await
+        .expect("shared-store exchange within bound")
 }
 
 async fn shared_store() {
@@ -138,9 +203,10 @@ async fn shared_store() {
     let (carrier, http_addr) = HttpCarrier::bind_shared("127.0.0.1:0", Arc::clone(&store))
         .await
         .expect("bind http");
-    let (server, native_addr) = oag_listend::ListendServer::bind_shared("127.0.0.1:0", Arc::clone(&store))
-        .await
-        .expect("bind native");
+    let (server, native_addr) =
+        oag_listend::ListendServer::bind_shared("127.0.0.1:0", Arc::clone(&store))
+            .await
+            .expect("bind native");
     let http_shutdown = carrier.shutdown_handle();
     let native_shutdown = server.shutdown_handle();
     let http_run = tokio::spawn(async move { carrier.run().await });
@@ -152,17 +218,25 @@ async fn shared_store() {
     let hash = String::from_utf8_lossy(body_of(&posted)).trim().to_string();
 
     // Fetch over the native protocol.
-    let mut native = TcpStream::connect(native_addr).await.expect("connect native");
+    let mut native = TcpStream::connect(native_addr)
+        .await
+        .expect("connect native");
     let frame = oag_listend::protocol::encode_frame(&oag_listend::protocol::encode_request(
         &oag_listend::protocol::Request::Fetch { content_hash: hash },
     ));
     native.write_all(&frame).await.expect("write native");
     native.flush().await.expect("flush native");
     let mut prefix = [0u8; 4];
-    tokio::time::timeout(BOUND, native.read_exact(&mut prefix)).await.expect("bound").expect("read");
+    tokio::time::timeout(BOUND, native.read_exact(&mut prefix))
+        .await
+        .expect("bound")
+        .expect("read");
     let len = u32::from_be_bytes(prefix) as usize;
     let mut body = vec![0u8; len];
-    tokio::time::timeout(BOUND, native.read_exact(&mut body)).await.expect("bound").expect("read");
+    tokio::time::timeout(BOUND, native.read_exact(&mut body))
+        .await
+        .expect("bound")
+        .expect("read");
     match oag_listend::protocol::decode_response(&body).expect("decode") {
         oag_listend::protocol::Response::Audio { bytes, .. } => assert_eq!(bytes, tone),
         other => panic!("expected Audio, got {other:?}"),
@@ -170,8 +244,16 @@ async fn shared_store() {
 
     http_shutdown.shutdown();
     native_shutdown.shutdown();
-    tokio::time::timeout(Duration::from_secs(5), http_run).await.expect("bound").expect("join").expect("run");
-    tokio::time::timeout(Duration::from_secs(5), native_run).await.expect("bound").expect("join").expect("run");
+    tokio::time::timeout(Duration::from_secs(5), http_run)
+        .await
+        .expect("bound")
+        .expect("join")
+        .expect("run");
+    tokio::time::timeout(Duration::from_secs(5), native_run)
+        .await
+        .expect("bound")
+        .expect("join")
+        .expect("run");
 }
 
 /// A player or a browser uses ranges to seek and to probe; the carrier must answer with a partial
@@ -204,7 +286,9 @@ async fn get_range(addr: std::net::SocketAddr, hash: &str, range: Option<&str>) 
 
 #[tokio::test]
 async fn http_range_requests_and_head() {
-    tokio::time::timeout(BOUND, ranges()).await.expect("range exchange within the bound")
+    tokio::time::timeout(BOUND, ranges())
+        .await
+        .expect("range exchange within the bound")
 }
 
 async fn ranges() {
@@ -229,14 +313,25 @@ async fn ranges() {
 
     // A first-byte range.
     let first = get_range(addr, &hash, Some("bytes=0-9")).await;
-    assert_eq!(status_of(&first), 206, "{}", String::from_utf8_lossy(&first));
-    assert!(head_contains(&first, &format!("content-range: bytes 0-9/{len}")));
+    assert_eq!(
+        status_of(&first),
+        206,
+        "{}",
+        String::from_utf8_lossy(&first)
+    );
+    assert!(head_contains(
+        &first,
+        &format!("content-range: bytes 0-9/{len}")
+    ));
     assert_eq!(body_of(&first), &tone[0..10]);
 
     // A suffix range.
     let last = get_range(addr, &hash, Some("bytes=-10")).await;
     assert_eq!(status_of(&last), 206);
-    assert!(head_contains(&last, &format!("content-range: bytes {}-{}/{len}", len - 10, len - 1)));
+    assert!(head_contains(
+        &last,
+        &format!("content-range: bytes {}-{}/{len}", len - 10, len - 1)
+    ));
     assert_eq!(body_of(&last), &tone[len - 10..]);
 
     // An open-ended range.
@@ -247,7 +342,10 @@ async fn ranges() {
     // An unsatisfiable range.
     let bad = get_range(addr, &hash, Some(&format!("bytes={len}-"))).await;
     assert_eq!(status_of(&bad), 416, "{}", String::from_utf8_lossy(&bad));
-    assert!(head_contains(&bad, &format!("content-range: bytes */{len}")));
+    assert!(head_contains(
+        &bad,
+        &format!("content-range: bytes */{len}")
+    ));
 
     // Multiple ranges are ignored, not answered with multipart.
     let multi = get_range(addr, &hash, Some("bytes=0-9,20-29")).await;
@@ -277,7 +375,9 @@ async fn ranges() {
 /// will not play it.
 #[tokio::test]
 async fn the_served_content_type_comes_from_the_bytes() {
-    tokio::time::timeout(BOUND, content_type()).await.expect("content-type exchange within the bound")
+    tokio::time::timeout(BOUND, content_type())
+        .await
+        .expect("content-type exchange within the bound")
 }
 
 async fn content_type() {
@@ -317,7 +417,9 @@ async fn content_type() {
 /// and a client publishing a large body must get a `100 Continue` before it commits to sending it.
 #[tokio::test]
 async fn http_lists_the_audio_and_honours_expect_continue() {
-    tokio::time::timeout(BOUND, discover()).await.expect("discovery exchange within the bound")
+    tokio::time::timeout(BOUND, discover())
+        .await
+        .expect("discovery exchange within the bound")
 }
 
 async fn discover() {
@@ -333,12 +435,25 @@ async fn discover() {
     let hash = String::from_utf8_lossy(body_of(&posted)).trim().to_string();
 
     // GET /audio is the list operation over HTTP: one hash per line.
-    let listing = http(addr, "GET /audio HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").await;
-    assert_eq!(status_of(&listing), 200, "{}", String::from_utf8_lossy(&listing));
+    let listing = http(
+        addr,
+        "GET /audio HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    assert_eq!(
+        status_of(&listing),
+        200,
+        "{}",
+        String::from_utf8_lossy(&listing)
+    );
     assert_eq!(body_of(&listing), format!("{hash}\n").as_bytes());
 
     // GET / points at it.
-    let root = http(addr, "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").await;
+    let root = http(
+        addr,
+        "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+    )
+    .await;
     assert!(String::from_utf8_lossy(&root).contains("GET /audio"));
 
     // A POST that says Expect: 100-continue is answered before the body is read.
@@ -358,7 +473,10 @@ async fn discover() {
     stream.write_all(&tone).await.expect("write body");
     stream.flush().await.expect("flush body");
     let mut raw = Vec::new();
-    tokio::time::timeout(BOUND, stream.read_to_end(&mut raw)).await.expect("bound").expect("read");
+    tokio::time::timeout(BOUND, stream.read_to_end(&mut raw))
+        .await
+        .expect("bound")
+        .expect("read");
     assert_eq!(status_of(&raw), 201, "{}", String::from_utf8_lossy(&raw));
 
     shutdown.shutdown();
@@ -373,7 +491,9 @@ async fn discover() {
 /// response and an answer to the OPTIONS preflight, or the browser blocks the request.
 #[tokio::test]
 async fn http_allows_a_cross_origin_browser_client() {
-    tokio::time::timeout(BOUND, cors()).await.expect("cors exchange within the bound")
+    tokio::time::timeout(BOUND, cors())
+        .await
+        .expect("cors exchange within the bound")
 }
 
 async fn cors() {
@@ -390,10 +510,21 @@ async fn cors() {
          Access-Control-Request-Method: POST\r\nConnection: close\r\n\r\n",
     )
     .await;
-    assert_eq!(status_of(&preflight), 204, "{}", String::from_utf8_lossy(&preflight));
+    assert_eq!(
+        status_of(&preflight),
+        204,
+        "{}",
+        String::from_utf8_lossy(&preflight)
+    );
     assert!(head_contains(&preflight, "access-control-allow-origin: *"));
-    assert!(head_contains(&preflight, "access-control-allow-methods: get, head, post, options"));
-    assert!(head_contains(&preflight, "access-control-allow-headers: content-type, range"));
+    assert!(head_contains(
+        &preflight,
+        "access-control-allow-methods: get, head, post, options"
+    ));
+    assert!(head_contains(
+        &preflight,
+        "access-control-allow-headers: content-type, range"
+    ));
     assert!(body_of(&preflight).is_empty());
 
     let tone = wav::generate(13, wav::Sound::Tone);
@@ -426,7 +557,9 @@ async fn cors() {
 /// `?offset=&limit=` with `X-Total-Count`/`X-Offset` so a client can walk the store.
 #[tokio::test]
 async fn http_query_strings_and_paginated_listing() {
-    tokio::time::timeout(BOUND, query()).await.expect("query exchange within the bound")
+    tokio::time::timeout(BOUND, query())
+        .await
+        .expect("query exchange within the bound")
 }
 
 async fn query() {
@@ -447,9 +580,16 @@ async fn query() {
 
     let first = get_query(addr, "offset=0&limit=2").await;
     assert_eq!(status_of(&first), 200);
-    assert!(head_contains(&first, "x-total-count: 3"), "{}", String::from_utf8_lossy(&first));
+    assert!(
+        head_contains(&first, "x-total-count: 3"),
+        "{}",
+        String::from_utf8_lossy(&first)
+    );
     assert!(head_contains(&first, "x-offset: 0"));
-    assert_eq!(body_of(&first), format!("{}\n{}\n", hashes[0], hashes[1]).as_bytes());
+    assert_eq!(
+        body_of(&first),
+        format!("{}\n{}\n", hashes[0], hashes[1]).as_bytes()
+    );
 
     let second = get_query(addr, "offset=2&limit=2").await;
     assert!(head_contains(&second, "x-offset: 2"));
@@ -457,7 +597,11 @@ async fn query() {
 
     // An offset past the end is clamped, not wrapped.
     let past = get_query(addr, "offset=99&limit=2").await;
-    assert!(head_contains(&past, "x-offset: 3"), "{}", String::from_utf8_lossy(&past));
+    assert!(
+        head_contains(&past, "x-offset: 3"),
+        "{}",
+        String::from_utf8_lossy(&past)
+    );
     assert!(body_of(&past).is_empty());
 
     // An unparsable limit falls back rather than failing.
@@ -467,11 +611,18 @@ async fn query() {
     // A query string on another route is ignored, not a 404.
     let fetched = http(
         addr,
-        &format!("GET /audio/{}?x=1 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", hashes[0]),
+        &format!(
+            "GET /audio/{}?x=1 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+            hashes[0]
+        ),
     )
     .await;
     assert_eq!(status_of(&fetched), 200);
-    let missing = http(addr, "GET /nope?x=1 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").await;
+    let missing = http(
+        addr,
+        "GET /nope?x=1 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+    )
+    .await;
     assert_eq!(status_of(&missing), 404);
 
     shutdown.shutdown();
@@ -486,7 +637,9 @@ async fn query() {
 /// with the hash (If-None-Match) instead of re-downloading it.
 #[tokio::test]
 async fn http_caches_immutable_audio_with_an_etag() {
-    tokio::time::timeout(BOUND, caching()).await.expect("caching exchange within the bound")
+    tokio::time::timeout(BOUND, caching())
+        .await
+        .expect("caching exchange within the bound")
 }
 
 async fn caching() {
@@ -505,28 +658,51 @@ async fn caching() {
 
     let full = get_with(addr, &url, "").await;
     assert_eq!(status_of(&full), 200);
-    assert!(head_contains(&full, &format!("etag: {etag}")), "{}", String::from_utf8_lossy(&full));
-    assert!(head_contains(&full, "cache-control: public, max-age=31536000, immutable"));
     assert!(
-        head_contains(&full, &format!("content-disposition: inline; filename=\"{hash}.wav\"")),
+        head_contains(&full, &format!("etag: {etag}")),
+        "{}",
+        String::from_utf8_lossy(&full)
+    );
+    assert!(head_contains(
+        &full,
+        "cache-control: public, max-age=31536000, immutable"
+    ));
+    assert!(
+        head_contains(
+            &full,
+            &format!("content-disposition: inline; filename=\"{hash}.wav\"")
+        ),
         "a saved file should have a real name: {}",
         String::from_utf8_lossy(&full)
     );
 
     let revalidated = get_with(addr, &url, &format!("If-None-Match: {etag}\r\n")).await;
-    assert_eq!(status_of(&revalidated), 304, "{}", String::from_utf8_lossy(&revalidated));
+    assert_eq!(
+        status_of(&revalidated),
+        304,
+        "{}",
+        String::from_utf8_lossy(&revalidated)
+    );
     assert!(head_contains(&revalidated, &format!("etag: {etag}")));
     assert!(body_of(&revalidated).is_empty(), "a 304 has no body");
 
     let stale = get_with(addr, &url, "If-None-Match: \"stale\"\r\n").await;
-    assert_eq!(status_of(&stale), 200, "a non-matching validator must be served");
+    assert_eq!(
+        status_of(&stale),
+        200,
+        "a non-matching validator must be served"
+    );
 
     let star = get_with(addr, &url, "If-None-Match: *\r\n").await;
     assert_eq!(status_of(&star), 304, "`*` matches an existing resource");
 
     // A validator list is the normal form a shared cache sends.
     let list = get_with(addr, &url, &format!("If-None-Match: \"stale\", {etag}\r\n")).await;
-    assert_eq!(status_of(&list), 304, "a list containing the validator must match");
+    assert_eq!(
+        status_of(&list),
+        304,
+        "a list containing the validator must match"
+    );
 
     let head = http(
         addr,
@@ -548,7 +724,9 @@ async fn caching() {
 /// working rather than discovering it when audio stops being accepted.
 #[tokio::test]
 async fn http_root_reports_store_usage() {
-    tokio::time::timeout(BOUND, usage()).await.expect("usage exchange within the bound")
+    tokio::time::timeout(BOUND, usage())
+        .await
+        .expect("usage exchange within the bound")
 }
 
 async fn usage() {
@@ -559,7 +737,11 @@ async fn usage() {
     let shutdown = carrier.shutdown_handle();
     let run = tokio::spawn(async move { carrier.run().await });
 
-    let root = http(addr, "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").await;
+    let root = http(
+        addr,
+        "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+    )
+    .await;
     let text = String::from_utf8_lossy(&root).into_owned();
     assert!(text.contains("items: 0"), "{text}");
     assert!(text.contains("bytes: 0 / 10000"), "{text}");
@@ -569,7 +751,11 @@ async fn usage() {
     let posted = http_post(addr, &wav, "audio/wav").await;
     assert_eq!(status_of(&posted), 201);
 
-    let root = http(addr, "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").await;
+    let root = http(
+        addr,
+        "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+    )
+    .await;
     let text = String::from_utf8_lossy(&root).into_owned();
     assert!(text.contains("items: 1"), "{text}");
     assert!(text.contains(&format!("bytes: {len} / 10000")), "{text}");
@@ -586,25 +772,44 @@ async fn usage() {
 /// string, with an ETag that names the bytes.
 #[tokio::test]
 async fn http_ping_serves_the_canonical_music() {
-    tokio::time::timeout(BOUND, ping_http()).await.expect("the http ping must complete within the bound")
+    tokio::time::timeout(BOUND, ping_http())
+        .await
+        .expect("the http ping must complete within the bound")
 }
 
 async fn ping_http() {
     let store = Arc::new(Mutex::new(AudioStore::default()));
     // The startup set publishes the canonical ping, so it is a real item.
-    store.lock().await.accept(oag_listend::wav::twinkle(), None).await.unwrap();
+    store
+        .lock()
+        .await
+        .accept(oag_listend::wav::twinkle(), None)
+        .await
+        .unwrap();
     let (carrier, addr) = HttpCarrier::bind_shared("127.0.0.1:0", Arc::clone(&store))
         .await
         .expect("bind http");
     let shutdown = carrier.shutdown_handle();
     let run = tokio::spawn(async move { carrier.run().await });
 
-    let response = http(addr, "GET /ping HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").await;
-    assert_eq!(status_of(&response), 200, "{}", String::from_utf8_lossy(&response));
+    let response = http(
+        addr,
+        "GET /ping HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    assert_eq!(
+        status_of(&response),
+        200,
+        "{}",
+        String::from_utf8_lossy(&response)
+    );
     assert!(head_contains(&response, "content-type: audio/wav"));
     let body = body_of(&response);
     assert!(!body.is_empty(), "a ping must never be an empty pong");
-    assert_eq!(oag_listend::AudioFormat::sniff(body), Some(oag_listend::AudioFormat::Wav));
+    assert_eq!(
+        oag_listend::AudioFormat::sniff(body),
+        Some(oag_listend::AudioFormat::Wav)
+    );
     let hash = oag_listend::AudioItem::new(body.to_vec(), None).content_hash;
     assert!(head_contains(&response, &format!("etag: \"{hash}\"")));
 
@@ -614,13 +819,25 @@ async fn ping_http() {
         "GET /ping HTTP/1.1\r\nHost: x\r\nRange: bytes=0-9\r\nConnection: close\r\n\r\n",
     )
     .await;
-    assert_eq!(status_of(&ranged), 206, "{}", String::from_utf8_lossy(&ranged));
-    assert!(head_contains(&ranged, &format!("content-range: bytes 0-9/{}", body.len())));
+    assert_eq!(
+        status_of(&ranged),
+        206,
+        "{}",
+        String::from_utf8_lossy(&ranged)
+    );
+    assert!(head_contains(
+        &ranged,
+        &format!("content-range: bytes 0-9/{}", body.len())
+    ));
     assert_eq!(body_of(&ranged), &body[0..10]);
 
     // The same bytes are a real item: the startup set publishes the canonical ping, so it is
     // fetchable by hash too.
-    let listed = http(addr, "GET /audio HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").await;
+    let listed = http(
+        addr,
+        "GET /audio HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+    )
+    .await;
     assert!(String::from_utf8_lossy(body_of(&listed)).contains(&hash));
 
     shutdown.shutdown();
@@ -635,7 +852,9 @@ async fn ping_http() {
 /// server is about to reject.
 #[tokio::test]
 async fn an_oversized_expect_continue_gets_no_interim() {
-    tokio::time::timeout(BOUND, oversized_expect()).await.expect("within the bound")
+    tokio::time::timeout(BOUND, oversized_expect())
+        .await
+        .expect("within the bound")
 }
 
 async fn oversized_expect() {
@@ -680,7 +899,9 @@ async fn oversized_expect() {
 /// reporting valid audio as invalid.
 #[tokio::test]
 async fn a_chunked_upload_is_refused_with_a_clear_message() {
-    tokio::time::timeout(BOUND, chunked()).await.expect("within the bound")
+    tokio::time::timeout(BOUND, chunked())
+        .await
+        .expect("within the bound")
 }
 
 async fn chunked() {
@@ -698,7 +919,12 @@ async fn chunked() {
         "POST /audio HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{body}\r\n0\r\n\r\n"
     );
     let response = http(addr, &request).await;
-    assert_eq!(status_of(&response), 400, "{}", String::from_utf8_lossy(&response));
+    assert_eq!(
+        status_of(&response),
+        400,
+        "{}",
+        String::from_utf8_lossy(&response)
+    );
     let text = String::from_utf8_lossy(&response).to_ascii_lowercase();
     assert!(
         text.contains("chunked") && text.contains("content-length"),

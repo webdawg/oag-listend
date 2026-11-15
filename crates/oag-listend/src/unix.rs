@@ -15,9 +15,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::net::UnixListener;
-use tokio::sync::{Mutex, watch};
+use tokio::sync::{watch, Mutex};
 
-use crate::server::{ShutdownHandle, serve_session};
+use crate::server::{serve_session, ShutdownHandle};
 use crate::AudioStore;
 
 pub const READ_TIMEOUT: Duration = Duration::from_secs(10);
@@ -59,7 +59,15 @@ impl UnixCarrier {
         }
         let listener = UnixListener::bind(&path)?;
         let (shutdown_tx, _) = watch::channel(false);
-        Ok((Self { store, listener, path: path.clone(), shutdown_tx }, path))
+        Ok((
+            Self {
+                store,
+                listener,
+                path: path.clone(),
+                shutdown_tx,
+            },
+            path,
+        ))
     }
 
     pub fn path(&self) -> &Path {
