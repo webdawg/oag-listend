@@ -121,8 +121,8 @@ one of the 64 session slots open indefinitely. A frame may not exceed 16 MiB, th
 A single item is capped by `servable_bound` -- the store bound capped by what one frame can carry
 (`MAX_FRAME_BYTES - 256`) -- so no accepted item can be one that a client's own decoder would
 reject. A store bound above the frame cap does not admit unfetchable items.
-A fresh daemon publishes four seeded sounds (silence, tone, noise) plus the canonical ping through
-the same inbound rule a client's bytes use, so a fetch-only client still receives audio. The set seeds an *empty*
+A fresh daemon publishes three seeded sounds -- silence, tone, noise -- plus the canonical ping
+through the same inbound rule a client's bytes use, so a fetch-only client still receives audio. The set seeds an *empty*
 store: a restart with a persistent store is left alone, because otherwise every start would add
 four more sounds and, with the default clock seed, slowly evict the operator's own audio. A
 generated sound the store refuses is reported, not dropped.

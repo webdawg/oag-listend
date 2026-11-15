@@ -30,8 +30,9 @@ pub const MAX_CONNECTIONS: usize = 64;
 /// session cap. A session idle or slow past this is closed. Generous, because a legitimate client
 /// may keep a connection for occasional fetches; still finite.
 pub const SESSION_TIMEOUT: Duration = Duration::from_secs(1800);
-/// How many generated sounds a fresh daemon publishes at startup.
-pub const STARTUP_SOUNDS: usize = 4;
+/// How many seeded sounds a fresh daemon publishes at startup: one of each kind -- silence, tone,
+/// noise. The canonical ping is appended separately.
+pub const STARTUP_SOUNDS: usize = 3;
 
 /// What startup generation did. `rejected` is reported rather than dropped: a generated sound
 /// that the store refuses is a fact the operator should see, not a silent no-op.
@@ -557,16 +558,16 @@ mod tests {
         let (server, _addr) = super::ListendServer::bind_shared("127.0.0.1:0", Arc::clone(&store))
             .await
             .unwrap();
-        // Four seeded sounds plus the canonical ping.
-        let first = server.publish_generated(1, 4).await;
-        assert_eq!(first.accepted.len(), 5);
+        // Three seeded sounds (silence, tone, noise) plus the canonical ping.
+        let first = server.publish_generated(1, 3).await;
+        assert_eq!(first.accepted.len(), 4);
         assert!(!first.skipped_non_empty);
-        assert_eq!(store.lock().await.len(), 5);
+        assert_eq!(store.lock().await.len(), 4);
 
         let second = server.publish_generated(2, 4).await;
         assert!(second.accepted.is_empty());
         assert!(second.skipped_non_empty, "a non-empty store must not be added to");
-        assert_eq!(store.lock().await.len(), 5, "a restart must not grow the store");
+        assert_eq!(store.lock().await.len(), 4, "a restart must not grow the store");
     }
 
     #[tokio::test]
@@ -575,9 +576,9 @@ mod tests {
         let (server, _addr) = super::ListendServer::bind_shared("127.0.0.1:0", Arc::clone(&store))
             .await
             .unwrap();
-        let report = server.publish_generated(1, 4).await;
+        let report = server.publish_generated(1, 3).await;
         assert!(report.accepted.is_empty());
-        assert_eq!(report.rejected.len(), 5, "every refusal must be reported");
+        assert_eq!(report.rejected.len(), 4, "every refusal must be reported");
         assert!(report.rejected.iter().all(|r| r.contains("larger than")));
     }
 
