@@ -70,6 +70,15 @@ async fn round_trip_test(path: &std::path::Path) {
         other => panic!("expected Audio, got {other:?}"),
     }
 
+    // The musical ping is exposed on the Unix carrier too.
+    match round_trip(&mut stream, &Request::Ping).await {
+        Response::Audio { content_hash, bytes } => {
+            assert!(!bytes.is_empty());
+            assert!(AudioItem::verify(&content_hash, &bytes));
+        }
+        other => panic!("a ping must answer with audio, got {other:?}"),
+    }
+
     match round_trip(
         &mut stream,
         &Request::Publish { declared_media_type: Some("audio/wav".into()), bytes: b"<html>".to_vec() },

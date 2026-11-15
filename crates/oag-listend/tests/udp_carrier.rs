@@ -68,6 +68,16 @@ async fn round_trip() {
         other => panic!("expected Audio, got {other:?}"),
     }
 
+    // The musical ping is exposed here too (operator directive: every carrier).
+    match exchange(&socket, addr, &Request::Ping).await {
+        Response::Audio { content_hash, bytes } => {
+            assert!(!bytes.is_empty(), "a ping must never be an empty pong");
+            assert_eq!(oag_listend::AudioFormat::sniff(&bytes), Some(oag_listend::AudioFormat::Wav));
+            assert!(AudioItem::verify(&content_hash, &bytes));
+        }
+        other => panic!("a ping must answer with audio, got {other:?}"),
+    }
+
     // The inbound rule holds on the datagram carrier too.
     match exchange(
         &socket,
