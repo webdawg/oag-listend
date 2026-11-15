@@ -212,7 +212,7 @@ impl<'a> Reader<'a> {
 
     fn string(&mut self) -> Result<String, WireError> {
         let len = self.u16()? as usize;
-        if len > self.buf.len() {
+        if len > self.remaining() {
             return Err(WireError::BadString);
         }
         let bytes = self.take(len)?;
@@ -224,7 +224,7 @@ impl<'a> Reader<'a> {
         if len == 0 {
             return Ok(None);
         }
-        if len > self.buf.len() {
+        if len > self.remaining() {
             return Err(WireError::BadString);
         }
         let bytes = self.take(len)?;
@@ -239,6 +239,10 @@ impl<'a> Reader<'a> {
             return Err(WireError::BadHash);
         }
         Ok(s)
+    }
+
+    fn remaining(&self) -> usize {
+        self.buf.len() - self.pos
     }
 
     fn rest(&mut self) -> &'a [u8] {
@@ -519,6 +523,16 @@ mod tests {
         assert_eq!(
             decode_request(&[OP_FETCH, 0, 3, b'a', b'b', b'c']),
             Err(WireError::BadHash)
+        );
+    }
+
+    #[test]
+    fn a_length_past_the_remaining_bytes_is_a_bad_string() {
+        // op + a length of 3, but only two bytes follow: the length is past the end of the
+        // message, and the reader must say so rather than run off it.
+        assert_eq!(
+            decode_request(&[OP_PUBLISH, 0x00, 0x03, b'a', b'b']),
+            Err(WireError::BadString)
         );
     }
 
