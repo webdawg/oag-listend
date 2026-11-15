@@ -72,12 +72,18 @@ pub fn generate(seed: u64, kind: Sound) -> Vec<u8> {
     generate_n(seed, kind, sample_count_for(seed))
 }
 
-/// Generate one valid WAV of `kind` with exactly `samples` PCM frames.
+/// The largest sound `generate_n` will produce. Two seconds of 8 kHz 16-bit mono is far more than
+/// any fixture needs, and a caller passing an unbounded count must not be able to allocate without
+/// limit.
+pub const MAX_GENERATED_SAMPLES: usize = 16_000;
+
+/// Generate one valid WAV of `kind` with `samples` PCM frames, capped at
+/// [`MAX_GENERATED_SAMPLES`].
 ///
 /// Exposed so a caller can make a sound of a chosen size -- a carrier with a datagram or frame
 /// bound needs a fixture that crosses it, and a test should not have to fake a container.
 pub fn generate_n(seed: u64, kind: Sound, samples: usize) -> Vec<u8> {
-    let n = samples;
+    let n = samples.min(MAX_GENERATED_SAMPLES);
     let mut state = seed ^ 0xA5A5_A5A5_A5A5_A5A5;
 
     let samples: Vec<i16> = match kind {
@@ -224,6 +230,14 @@ mod tests {
             "the ping must fit one UDP datagram ({} bytes)",
             a.len()
         );
+    }
+
+    #[test]
+    fn a_chosen_sample_count_is_capped() {
+        let bytes = generate_n(1, Sound::Silence, usize::MAX);
+        let data_len = u32::from_le_bytes([bytes[40], bytes[41], bytes[42], bytes[43]]) as usize;
+        assert_eq!(data_len, MAX_GENERATED_SAMPLES * 2);
+        assert_eq!(AudioFormat::sniff(&bytes), Some(AudioFormat::Wav));
     }
 
     #[test]
