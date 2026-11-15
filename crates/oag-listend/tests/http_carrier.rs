@@ -620,3 +620,45 @@ async fn ping_http() {
         .expect("join")
         .expect("run");
 }
+
+/// An oversized body must be refused before the `100 Continue`, or the client commits an upload the
+/// server is about to reject.
+#[tokio::test]
+async fn an_oversized_expect_continue_gets_no_interim() {
+    tokio::time::timeout(BOUND, oversized_expect()).await.expect("within the bound")
+}
+
+async fn oversized_expect() {
+    let store = Arc::new(Mutex::new(AudioStore::default()));
+    let (carrier, addr) = HttpCarrier::bind_shared("127.0.0.1:0", Arc::clone(&store))
+        .await
+        .expect("bind http");
+    let shutdown = carrier.shutdown_handle();
+    let run = tokio::spawn(async move { carrier.run().await });
+
+    let mut stream = TcpStream::connect(addr).await.expect("connect");
+    let head = format!(
+        "POST /audio HTTP/1.1\r\nHost: x\r\nExpect: 100-continue\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        oag_listend::http::MAX_BODY_BYTES + 1
+    );
+    stream.write_all(head.as_bytes()).await.expect("write head");
+    stream.flush().await.expect("flush");
+    let mut first = [0u8; 32];
+    let n = tokio::time::timeout(BOUND, stream.read_exact(&mut first))
+        .await
+        .expect("read bound")
+        .expect("read");
+    let status = String::from_utf8_lossy(&first[..n]);
+    assert!(
+        status.starts_with("HTTP/1.1 400"),
+        "the interim must not be sent, got {status:?}"
+    );
+    assert!(!status.starts_with("HTTP/1.1 100"), "got the interim");
+
+    shutdown.shutdown();
+    tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .expect("shutdown bound")
+        .expect("join")
+        .expect("run");
+}

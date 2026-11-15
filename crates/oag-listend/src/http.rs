@@ -193,19 +193,10 @@ async fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<HttpRequ
                     }
                 }
             }
-            if expect_continue {
-                // A client that is about to send a body it may not want to send needs an answer
-                // before it commits. Without this, curl waits a second on every large publish.
-                let interim = b"HTTP/1.1 100 Continue\r\n\r\n";
-                tokio::time::timeout(IO_TIMEOUT, stream.write_all(interim))
-                    .await
-                    .map_err(|_| timeout_error())??;
-                tokio::time::timeout(IO_TIMEOUT, stream.flush())
-                    .await
-                    .map_err(|_| timeout_error())??;
-            }
             let body = head[pos + 4..].to_vec();
             let mut body = body;
+            // Refuse an oversized body before saying `100 Continue`: telling a client to commit an
+            // upload we are about to reject wastes its bandwidth and ours.
             if content_length > MAX_BODY_BYTES {
                 return Ok(Some(HttpRequest {
                     method: "BAD".into(),
@@ -215,6 +206,15 @@ async fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<HttpRequ
                     if_none_match: None,
                     body: Vec::new(),
                 }));
+            }
+            if expect_continue {
+                // A client that is about to send a body it may not want to send needs an answer
+                // before it commits. Without this, curl waits a second on every large publish.
+                let interim = b"HTTP/1.1 100 Continue\r\n\r\n";
+                write_all_bounded(stream, interim, IO_TIMEOUT).await?;
+                tokio::time::timeout(IO_TIMEOUT, stream.flush())
+                    .await
+                    .map_err(|_| timeout_error())??;
             }
             while body.len() < content_length {
                 let n = tokio::time::timeout(IO_TIMEOUT, stream.read(&mut buf))
