@@ -105,8 +105,11 @@ The protocol is length-prefixed frames with exactly four operations -- hello, pu
 list -- and nothing else. Every inbound publish goes through `AudioStore::accept`; every outbound
 fetch returns the bytes and the hash they must verify against.
 
-    oag-listend --listen 0.0.0.0:7100 --http 0.0.0.0:7101 --udp 0.0.0.0:7120 \
-                --dir /var/lib/oag-listend --seed 20261112
+    oag-listend --listen 127.0.0.1:7100 --http 127.0.0.1:7101 --udp 127.0.0.1:7120 \
+                --unix /tmp/oag-listend.sock --dir /var/lib/oag-listend --seed 20261112
+
+(The systemd unit uses `/run/oag-listend/audio.sock`, which its `RuntimeDirectory=` creates; a
+bare `cargo run` should use a path it can create.)
     cargo run -p oag-listend --example push_pull -- --addr 127.0.0.1:7100
     cargo run -p oag-listend --example push_pull -- --udp --addr 127.0.0.1:7120
 

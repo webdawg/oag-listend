@@ -34,7 +34,7 @@ One additional individual directive is recorded for the next implementation step
 ## Turn it on
 
     cargo run -p oag-listend -- --listen 127.0.0.1:7100 --http 127.0.0.1:7101 --udp 127.0.0.1:7120 \
-        --unix /run/oag-listend/audio.sock \
+        --unix /tmp/oag-listend.sock \
         --dir /var/lib/oag-listend --seed 20261112
 
 The daemon binds, prints four generated sounds, and serves until interrupted. The generated set
