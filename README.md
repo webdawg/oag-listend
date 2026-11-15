@@ -70,8 +70,8 @@ All four carriers share one store, and all accept audio and nothing else.
 Every entry is re-checked on load (name must be the BLAKE3 of the bytes, bytes must sniff as
 audio), and a write failure refuses the inbound rather than losing it silently. The write is
 asynchronous, so a slow disk delays the answer rather than stalling every carrier. The startup report
-separates `loaded`, `skipped`, and `evicted`, so a bound that pushed entries out is visible rather
-than counted as held.
+separates `loaded`, `skipped`, `evicted`, and `truncated`, so a bound that pushed entries out -- or
+a directory with more entries than the load will consider -- is visible rather than counted as held.
 
 `--max-bytes` is enforced on the way in: audio larger than the bound is refused with `400` rather
 than written and immediately evicted, and an oversized startup file is skipped without being read.
@@ -109,7 +109,7 @@ address the daemon prints a note saying so. Use `--listen 127.0.0.1:...` to keep
 
 ## Status
 
-**Serves, and survives a restart.** Four carriers are live and tested: 48 unit tests plus 23
+**Serves, and survives a restart.** Four carriers are live and tested: 49 unit tests plus 23
 end-to-end tests (`cargo test -p oag-listend`). The store mutex covers lookup and insert, not byte
 copies or disk writes, so one slow client does not stall the others. Runs as a systemd service
 (`scripts/oag-listend.service`) and shuts down cleanly on SIGINT and SIGTERM. The native protocol, HTTP, UDP, and the Unix socket share one store,

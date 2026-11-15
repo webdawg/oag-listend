@@ -99,6 +99,9 @@ pub struct LoadReport {
     pub skipped: usize,
     /// Entries read and accepted but pushed out by the byte bound while later entries loaded.
     pub evicted: usize,
+    /// The directory held more entries than the load will consider. Nothing is deleted or changed
+    /// by this; the operator is told instead of the load silently ignoring the rest.
+    pub truncated: bool,
 }
 
 /// The codec inside an Ogg container, from the first (beginning-of-stream) page.
@@ -294,6 +297,15 @@ impl AudioStore {
     ///
     /// The load is reported, not silent: an entry that fails either check is skipped and counted.
     pub fn with_directory(dir: impl Into<PathBuf>, max_bytes: usize) -> std::io::Result<(Self, LoadReport)> {
+        Self::load_dir(dir, max_bytes, MAX_LOAD_ENTRIES)
+    }
+
+    /// See [`Self::with_directory`].
+    fn load_dir(
+        dir: impl Into<PathBuf>,
+        max_bytes: usize,
+        max_entries: usize,
+    ) -> std::io::Result<(Self, LoadReport)> {
         let dir = dir.into();
         std::fs::create_dir_all(&dir)?;
         let mut store = Self {
@@ -305,9 +317,15 @@ impl AudioStore {
         };
         let mut report = LoadReport::default();
         let mut inserted = 0usize;
+        let mut considered = 0usize;
 
         let entries = std::fs::read_dir(&dir)?;
         for entry in entries {
+            if considered >= max_entries {
+                report.truncated = true;
+                break;
+            }
+            considered += 1;
             let entry = match entry {
                 Ok(entry) => entry,
                 Err(_) => {
@@ -533,6 +551,12 @@ impl AudioStore {
 pub fn servable_bound(max_bytes: usize) -> usize {
     max_bytes.min(crate::protocol::MAX_SERVABLE_BYTES)
 }
+
+/// The maximum number of directory entries one load will consider. A store directory is an
+/// operator-controlled path; a mistake (or a symlink to somewhere huge) must not make startup
+/// process an unbounded number of entries. The load reports `truncated` rather than ignoring the
+/// rest silently.
+pub const MAX_LOAD_ENTRIES: usize = 100_000;
 
 /// The largest sidecar that will be read. A media type is a few dozen bytes; anything larger is
 /// not a media type and is ignored rather than pulled into memory.
@@ -766,6 +790,21 @@ mod tests {
         let (reopened, report) = AudioStore::with_directory(&dir, 1024 * 1024).unwrap();
         assert_eq!(report.loaded, 1);
         assert!(reopened.serve(&hash).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_load_is_capped_and_reports_the_truncation() {
+        let dir = temp_dir("capped");
+        let (mut seed, _) = AudioStore::with_directory(&dir, 1024 * 1024).unwrap();
+        for seed_n in 0..3u64 {
+            let wav = wav::generate_n(seed_n, wav::Sound::Tone, 4);
+            seed.accept(wav, None).await.unwrap();
+        }
+        // A cap below the number of entries: the load stops and says so.
+        let (store, report) = AudioStore::load_dir(&dir, 1024 * 1024, 2).unwrap();
+        assert!(report.truncated, "the cap must be reported");
+        assert_eq!(store.len(), 2, "only the cap's worth is considered");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

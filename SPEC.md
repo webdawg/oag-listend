@@ -163,8 +163,9 @@ is a refusal, not a silent loss. The write is asynchronous (`tokio::fs`), so a s
 answer instead of stalling every carrier's executor thread; the eviction unlink stays synchronous,
 being metadata-only. On startup every entry is re-checked: the name must be the BLAKE3
 of the bytes and the bytes must still sniff as audio, so a hand-placed file cannot smuggle anything
-in. The load is reported as `loaded` (entries now held), `skipped` (not read, or rejected), and
-`evicted` (read and accepted, then pushed out by the byte bound while later entries loaded) -- never
+in. The load is reported as `loaded` (entries now held), `skipped` (not read, or rejected),
+`evicted` (read and accepted, then pushed out by the byte bound while later entries loaded), and
+`truncated` (the directory held more than the `MAX_LOAD_ENTRIES` the load will consider) -- never
 silent, and never counting an evicted entry as held. Only regular files are read -- a FIFO or
 device named like a hash would block forever, and a directory would error. A sidecar larger than
 4 KiB is not a media type and is ignored rather than read into memory.
