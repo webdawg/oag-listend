@@ -151,7 +151,9 @@ job; a long recording belongs on TCP or HTTP.
 
 `--dir PATH` makes the store content-addressed: `<PATH>/<hash>` is the audio, `<PATH>/<hash>.json`
 is the declared media type. An accepted item is written before it is answerable -- a write failure
-is a refusal, not a silent loss. On startup every entry is re-checked: the name must be the BLAKE3
+is a refusal, not a silent loss. The write is asynchronous (`tokio::fs`), so a slow disk delays the
+answer instead of stalling every carrier's executor thread; the eviction unlink stays synchronous,
+being metadata-only. On startup every entry is re-checked: the name must be the BLAKE3
 of the bytes and the bytes must still sniff as audio, so a hand-placed file cannot smuggle anything
 in. The load is reported as `loaded` (entries now held), `skipped` (not read, or rejected), and
 `evicted` (read and accepted, then pushed out by the byte bound while later entries loaded) -- never
