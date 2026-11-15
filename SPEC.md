@@ -110,9 +110,10 @@ fetch returns the bytes and the hash they must verify against.
     cargo run -p oag-listend --example push_pull -- --addr 127.0.0.1:7100
     cargo run -p oag-listend --example push_pull -- --udp --addr 127.0.0.1:7120
 
-Bounds: every read and write has a 10 s timeout, and each session and each HTTP request also has a
-total bound (30 minutes) so a client that dribbles a byte every few seconds cannot hold one of the
-64 session slots open indefinitely. A frame may not exceed 16 MiB, the store is capped by
+Bounds: every read and write syscall has a 10 s timeout -- per syscall, not per transfer, so a
+slow client uploading or downloading the largest item is not cut off mid-transfer -- and each
+session and each HTTP request also has a total bound (30 minutes) so a client that dribbles a byte
+every few seconds cannot hold one of the 64 session slots open indefinitely. A frame may not exceed 16 MiB, the store is capped by
 `--max-bytes` (1 GiB by default), and at most 64 sessions are served at once per carrier.
 A single item is capped by `servable_bound` -- the store bound capped by what one frame can carry
 (`MAX_FRAME_BYTES - 256`) -- so no accepted item can be one that a client's own decoder would

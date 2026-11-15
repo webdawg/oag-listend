@@ -21,7 +21,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 
-use crate::server::ShutdownHandle;
+use crate::server::{ShutdownHandle, write_all_bounded};
 use crate::{AudioFormat, AudioStore, ListendError};
 
 /// Bounds for one HTTP request. The head cap keeps a header flood from allocating; the body cap
@@ -110,9 +110,7 @@ async fn serve_connection(mut stream: TcpStream, store: Arc<Mutex<AudioStore>>) 
                          Access-Control-Max-Age: 3600\r\n\
                          Content-Length: 0\r\n\
                          Connection: close\r\n\r\n";
-        tokio::time::timeout(IO_TIMEOUT, stream.write_all(preflight.as_bytes()))
-            .await
-            .map_err(|_| timeout_error())??;
+        write_all_bounded(&mut stream, preflight.as_bytes(), IO_TIMEOUT).await?;
         return Ok(());
     }
     let response = route(request, &store).await;
@@ -535,9 +533,7 @@ async fn write_response(stream: &mut TcpStream, response: &HttpResponse) -> std:
     out.extend_from_slice(b"Access-Control-Allow-Origin: *\r\n");
     out.extend_from_slice(b"Connection: close\r\n\r\n");
     out.extend_from_slice(&response.body);
-    tokio::time::timeout(IO_TIMEOUT, stream.write_all(&out))
-        .await
-        .map_err(|_| timeout_error())??;
+    write_all_bounded(stream, &out, IO_TIMEOUT).await?;
     tokio::time::timeout(IO_TIMEOUT, stream.flush())
         .await
         .map_err(|_| timeout_error())??;

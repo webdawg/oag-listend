@@ -297,15 +297,13 @@ where
     S: tokio::io::AsyncRead + Unpin,
 {
     let mut prefix = [0u8; 4];
-    let first = match tokio::time::timeout(timeout, stream.read(&mut prefix[..1])).await {
+    let first = match tokio::time::timeout(timeout, stream.read(&mut prefix)).await {
         Err(_) => return Err(timeout_error("read")),
         Ok(Ok(0)) => return Ok(None),
         Ok(Ok(n)) => n,
         Ok(Err(e)) => return Err(e),
     };
-    tokio::time::timeout(timeout, stream.read_exact(&mut prefix[first..]))
-        .await
-        .map_err(|_| timeout_error("read"))??;
+    read_exact_bounded(stream, &mut prefix[first..], timeout).await?;
 
     let len = u32::from_be_bytes(prefix) as usize;
     if len > max_frame {
@@ -316,9 +314,7 @@ where
     }
     let mut body = vec![0u8; len];
     if len > 0 {
-        tokio::time::timeout(timeout, stream.read_exact(&mut body))
-            .await
-            .map_err(|_| timeout_error("read"))??;
+        read_exact_bounded(stream, &mut body, timeout).await?;
     }
     Ok(Some(body))
 }
@@ -332,12 +328,63 @@ where
     S: tokio::io::AsyncWrite + Unpin,
 {
     let frame = protocol::encode_frame(&protocol::encode_response(response));
-    tokio::time::timeout(timeout, stream.write_all(&frame))
-        .await
-        .map_err(|_| timeout_error("write"))??;
+    write_all_bounded(stream, &frame, timeout).await?;
     tokio::time::timeout(timeout, stream.flush())
         .await
         .map_err(|_| timeout_error("write"))??;
+    Ok(())
+}
+
+/// Read exactly `buf.len()` bytes, bounding each read syscall rather than the whole transfer.
+///
+/// A single timeout around `read_exact` would cut off a legitimate large upload from a slow client
+/// mid-transfer. Per-read, a stalled client is dropped after the timeout but a slow one is not.
+pub(crate) async fn read_exact_bounded<S>(
+    stream: &mut S,
+    buf: &mut [u8],
+    timeout: Duration,
+) -> std::io::Result<()>
+where
+    S: tokio::io::AsyncRead + Unpin,
+{
+    let mut read = 0;
+    while read < buf.len() {
+        let n = tokio::time::timeout(timeout, stream.read(&mut buf[read..]))
+            .await
+            .map_err(|_| timeout_error("read"))??;
+        if n == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "the connection closed mid-message",
+            ));
+        }
+        read += n;
+    }
+    Ok(())
+}
+
+/// Write the whole buffer, bounding each write syscall rather than the whole transfer. See
+/// [`read_exact_bounded`] for why.
+pub(crate) async fn write_all_bounded<S>(
+    stream: &mut S,
+    mut buf: &[u8],
+    timeout: Duration,
+) -> std::io::Result<()>
+where
+    S: tokio::io::AsyncWrite + Unpin,
+{
+    while !buf.is_empty() {
+        let n = tokio::time::timeout(timeout, stream.write(buf))
+            .await
+            .map_err(|_| timeout_error("write"))??;
+        if n == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "the connection accepted no more bytes",
+            ));
+        }
+        buf = &buf[n..];
+    }
     Ok(())
 }
 
@@ -349,6 +396,47 @@ fn timeout_error(kind: &str) -> std::io::Error {
 mod tests {
     use super::*;
     use crate::AudioItem;
+
+    /// The read bound is per syscall, not per transfer: 100 one-byte reads at 10 ms each take
+    /// about a second, far longer than the 50 ms bound, and must still succeed.
+    #[tokio::test]
+    async fn a_slow_but_progressing_read_is_not_cut_off() {
+        let (mut client, mut server) = tokio::io::duplex(64);
+        let writer = tokio::spawn(async move {
+            for _ in 0..100 {
+                client.write_all(&[7]).await.unwrap();
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            let _ = client.shutdown().await;
+        });
+        let mut buf = vec![0u8; 100];
+        super::read_exact_bounded(&mut server, &mut buf, Duration::from_millis(50))
+            .await
+            .expect("a slow but progressing read must succeed");
+        assert!(buf.iter().all(|&b| b == 7));
+        writer.await.unwrap();
+    }
+
+    /// The write bound is per syscall too.
+    #[tokio::test]
+    async fn a_slow_but_progressing_write_is_not_cut_off() {
+        let (mut client, mut server) = tokio::io::duplex(1);
+        let reader = tokio::spawn(async move {
+            let mut got = Vec::new();
+            let mut b = [0u8];
+            for _ in 0..100 {
+                server.read_exact(&mut b).await.unwrap();
+                got.push(b[0]);
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            got
+        });
+        super::write_all_bounded(&mut client, &vec![9u8; 100], Duration::from_millis(50))
+            .await
+            .expect("a slow but progressing write must succeed");
+        let got = reader.await.unwrap();
+        assert!(got.iter().all(|&b| b == 9));
+    }
 
     #[tokio::test]
     async fn hello_reports_how_much_audio_is_held() {
