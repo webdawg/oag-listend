@@ -109,6 +109,17 @@ async fn exchange(args: &Args) -> std::io::Result<()> {
     let hello = round_trip(args, &Request::Hello).await?;
     println!("daemon: {hello:?}");
 
+    // The musical liveness answer (operator directive: even pings are music).
+    match round_trip(args, &Request::Ping).await? {
+        Response::Audio { content_hash, bytes } => println!(
+            "ping:    {} ({} bytes, verified={})",
+            &content_hash[..16],
+            bytes.len(),
+            AudioItem::verify(&content_hash, &bytes)
+        ),
+        other => println!("ping:    {other:?}"),
+    }
+
     let tone = wav::generate(args.seed, wav::Sound::Tone);
     let noise = wav::generate(args.seed + 1, wav::Sound::Noise);
 
