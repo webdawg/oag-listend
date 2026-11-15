@@ -101,6 +101,36 @@ pub struct LoadReport {
     pub evicted: usize,
 }
 
+/// The codec inside an Ogg container, from the first (beginning-of-stream) page.
+///
+/// Ogg is a container, not a codec: the same `OggS` marker wraps Vorbis, Opus, and FLAC audio, and
+/// also Theora video. The BOS page's payload is the codec identification header, so it is the only
+/// place that can tell them apart. Only known audio codecs are accepted; anything else -- including
+/// a video codec -- is not audio.
+fn sniff_ogg_codec(bytes: &[u8]) -> Option<AudioFormat> {
+    // header_type 0x02 marks the beginning-of-stream page; page_segments is at 26 and the segment
+    // table follows it, with the payload after that.
+    if bytes.len() < 28 || bytes[5] != 0x02 {
+        return None;
+    }
+    let segments = bytes[26] as usize;
+    let payload = 27 + segments;
+    if bytes.len() < payload {
+        return None;
+    }
+    let codec = &bytes[payload..];
+    let is_audio = codec.starts_with(b"\x01vorbis")
+        || codec.starts_with(b"OpusHead")
+        || codec.starts_with(b"\x7fFLAC")
+        || codec.starts_with(b"Speex   ")
+        || codec.starts_with(b"PCM     ");
+    if is_audio {
+        Some(AudioFormat::Ogg)
+    } else {
+        None
+    }
+}
+
 /// A recognised audio container or codec, identified from the bytes themselves.
 ///
 /// This is the whole of what the daemon knows about formats: enough to tell audio from
@@ -110,7 +140,9 @@ pub struct LoadReport {
 ///
 /// For ISO BMFF (`ftyp`) the whole brand list is read, not just the major brand: `isom` and `mp42`
 /// are generic brands that MP4 *video* uses, while ffmpeg-written M4A often has `isom` as the major
-/// brand and `M4A ` among the compatible brands.
+/// brand and `M4A ` among the compatible brands. For Ogg, the beginning-of-stream page's codec
+/// header is read, because the same `OggS` marker wraps Theora video as well as Vorbis, Opus, and
+/// FLAC audio.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AudioFormat {
     /// RIFF container with a WAVE form type.
@@ -141,7 +173,7 @@ impl AudioFormat {
             return Some(Self::Flac);
         }
         if bytes.starts_with(b"OggS") {
-            return Some(Self::Ogg);
+            return sniff_ogg_codec(bytes);
         }
         if bytes.starts_with(b"ID3") {
             return Some(Self::Mp3);
@@ -536,7 +568,15 @@ mod tests {
         assert!(store.accept(wav.clone(), None).await.is_ok(), "a WAV signature is audio");
 
         assert!(store.accept(b"fLaC\0\0\0\x22".to_vec(), None).await.is_ok(), "FLAC is audio");
-        assert!(store.accept(b"OggS\0\x02".to_vec(), None).await.is_ok(), "Ogg is audio");
+        assert!(
+            store.accept(ogg_bos(b"\x01vorbis"), None).await.is_ok(),
+            "Ogg Vorbis is audio"
+        );
+        assert!(store.accept(ogg_bos(b"OpusHead"), None).await.is_ok(), "Ogg Opus is audio");
+        assert!(
+            matches!(store.accept(ogg_bos(b"\x80theora"), None).await, Err(ListendError::NotAudio)),
+            "Ogg Theora is video, not audio"
+        );
         assert!(store.accept(b"ID3\x04\0\0".to_vec(), None).await.is_ok(), "an ID3 tag is MPEG audio");
         assert!(store.accept(vec![0xFF, 0xFB, 0x90, 0x00], None).await.is_ok(), "a raw MPEG frame is audio");
         let mut m4a = vec![0, 0, 0, 0x20];
@@ -595,6 +635,22 @@ mod tests {
         assert_eq!(a, b);
         assert_eq!(store.len(), 1);
         assert_eq!(store.bytes_held(), 3);
+    }
+
+    /// A minimal Ogg beginning-of-stream page carrying `codec` as its identification header.
+    fn ogg_bos(codec: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(b"OggS");
+        out.push(0); // stream structure version
+        out.push(0x02); // beginning of stream
+        out.extend_from_slice(&[0u8; 8]); // granule position
+        out.extend_from_slice(&[0u8; 4]); // serial number
+        out.extend_from_slice(&[0u8; 4]); // page sequence
+        out.extend_from_slice(&[0u8; 4]); // checksum
+        out.push(1); // one segment
+        out.push(codec.len() as u8);
+        out.extend_from_slice(codec);
+        out
     }
 
     fn temp_dir(name: &str) -> PathBuf {
