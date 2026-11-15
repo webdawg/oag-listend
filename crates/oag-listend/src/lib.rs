@@ -493,9 +493,17 @@ pub fn servable_bound(max_bytes: usize) -> usize {
     max_bytes.min(crate::protocol::MAX_SERVABLE_BYTES)
 }
 
+/// The largest sidecar that will be read. A media type is a few dozen bytes; anything larger is
+/// not a media type and is ignored rather than pulled into memory.
+const MAX_SIDECAR_BYTES: usize = 4096;
+
 /// The declared media type recorded beside a persisted item, if any.
 fn read_sidecar(dir: &Path, hash: &str) -> Option<String> {
-    let raw = std::fs::read(dir.join(format!("{hash}.json"))).ok()?;
+    let path = dir.join(format!("{hash}.json"));
+    if std::fs::metadata(&path).ok()?.len() as usize > MAX_SIDECAR_BYTES {
+        return None;
+    }
+    let raw = std::fs::read(path).ok()?;
     let text = String::from_utf8(raw).ok()?;
     let text = text.trim();
     if text.is_empty() {
@@ -695,6 +703,23 @@ mod tests {
         assert_eq!(report.loaded, 0);
         assert_eq!(report.skipped, 1);
         assert!(reopened.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn an_oversized_sidecar_is_ignored() {
+        let dir = temp_dir("sidecar");
+        let (mut store, _) = AudioStore::with_directory(&dir, 1024 * 1024).unwrap();
+        let wav = wav::generate(9, wav::Sound::Tone);
+        let hash = store.accept(wav, Some("audio/wav".into())).await.unwrap();
+        // A sidecar far larger than any media type must not be read into memory.
+        std::fs::write(dir.join(format!("{hash}.json")), vec![b'x'; 100_000]).unwrap();
+        let (reopened, report) = AudioStore::with_directory(&dir, 1024 * 1024).unwrap();
+        assert_eq!(report.loaded, 1);
+        assert_eq!(
+            reopened.serve(&hash).unwrap().media_type, None,
+            "an oversized sidecar is ignored, not trusted"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
