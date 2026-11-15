@@ -38,8 +38,8 @@ One additional individual directive is implemented:
         --unix /tmp/oag-listend.sock \
         --dir /var/lib/oag-listend --seed 20261112
 
-The daemon binds, prints four generated sounds, and serves until interrupted. The generated set
-seeds an empty store only -- a restart with `--dir` does not add more -- and a generated sound the
+The daemon binds, prints five generated items (silence, tone, noise, and the canonical ping), and
+serves until interrupted. The generated set seeds an empty store only -- a restart with `--dir` does not add more -- and a generated sound the
 store refuses is printed as a rejection rather than dropped. Then exchange audio
 with it over the native protocol:
 
