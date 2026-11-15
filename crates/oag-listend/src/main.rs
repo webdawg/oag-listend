@@ -42,11 +42,11 @@ fn parse_args() -> Args {
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
-            "--listen" => args.listen = it.next().expect("--listen needs an address"),
-            "--http" => args.http = Some(it.next().expect("--http needs an address")),
-            "--udp" => args.udp = Some(it.next().expect("--udp needs an address")),
-            "--unix" => args.unix = Some(it.next().expect("--unix needs a socket path")),
-            "--dir" => args.dir = Some(it.next().expect("--dir needs a directory")),
+            "--listen" => args.listen = value(&mut it, "--listen"),
+            "--http" => args.http = Some(value(&mut it, "--http")),
+            "--udp" => args.udp = Some(value(&mut it, "--udp")),
+            "--unix" => args.unix = Some(value(&mut it, "--unix")),
+            "--dir" => args.dir = Some(value(&mut it, "--dir")),
             "--check" => args.check = true,
             "--version" | "-V" => {
                 println!(
@@ -56,20 +56,8 @@ fn parse_args() -> Args {
                 );
                 std::process::exit(0);
             }
-            "--seed" => {
-                args.seed = it
-                    .next()
-                    .expect("--seed needs a u64")
-                    .parse()
-                    .expect("--seed must be a u64");
-            }
-            "--max-bytes" => {
-                args.max_bytes = it
-                    .next()
-                    .expect("--max-bytes needs a byte count")
-                    .parse()
-                    .expect("--max-bytes must be a byte count");
-            }
+            "--seed" => args.seed = parse_value(&mut it, "--seed"),
+            "--max-bytes" => args.max_bytes = parse_value(&mut it, "--max-bytes"),
             "--no-generate" => args.no_generate = true,
             "--help" | "-h" => {
                 println!("{}", usage());
@@ -82,6 +70,29 @@ fn parse_args() -> Args {
         }
     }
     args
+}
+
+/// The value after a flag, or a usage error. A missing value is an operator mistake, not a panic.
+fn value(it: &mut impl Iterator<Item = String>, flag: &str) -> String {
+    match it.next() {
+        Some(value) => value,
+        None => {
+            eprintln!("{flag} needs a value\n\n{}", usage());
+            std::process::exit(2);
+        }
+    }
+}
+
+/// A numeric flag value, or a usage error.
+fn parse_value<T: std::str::FromStr>(it: &mut impl Iterator<Item = String>, flag: &str) -> T {
+    let raw = value(it, flag);
+    match raw.parse() {
+        Ok(parsed) => parsed,
+        Err(_) => {
+            eprintln!("{flag} must be a valid value: {raw}\n\n{}", usage());
+            std::process::exit(2);
+        }
+    }
 }
 
 fn usage() -> String {
