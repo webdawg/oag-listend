@@ -380,11 +380,12 @@ impl AudioStore {
             // syscall only on a duplicate publish, never on the read path.
             if let Some(dir) = &self.dir {
                 // `try_exists`, not `Path::exists`: this is the async path, and a blocking stat
-                // would stall the executor. An error is treated as "present" -- the conservative
-                // choice, since rewriting a file that is already there is wasted work at most.
+                // would stall the executor. An error is treated as absent, so the restore is
+                // attempted; `persist` recreates a missing directory and fails loudly if it
+                // cannot.
                 let present = tokio::fs::try_exists(dir.join(&existing.content_hash))
                     .await
-                    .unwrap_or(true);
+                    .unwrap_or(false);
                 if !present {
                     self.persist(dir, &existing).await?;
                 }
