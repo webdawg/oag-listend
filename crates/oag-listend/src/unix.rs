@@ -31,14 +31,21 @@ pub struct UnixCarrier {
 }
 
 impl UnixCarrier {
-    /// Bind `path`. An existing socket file is removed first, because a stale socket from a
-    /// killed daemon would otherwise make startup fail forever.
+    /// Bind `path`. A stale socket file from a killed daemon is removed, because it would otherwise
+    /// make startup fail forever -- but a socket that is still being served is refused rather than
+    /// stolen: two daemons on one path would silently split clients between them.
     pub async fn bind_shared(
         path: impl Into<PathBuf>,
         store: Arc<Mutex<AudioStore>>,
     ) -> std::io::Result<(Self, PathBuf)> {
         let path = path.into();
         if path.exists() {
+            if tokio::net::UnixStream::connect(&path).await.is_ok() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AddrInUse,
+                    format!("{path:?} is already being served"),
+                ));
+            }
             let _ = std::fs::remove_file(&path);
         }
         let listener = UnixListener::bind(&path)?;

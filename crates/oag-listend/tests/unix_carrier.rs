@@ -144,3 +144,32 @@ async fn shared(path: &std::path::Path) {
     tokio::time::timeout(Duration::from_secs(5), unix_run).await.expect("bound").expect("join").expect("run");
     tokio::time::timeout(Duration::from_secs(5), tcp_run).await.expect("bound").expect("join").expect("run");
 }
+
+/// A second daemon must not steal a socket that is already being served; two daemons on one path
+/// would silently split clients between them.
+#[tokio::test]
+async fn a_second_daemon_refuses_to_steal_a_live_socket() {
+    let path = socket_path("steal");
+    let outcome = tokio::time::timeout(BOUND, steal(&path)).await;
+    let _ = std::fs::remove_file(&path);
+    outcome.expect("the steal check must complete within the bound")
+}
+
+async fn steal(path: &std::path::Path) {
+    let store = Arc::new(Mutex::new(AudioStore::default()));
+    let (carrier, _) = oag_listend::unix::UnixCarrier::bind_shared(path, Arc::clone(&store))
+        .await
+        .expect("first bind");
+    let shutdown = carrier.shutdown_handle();
+    let run = tokio::spawn(async move { carrier.run().await });
+
+    let second = oag_listend::unix::UnixCarrier::bind_shared(path, Arc::new(Mutex::new(AudioStore::default()))).await;
+    assert!(second.is_err(), "a live socket must not be stolen");
+
+    shutdown.shutdown();
+    tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .expect("shutdown bound")
+        .expect("join")
+        .expect("run");
+}
