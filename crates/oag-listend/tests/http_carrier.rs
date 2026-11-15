@@ -672,3 +672,42 @@ async fn oversized_expect() {
         .expect("join")
         .expect("run");
 }
+
+/// A chunked upload is not decoded; the refusal says so, rather than reading zero bytes and
+/// reporting valid audio as invalid.
+#[tokio::test]
+async fn a_chunked_upload_is_refused_with_a_clear_message() {
+    tokio::time::timeout(BOUND, chunked()).await.expect("within the bound")
+}
+
+async fn chunked() {
+    let store = Arc::new(Mutex::new(AudioStore::default()));
+    let (carrier, addr) = HttpCarrier::bind_shared("127.0.0.1:0", Arc::clone(&store))
+        .await
+        .expect("bind http");
+    let shutdown = carrier.shutdown_handle();
+    let run = tokio::spawn(async move { carrier.run().await });
+
+    let wav = wav::generate(5, wav::Sound::Tone);
+    let chunk = format!("{:x}\r\n", wav.len());
+    let body = format!("{chunk}{}", String::from_utf8_lossy(&wav));
+    let request = format!(
+        "POST /audio HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{body}\r\n0\r\n\r\n"
+    );
+    let response = http(addr, &request).await;
+    assert_eq!(status_of(&response), 400, "{}", String::from_utf8_lossy(&response));
+    let text = String::from_utf8_lossy(&response).to_ascii_lowercase();
+    assert!(
+        text.contains("chunked") && text.contains("content-length"),
+        "the refusal must say what to do: {}",
+        text
+    );
+    assert!(store.lock().await.is_empty(), "nothing is stored");
+
+    shutdown.shutdown();
+    tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .expect("shutdown bound")
+        .expect("join")
+        .expect("run");
+}

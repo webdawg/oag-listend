@@ -139,7 +139,10 @@ with `Range` (206 and `Content-Range`, or 416), `HEAD`, and an `ETag` (the conte
 `Cache-Control: public, max-age=31536000, immutable` and `If-None-Match` (including a comma-separated validator list, and `*`) -> 304, since a
 content-addressed item cannot change. `POST /audio` accepts a body through
 `AudioStore::accept` (201 with the content hash, 400 if the bytes are not audio) and answers
-`Expect: 100-continue`. A query string is never part of the path, so `/audio/{hash}?x=1` serves the
+`Expect: 100-continue`. A chunked upload is refused with a message saying to send a
+`Content-Length` rather than being read as zero bytes and reported as invalid audio; the unread body
+is drained after a half-close so the refusal is not lost to a TCP reset. A query string is never
+part of the path, so `/audio/{hash}?x=1` serves the
 audio rather than 404-ing. Every response carries `Access-Control-Allow-Origin: *` and `OPTIONS` is
 answered, so a page on another origin can `fetch()` the audio. Anything else is 404.
 

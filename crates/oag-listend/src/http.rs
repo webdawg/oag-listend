@@ -119,8 +119,34 @@ async fn serve_connection_inner(
         write_all_bounded(&mut stream, preflight.as_bytes(), IO_TIMEOUT).await?;
         return Ok(());
     }
+    let unread_body = request.unread_body;
     let response = route(request, &store).await;
-    write_response(&mut stream, &response).await
+    write_response(&mut stream, &response).await?;
+    if unread_body {
+        // Half-close first: the client sees the response and EOF, and the unread body is drained
+        // rather than turning the close into a reset that discards the response.
+        let _ = stream.shutdown().await;
+        drain(&mut stream, MAX_BODY_BYTES).await?;
+    }
+    Ok(())
+}
+
+/// Discard up to `max` bytes of a body the reader did not consume, so closing the socket does not
+/// turn into a TCP reset that discards the response.
+async fn drain(stream: &mut TcpStream, max: usize) -> std::io::Result<()> {
+    let mut buf = [0u8; 4096];
+    let mut left = max;
+    while left > 0 {
+        let want = buf.len().min(left);
+        let n = tokio::time::timeout(IO_TIMEOUT, stream.read(&mut buf[..want]))
+            .await
+            .map_err(|_| timeout_error())??;
+        if n == 0 {
+            break;
+        }
+        left -= n;
+    }
+    Ok(())
 }
 
 struct HttpRequest {
@@ -129,6 +155,10 @@ struct HttpRequest {
     content_type: Option<String>,
     range: Option<String>,
     if_none_match: Option<String>,
+    transfer_encoding: Option<String>,
+    /// The request carried a body this reader did not consume. Closing with it unread makes TCP
+    /// send a reset, which can discard the response we just wrote -- so it is drained first.
+    unread_body: bool,
     body: Vec<u8>,
 }
 
@@ -143,6 +173,8 @@ async fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<HttpRequ
                 content_type: None,
                 range: None,
                 if_none_match: None,
+                transfer_encoding: None,
+                unread_body: false,
                 body: Vec::new(),
             }));
         }
@@ -167,6 +199,8 @@ async fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<HttpRequ
                     content_type: None,
                     range: None,
                     if_none_match: None,
+                    transfer_encoding: None,
+                    unread_body: false,
                     body: Vec::new(),
                 }));
             }
@@ -174,6 +208,7 @@ async fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<HttpRequ
             let mut content_type = None;
             let mut range = None;
             let mut if_none_match = None;
+            let mut transfer_encoding = None;
             let mut expect_continue = false;
             for line in lines {
                 if let Some((name, value)) = line.split_once(':') {
@@ -186,6 +221,8 @@ async fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<HttpRequ
                         range = Some(value.to_string());
                     } else if name.trim().eq_ignore_ascii_case("if-none-match") {
                         if_none_match = Some(value.to_string());
+                    } else if name.trim().eq_ignore_ascii_case("transfer-encoding") {
+                        transfer_encoding = Some(value.to_string());
                     } else if name.trim().eq_ignore_ascii_case("expect")
                         && value.eq_ignore_ascii_case("100-continue")
                     {
@@ -204,6 +241,8 @@ async fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<HttpRequ
                     content_type: None,
                     range: None,
                     if_none_match: None,
+                    transfer_encoding: None,
+                    unread_body: false,
                     body: Vec::new(),
                 }));
             }
@@ -226,7 +265,20 @@ async fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<HttpRequ
                 body.extend_from_slice(&buf[..n]);
             }
             body.truncate(content_length);
-            return Ok(Some(HttpRequest { method, path, content_type, range, if_none_match, body }));
+            let chunked = transfer_encoding
+                .as_deref()
+                .map(|value| value.to_ascii_lowercase().contains("chunked"))
+                .unwrap_or(false);
+            return Ok(Some(HttpRequest {
+                method,
+                path,
+                content_type,
+                range,
+                if_none_match,
+                transfer_encoding,
+                unread_body: chunked || content_length > body.len(),
+                body,
+            }));
         }
     }
 }
@@ -490,6 +542,21 @@ async fn route(request: HttpRequest, store: &Arc<Mutex<AudioStore>>) -> HttpResp
             response
         }
         ("POST", "/audio") => {
+            // Chunked bodies are not decoded. Say so plainly rather than reading zero bytes and
+            // reporting the audio as invalid -- the client can then send a Content-Length.
+            if request.unread_body
+                && request
+                    .transfer_encoding
+                    .as_deref()
+                    .map(|value| value.to_ascii_lowercase().contains("chunked"))
+                    .unwrap_or(false)
+            {
+                return HttpResponse::text(
+                    400,
+                    "Bad Request",
+                    b"chunked transfer encoding is not supported; send Content-Length",
+                );
+            }
             let mut store = store.lock().await;
             match store.accept(request.body, request.content_type).await {
                 Ok(hash) => HttpResponse::text(201, "Created", hash.as_bytes()),
