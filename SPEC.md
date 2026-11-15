@@ -112,8 +112,9 @@ fetch returns the bytes and the hash they must verify against.
 
 Bounds: every read and write syscall has a 10 s timeout -- per syscall, not per transfer, so a
 slow client uploading or downloading the largest item is not cut off mid-transfer -- and each
-session and each HTTP request also has a total bound (30 minutes) so a client that dribbles a byte
-every few seconds cannot hold one of the 64 session slots open indefinitely. A frame may not exceed 16 MiB, the store is capped by
+session and each HTTP connection also has a total bound (30 minutes), covering the read, the route,
+and the response, so a client that dribbles a byte every few seconds in either direction cannot hold
+one of the 64 session slots open indefinitely. A frame may not exceed 16 MiB, the store is capped by
 `--max-bytes` (1 GiB by default), and at most 64 sessions are served at once per carrier.
 A single item is capped by `servable_bound` -- the store bound capped by what one frame can carry
 (`MAX_FRAME_BYTES - 256`) -- so no accepted item can be one that a client's own decoder would
