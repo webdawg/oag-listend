@@ -132,8 +132,15 @@ async fn main() {
                     std::process::exit(1);
                 });
             println!(
-                "store {dir}: loaded {} skipped {} evicted {}",
-                report.loaded, report.skipped, report.evicted
+                "store {dir}: loaded {} skipped {} evicted {}{}",
+                report.loaded,
+                report.skipped,
+                report.evicted,
+                if report.truncated {
+                    " truncated (more entries than the load considers)"
+                } else {
+                    ""
+                }
             );
             Arc::new(Mutex::new(store))
         }
