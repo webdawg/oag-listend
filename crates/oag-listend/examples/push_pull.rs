@@ -31,9 +31,18 @@ fn parse_args() -> Args {
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
-            "--addr" => args.addr = it.next().expect("--addr needs an address"),
+            "--addr" => args.addr = flag_value(&mut it, "--addr"),
             "--udp" => args.udp = true,
-            "--seed" => args.seed = it.next().expect("--seed needs a u64").parse().expect("u64"),
+            "--seed" => {
+                let raw = flag_value(&mut it, "--seed");
+                args.seed = match raw.parse() {
+                    Ok(seed) => seed,
+                    Err(_) => {
+                        eprintln!("--seed must be a u64: {raw}");
+                        std::process::exit(2);
+                    }
+                };
+            }
             other => {
                 eprintln!("unknown argument {other}");
                 std::process::exit(2);
@@ -41,6 +50,16 @@ fn parse_args() -> Args {
         }
     }
     args
+}
+
+fn flag_value(it: &mut impl Iterator<Item = String>, flag: &str) -> String {
+    match it.next() {
+        Some(value) => value,
+        None => {
+            eprintln!("{flag} needs a value");
+            std::process::exit(2);
+        }
+    }
 }
 
 #[tokio::main]
@@ -66,7 +85,13 @@ async fn round_trip(args: &Args, request: &Request) -> std::io::Result<Response>
     let frame = protocol::encode_frame(&protocol::encode_request(request));
     if args.udp {
         let socket = UdpSocket::bind("127.0.0.1:0").await?;
-        let addr: std::net::SocketAddr = args.addr.parse().expect("--udp needs a socket address");
+        let addr: std::net::SocketAddr = match args.addr.parse() {
+            Ok(addr) => addr,
+            Err(_) => {
+                eprintln!("--udp needs a socket address: {}", args.addr);
+                std::process::exit(2);
+            }
+        };
         if frame.len() > MAX_DATAGRAM_BYTES {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
