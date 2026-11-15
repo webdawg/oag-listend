@@ -50,10 +50,12 @@ first canonical ping sound is a generated WAV rendition of the opening phrase of
 Twinkle, Little Star.”** A future carrier may choose a different encoding appropriate to its
 network, but it must preserve the musical content rather than replacing it with an empty pong.
 
-Implemented. `wav::twinkle()` generates the melody deterministically; the native protocol's
-`Ping` operation and HTTP's `GET /ping` both answer with that audio item and its BLAKE3 hash. The
-existing `Hello` frame is unchanged, so compatibility is preserved. The canonical ping is also
-part of the startup set, so it is durable and fetchable by hash.
+Implemented. `wav::twinkle()` generates the opening phrase (C C G G A A G) deterministically; the
+native protocol's `Ping` operation, HTTP's `GET /ping`, and the UDP and Unix carriers all answer
+with that audio item and its BLAKE3 hash. The existing `Hello` frame is unchanged, so compatibility
+is preserved. The rendition is kept short on purpose -- 44,844 bytes -- so it fits the smallest
+carrier's datagram; a longer one would have made UDP answer with a rejection instead of music. The
+canonical ping is also part of the startup set, so it is durable and fetchable by hash.
 
 - [x] Add a deterministic Twinkle melody generator to `crates/oag-listend/src/wav.rs`.
 - [x] Add a native protocol ping operation whose response is the Twinkle audio item and its BLAKE3
