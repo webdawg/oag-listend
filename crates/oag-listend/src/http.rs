@@ -378,18 +378,25 @@ async fn route(request: HttpRequest, store: &Arc<Mutex<AudioStore>>) -> HttpResp
                     }
                     response
                 }
-                Some(Err(())) => HttpResponse {
-                    status: 416,
-                    reason: "Range Not Satisfiable",
-                    content_type: "text/plain".into(),
-                    content_range: Some(format!("bytes */{}", bytes.len())),
-                    accept_ranges: true,
-                    content_length: None,
-                    total_count: None,
-                    offset: None,
-                    extra_headers,
-                    body: b"range not satisfiable".to_vec(),
-                },
+                Some(Err(())) => {
+                    let mut response = HttpResponse {
+                        status: 416,
+                        reason: "Range Not Satisfiable",
+                        content_type: "text/plain".into(),
+                        content_range: Some(format!("bytes */{}", bytes.len())),
+                        accept_ranges: true,
+                        content_length: None,
+                        total_count: None,
+                        offset: None,
+                        extra_headers,
+                        body: b"range not satisfiable".to_vec(),
+                    };
+                    if head_only {
+                        response.content_length = Some(response.body.len());
+                        response.body.clear();
+                    }
+                    response
+                }
                 Some(Ok((start, end))) => {
                     let slice = bytes[start..=end].to_vec();
                     let mut response = HttpResponse {
@@ -480,18 +487,25 @@ async fn route(request: HttpRequest, store: &Arc<Mutex<AudioStore>>) -> HttpResp
                     }
                     response
                 }
-                Some(Err(())) => HttpResponse {
-                    status: 416,
-                    reason: "Range Not Satisfiable",
-                    content_type: "text/plain".into(),
-                    content_range: Some(format!("bytes */{}", item.bytes.len())),
-                    accept_ranges: true,
-                    content_length: None,
-                    total_count: None,
-                    offset: None,
-                    extra_headers: Vec::new(),
-                    body: b"range not satisfiable".to_vec(),
-                },
+                Some(Err(())) => {
+                    let mut response = HttpResponse {
+                        status: 416,
+                        reason: "Range Not Satisfiable",
+                        content_type: "text/plain".into(),
+                        content_range: Some(format!("bytes */{}", item.bytes.len())),
+                        accept_ranges: true,
+                        content_length: None,
+                        total_count: None,
+                        offset: None,
+                        extra_headers: Vec::new(),
+                        body: b"range not satisfiable".to_vec(),
+                    };
+                    if head_only {
+                        response.content_length = Some(response.body.len());
+                        response.body.clear();
+                    }
+                    response
+                }
                 Some(Ok((start, end))) => {
                     let slice = item.bytes[start..=end].to_vec();
                     let mut response = HttpResponse {
