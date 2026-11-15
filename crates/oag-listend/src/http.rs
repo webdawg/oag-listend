@@ -294,33 +294,70 @@ async fn route(request: HttpRequest, store: &Arc<Mutex<AudioStore>>) -> HttpResp
             // The musical liveness response: the canonical ping item, served as audio.
             let bytes = crate::wav::twinkle();
             let hash = crate::AudioItem::new(bytes.clone(), None).content_hash;
-            let mut response = HttpResponse {
-                status: 200,
-                reason: "OK",
-                content_type: "audio/wav".into(),
-                content_range: None,
-                accept_ranges: false,
-                content_length: None,
-                total_count: None,
-                offset: None,
-                extra_headers: vec![
-                    ("ETag".to_string(), format!("\"{hash}\"")),
-                    (
-                        "Cache-Control".to_string(),
-                        "public, max-age=31536000, immutable".to_string(),
-                    ),
-                    (
-                        "Content-Disposition".to_string(),
-                        format!("inline; filename=\"{hash}.wav\""),
-                    ),
-                ],
-                body: bytes,
-            };
-            if head_only {
-                response.content_length = Some(response.body.len());
-                response.body.clear();
+            let extra_headers = vec![
+                ("ETag".to_string(), format!("\"{hash}\"")),
+                (
+                    "Cache-Control".to_string(),
+                    "public, max-age=31536000, immutable".to_string(),
+                ),
+                (
+                    "Content-Disposition".to_string(),
+                    format!("inline; filename=\"{hash}.wav\""),
+                ),
+            ];
+            match parse_range(request.range.as_deref(), bytes.len()) {
+                None => {
+                    let mut response = HttpResponse {
+                        status: 200,
+                        reason: "OK",
+                        content_type: "audio/wav".into(),
+                        content_range: None,
+                        accept_ranges: true,
+                        content_length: None,
+                        total_count: None,
+                        offset: None,
+                        extra_headers,
+                        body: bytes,
+                    };
+                    if head_only {
+                        response.content_length = Some(response.body.len());
+                        response.body.clear();
+                    }
+                    response
+                }
+                Some(Err(())) => HttpResponse {
+                    status: 416,
+                    reason: "Range Not Satisfiable",
+                    content_type: "text/plain".into(),
+                    content_range: Some(format!("bytes */{}", bytes.len())),
+                    accept_ranges: true,
+                    content_length: None,
+                    total_count: None,
+                    offset: None,
+                    extra_headers,
+                    body: b"range not satisfiable".to_vec(),
+                },
+                Some(Ok((start, end))) => {
+                    let slice = bytes[start..=end].to_vec();
+                    let mut response = HttpResponse {
+                        status: 206,
+                        reason: "Partial Content",
+                        content_type: "audio/wav".into(),
+                        content_range: Some(format!("bytes {start}-{end}/{}", bytes.len())),
+                        accept_ranges: true,
+                        content_length: None,
+                        total_count: None,
+                        offset: None,
+                        extra_headers,
+                        body: slice,
+                    };
+                    if head_only {
+                        response.content_length = Some(response.body.len());
+                        response.body.clear();
+                    }
+                    response
+                }
             }
-            response
         }
         ("GET", "/audio") => {
             // The list operation, on HTTP, paginated like the native one: a client that only

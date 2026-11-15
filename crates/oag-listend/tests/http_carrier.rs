@@ -608,6 +608,16 @@ async fn ping_http() {
     let hash = oag_listend::AudioItem::new(body.to_vec(), None).content_hash;
     assert!(head_contains(&response, &format!("etag: \"{hash}\"")));
 
+    // The liveness sound ranges like any other served audio.
+    let ranged = http(
+        addr,
+        "GET /ping HTTP/1.1\r\nHost: x\r\nRange: bytes=0-9\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    assert_eq!(status_of(&ranged), 206, "{}", String::from_utf8_lossy(&ranged));
+    assert!(head_contains(&ranged, &format!("content-range: bytes 0-9/{}", body.len())));
+    assert_eq!(body_of(&ranged), &body[0..10]);
+
     // The same bytes are a real item: the startup set publishes the canonical ping, so it is
     // fetchable by hash too.
     let listed = http(addr, "GET /audio HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").await;
