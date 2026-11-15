@@ -169,7 +169,9 @@ silent, and never counting an evicted entry as held. A sidecar larger than 4 KiB
 and is ignored rather than read into memory.
 
 Eviction deletes the file, so the directory and the store agree on what is held and the
-`--max-bytes` bound is a bound on disk too, not just memory. Without `--dir` the store is in-memory.
+`--max-bytes` bound is a bound on disk too, not just memory. If a file is removed out of band, a
+republish of the same bytes restores it, so an item cannot silently become one that the next start
+will lose; the existence check costs a syscall only on a duplicate publish, never on the read path. Without `--dir` the store is in-memory.
 
 The bound is enforced on the way in: `accept` refuses audio larger than `--max-bytes` rather than
 writing it and immediately evicting it, and a startup file larger than the bound is skipped without

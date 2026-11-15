@@ -360,7 +360,16 @@ impl AudioStore {
             return Err(ListendError::TooLarge { len: bytes.len(), max: bound });
         }
         let item = AudioItem::new(bytes, declared_media_type);
-        if self.items.contains_key(&item.content_hash) {
+        if let Some(existing) = self.items.get(&item.content_hash).cloned() {
+            // The durable copy is the source of truth. If the file went missing out of band (an
+            // operator deleted it, or the disk dropped it), a republish restores it, so the item
+            // does not silently become one the next start will lose. The existence check costs a
+            // syscall only on a duplicate publish, never on the read path.
+            if let Some(dir) = &self.dir {
+                if !dir.join(&existing.content_hash).exists() {
+                    self.persist(dir, &existing).await?;
+                }
+            }
             return Ok(item.content_hash);
         }
         if let Some(dir) = &self.dir {
@@ -703,6 +712,27 @@ mod tests {
         assert_eq!(report.loaded, 0);
         assert_eq!(report.skipped, 1);
         assert!(reopened.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_republish_restores_a_file_deleted_out_of_band() {
+        let dir = temp_dir("selfheal");
+        let (mut store, _) = AudioStore::with_directory(&dir, 1024 * 1024).unwrap();
+        let wav = wav::generate(11, wav::Sound::Tone);
+        let hash = store.accept(wav.clone(), None).await.unwrap();
+        assert!(dir.join(&hash).exists());
+        std::fs::remove_file(dir.join(&hash)).unwrap();
+
+        // The same bytes again: the in-memory item is still served, and the durable copy is
+        // restored rather than the item becoming one a restart would lose.
+        let again = store.accept(wav, None).await.unwrap();
+        assert_eq!(again, hash);
+        assert!(dir.join(&hash).exists(), "a republish must restore the file");
+
+        let (reopened, report) = AudioStore::with_directory(&dir, 1024 * 1024).unwrap();
+        assert_eq!(report.loaded, 1);
+        assert!(reopened.serve(&hash).is_ok());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
