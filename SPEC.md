@@ -6,12 +6,10 @@
 native length-prefixed protocol over TCP, HTTP, UDP, and a Unix domain socket. The store is content-addressed, so `--dir` persists
 every accepted sound under its BLAKE3 and a restart loads it back. The daemon publishes a small
 seeded set of generated sounds, accepts audio, and serves it back with the BLAKE3 of the bytes. The
-end-to-end tests `the_daemon_serves_audio_and_refuses_everything_else`,
-`http_serves_audio_and_refuses_the_rest`, `the_two_carriers_serve_the_same_audio`,
-`udp_carries_the_same_audio`, `audio_accepted_before_a_shutdown_is_served_after_it`,
-`http_range_requests_and_head`, `the_served_content_type_comes_from_the_bytes`, and
-`http_lists_the_audio_and_honours_expect_continue` are green.
-The audio rules have not moved.
+end-to-end tests cover the native back-and-forth, both HTTP refusal and streaming, the shared
+store across carriers, UDP, the Unix socket, persistence across a restart, HTTP ranges and HEAD,
+the content type and validator-list handling, the paginated and query-aware listing, CORS,
+concurrency, and the musical ping on every carrier. The audio rules have not moved.
 
 ## The idea, recorded verbatim
 
@@ -98,12 +96,13 @@ surface is the guarantee.
 - **Not a single protocol.** The day it is "the HTTP audio server" is the day it has failed the
   founding statement.
 
-## The carrier that exists: TCP
+## The native TCP carrier
 
 `oag-listend` (the binary) binds an address, and `examples/push_pull.rs` exchanges audio with it.
-The protocol is length-prefixed frames with exactly four operations -- hello, publish, fetch,
-list -- and nothing else. Every inbound publish goes through `AudioStore::accept`; every outbound
-fetch returns the bytes and the hash they must verify against.
+The protocol is length-prefixed frames with exactly five operations -- hello, publish, fetch,
+list, ping -- and nothing else. Every inbound publish goes through `AudioStore::accept`; every
+outbound fetch returns the bytes and the hash they must verify against; a ping returns the musical
+liveness item.
 
     oag-listend --listen 127.0.0.1:7100 --http 127.0.0.1:7101 --udp 127.0.0.1:7120 \
                 --unix /tmp/oag-listend.sock --dir /var/lib/oag-listend --seed 20261112
