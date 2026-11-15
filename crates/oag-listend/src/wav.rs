@@ -72,10 +72,11 @@ pub fn generate(seed: u64, kind: Sound) -> Vec<u8> {
     generate_n(seed, kind, sample_count_for(seed))
 }
 
-/// The largest sound `generate_n` will produce. Two seconds of 8 kHz 16-bit mono is far more than
+/// The largest sound `generate_n` will produce. Five seconds of 8 kHz 16-bit mono is far more than
 /// any fixture needs, and a caller passing an unbounded count must not be able to allocate without
-/// limit.
-pub const MAX_GENERATED_SAMPLES: usize = 16_000;
+/// limit. It is deliberately above one UDP datagram's payload, so a test can still build a fixture
+/// that crosses that bound.
+pub const MAX_GENERATED_SAMPLES: usize = 40_000;
 
 /// Generate one valid WAV of `kind` with `samples` PCM frames, capped at
 /// [`MAX_GENERATED_SAMPLES`].
