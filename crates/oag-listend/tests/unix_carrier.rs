@@ -182,3 +182,28 @@ async fn steal(path: &std::path::Path) {
         .expect("join")
         .expect("run");
 }
+
+/// A path that exists but is not a socket must not be deleted: removing it would destroy something
+/// the operator put there.
+#[tokio::test]
+async fn a_non_socket_path_is_refused_not_deleted() {
+    let path = socket_path("notasocket");
+    std::fs::write(&path, b"precious").unwrap();
+    let outcome = tokio::time::timeout(BOUND, refuse(&path)).await;
+    outcome.expect("the check must complete within the bound")
+}
+
+async fn refuse(path: &std::path::Path) {
+    let error = match oag_listend::unix::UnixCarrier::bind_shared(
+        path,
+        Arc::new(Mutex::new(AudioStore::default())),
+    )
+    .await
+    {
+        Ok(_) => panic!("a regular file must not be replaced by a socket"),
+        Err(error) => error,
+    };
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    assert_eq!(std::fs::read(path).unwrap(), b"precious", "the file must be left alone");
+    let _ = std::fs::remove_file(path);
+}

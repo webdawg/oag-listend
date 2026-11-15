@@ -306,6 +306,10 @@ async fn route(request: HttpRequest, store: &Arc<Mutex<AudioStore>>) -> HttpResp
                 extra_headers: vec![
                     ("ETag".to_string(), format!("\"{hash}\"")),
                     (
+                        "Cache-Control".to_string(),
+                        "public, max-age=31536000, immutable".to_string(),
+                    ),
+                    (
                         "Content-Disposition".to_string(),
                         format!("inline; filename=\"{hash}.wav\""),
                     ),

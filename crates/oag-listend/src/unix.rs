@@ -9,6 +9,7 @@
 
 #![forbid(unsafe_code)]
 
+use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -39,7 +40,15 @@ impl UnixCarrier {
         store: Arc<Mutex<AudioStore>>,
     ) -> std::io::Result<(Self, PathBuf)> {
         let path = path.into();
-        if path.exists() {
+        if let Some(metadata) = std::fs::metadata(&path).ok() {
+            // Only a socket is ours to remove. A regular file or directory at the path is not a
+            // stale socket, and deleting it would destroy something the operator put there.
+            if !metadata.file_type().is_socket() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("{path:?} exists and is not a socket"),
+                ));
+            }
             if tokio::net::UnixStream::connect(&path).await.is_ok() {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::AddrInUse,
