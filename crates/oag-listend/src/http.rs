@@ -174,7 +174,7 @@ async fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<HttpRequ
                 range: None,
                 if_none_match: None,
                 transfer_encoding: None,
-                unread_body: false,
+                unread_body: true,
                 body: Vec::new(),
             }));
         }
@@ -200,7 +200,7 @@ async fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<HttpRequ
                     range: None,
                     if_none_match: None,
                     transfer_encoding: None,
-                    unread_body: false,
+                    unread_body: true,
                     body: Vec::new(),
                 }));
             }
