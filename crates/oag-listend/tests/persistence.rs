@@ -121,7 +121,7 @@ async fn listing(dir: &std::path::Path) {
     {
         let (mut store, _) = AudioStore::with_directory(dir, 1024 * 1024).expect("open");
         for seed in [50, 17, 91, 3] {
-            store.accept(wav::generate(seed, wav::Sound::Tone), None).expect("accept");
+            store.accept(wav::generate(seed, wav::Sound::Tone), None).await.expect("accept");
         }
         first_walk = store.hashes();
         let mut sorted = first_walk.clone();

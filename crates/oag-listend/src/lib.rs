@@ -318,7 +318,7 @@ impl AudioStore {
     /// for a carrier that does not exist yet. The check is on the bytes, never on
     /// `declared_media_type`: a declared type is a claim and the bytes are the evidence. The
     /// declared type is kept on the item as metadata only if the bytes agree it is audio at all.
-    pub fn accept(&mut self, bytes: Vec<u8>, declared_media_type: Option<String>) -> Result<String, ListendError> {
+    pub async fn accept(&mut self, bytes: Vec<u8>, declared_media_type: Option<String>) -> Result<String, ListendError> {
         if AudioFormat::sniff(&bytes).is_none() {
             return Err(ListendError::NotAudio);
         }
@@ -331,22 +331,29 @@ impl AudioStore {
             return Ok(item.content_hash);
         }
         if let Some(dir) = &self.dir {
-            self.persist(dir, &item)?;
+            self.persist(dir, &item).await?;
         }
         Ok(self.publish(item))
     }
 
     /// Write the item under its content hash, plus a sidecar for the declared media type. The
     /// write happens before the item is answerable, so a failure is a refusal.
-    fn persist(&self, dir: &Path, item: &AudioItem) -> Result<(), ListendError> {
-        std::fs::create_dir_all(dir)
+    /// Write the item under its content hash, plus a sidecar for the declared media type.
+    ///
+    /// Async, and using `tokio::fs`: the write happens while the store mutex is held, and a blocking
+    /// write on a slow disk would stall every carrier's executor thread. The write still completes
+    /// before the item is answerable, so a failure is still a refusal.
+    async fn persist(&self, dir: &Path, item: &AudioItem) -> Result<(), ListendError> {
+        tokio::fs::create_dir_all(dir)
+            .await
             .map_err(|e| ListendError::Persist(e.to_string()))?;
-        std::fs::write(dir.join(&item.content_hash), &item.bytes)
+        tokio::fs::write(dir.join(&item.content_hash), &item.bytes)
+            .await
             .map_err(|e| ListendError::Persist(e.to_string()))?;
         if let Some(media_type) = &item.media_type {
             // A sidecar is metadata; a failure to write it is not a failure to store the audio.
             let sidecar = dir.join(format!("{}.json", item.content_hash));
-            let _ = std::fs::write(sidecar, media_type.as_bytes());
+            let _ = tokio::fs::write(sidecar, media_type.as_bytes()).await;
         }
         Ok(())
     }
@@ -508,23 +515,23 @@ mod tests {
     /// The inbound rule, as a property: a recognised audio signature is accepted, anything else
     /// is rejected and leaves the store untouched. The rejection must not depend on the declared
     /// type -- a lie in the header does not get bytes in.
-    #[test]
-    fn only_audio_is_accepted_and_the_declared_type_cannot_override_the_bytes() {
+    #[tokio::test]
+    async fn only_audio_is_accepted_and_the_declared_type_cannot_override_the_bytes() {
         let mut store = AudioStore::default();
 
         let mut wav = b"RIFF".to_vec();
         wav.extend_from_slice(&[0, 0, 0, 0]);
         wav.extend_from_slice(b"WAVE");
         wav.extend_from_slice(b"fmt ");
-        assert!(store.accept(wav.clone(), None).is_ok(), "a WAV signature is audio");
+        assert!(store.accept(wav.clone(), None).await.is_ok(), "a WAV signature is audio");
 
-        assert!(store.accept(b"fLaC\0\0\0\x22".to_vec(), None).is_ok(), "FLAC is audio");
-        assert!(store.accept(b"OggS\0\x02".to_vec(), None).is_ok(), "Ogg is audio");
-        assert!(store.accept(b"ID3\x04\0\0".to_vec(), None).is_ok(), "an ID3 tag is MPEG audio");
-        assert!(store.accept(vec![0xFF, 0xFB, 0x90, 0x00], None).is_ok(), "a raw MPEG frame is audio");
+        assert!(store.accept(b"fLaC\0\0\0\x22".to_vec(), None).await.is_ok(), "FLAC is audio");
+        assert!(store.accept(b"OggS\0\x02".to_vec(), None).await.is_ok(), "Ogg is audio");
+        assert!(store.accept(b"ID3\x04\0\0".to_vec(), None).await.is_ok(), "an ID3 tag is MPEG audio");
+        assert!(store.accept(vec![0xFF, 0xFB, 0x90, 0x00], None).await.is_ok(), "a raw MPEG frame is audio");
         let mut m4a = vec![0, 0, 0, 0x20];
         m4a.extend_from_slice(b"ftypM4A ");
-        assert!(store.accept(m4a, None).is_ok(), "an M4A brand is audio");
+        assert!(store.accept(m4a, None).await.is_ok(), "an M4A brand is audio");
         let before = store.len();
 
         // Not audio, however it is labelled.
@@ -536,7 +543,7 @@ mod tests {
             (vec![], "audio/wav"),
             (b"just some text".to_vec(), "audio/mpeg"),
         ] {
-            let result = store.accept(bytes, Some(label.to_string()));
+            let result = store.accept(bytes, Some(label.to_string())).await;
             assert!(
                 matches!(result, Err(ListendError::NotAudio)),
                 "{label} must be rejected regardless of its declared type, got {result:?}"
@@ -547,21 +554,21 @@ mod tests {
         // A video brand is ISO BMFF but not audio.
         let mut mp4_video = vec![0, 0, 0, 0x20];
         mp4_video.extend_from_slice(b"ftypavc1");
-        assert!(matches!(store.accept(mp4_video, None), Err(ListendError::NotAudio)));
+        assert!(matches!(store.accept(mp4_video, None).await, Err(ListendError::NotAudio)));
 
         // A generic `isom` major brand with no audio brand anywhere is video, not audio.
         let mut isom_video = vec![0, 0, 0, 0x20];
         isom_video.extend_from_slice(b"ftypisom");
         isom_video.extend_from_slice(&[0, 0, 0, 1]);
         isom_video.extend_from_slice(b"avc1");
-        assert!(matches!(store.accept(isom_video, None), Err(ListendError::NotAudio)));
+        assert!(matches!(store.accept(isom_video, None).await, Err(ListendError::NotAudio)));
 
         // The same generic major brand with `M4A ` among the compatible brands is audio.
         let mut isom_m4a = vec![0, 0, 0, 0x24];
         isom_m4a.extend_from_slice(b"ftypisom");
         isom_m4a.extend_from_slice(&[0, 0, 0, 1]);
         isom_m4a.extend_from_slice(b"M4A ");
-        assert!(store.accept(isom_m4a, None).is_ok(), "an audio compatible brand must be accepted");
+        assert!(store.accept(isom_m4a, None).await.is_ok(), "an audio compatible brand must be accepted");
     }
 
     #[test]
@@ -592,13 +599,13 @@ mod tests {
         dir
     }
 
-    #[test]
-    fn accepted_audio_survives_a_reopen() {
+    #[tokio::test]
+    async fn accepted_audio_survives_a_reopen() {
         let dir = temp_dir("reopen");
         let wav = wav::generate(1, wav::Sound::Tone);
         {
             let (mut store, _) = AudioStore::with_directory(&dir, 1024 * 1024).unwrap();
-            let hash = store.accept(wav.clone(), Some("audio/wav".into())).unwrap();
+            let hash = store.accept(wav.clone(), Some("audio/wav".into())).await.unwrap();
             assert_eq!(store.serve(&hash).unwrap().bytes, wav);
         }
         let (store, report) = AudioStore::with_directory(&dir, 1024 * 1024).unwrap();
@@ -610,12 +617,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[test]
-    fn a_file_that_is_not_its_hash_is_skipped() {
+    #[tokio::test]
+    async fn a_file_that_is_not_its_hash_is_skipped() {
         let dir = temp_dir("badhash");
         let (mut store, _) = AudioStore::with_directory(&dir, 1024 * 1024).unwrap();
         let wav = wav::generate(2, wav::Sound::Tone);
-        let hash = store.accept(wav.clone(), None).unwrap();
+        let hash = store.accept(wav.clone(), None).await.unwrap();
         // Corrupt the payload: the name no longer names the bytes.
         std::fs::write(dir.join(&hash), b"tampered").unwrap();
         let (reopened, report) = AudioStore::with_directory(&dir, 1024 * 1024).unwrap();
@@ -637,16 +644,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[test]
-    fn eviction_removes_the_file_so_disk_and_store_agree() {
+    #[tokio::test]
+    async fn eviction_removes_the_file_so_disk_and_store_agree() {
         let dir = temp_dir("evict");
         // Each tiny WAV is 52 bytes; the bound is 60, so the second accept evicts the first.
         let (mut store, _) = AudioStore::with_directory(&dir, 60).unwrap();
         let first = wav::generate_n(1, wav::Sound::Tone, 4);
         let second = wav::generate_n(2, wav::Sound::Tone, 4);
-        let first_hash = store.accept(first, None).unwrap();
+        let first_hash = store.accept(first, None).await.unwrap();
         assert!(dir.join(&first_hash).exists());
-        let second_hash = store.accept(second, None).unwrap();
+        let second_hash = store.accept(second, None).await.unwrap();
 
         assert!(store.serve(&first_hash).is_err(), "the first item must be evicted");
         assert!(store.serve(&second_hash).is_ok());
@@ -667,12 +674,12 @@ mod tests {
         assert!(servable_bound(usize::MAX) < crate::protocol::MAX_FRAME_BYTES);
     }
 
-    #[test]
-    fn an_item_larger_than_the_store_bound_is_refused() {
+    #[tokio::test]
+    async fn an_item_larger_than_the_store_bound_is_refused() {
         let mut store = AudioStore::with_capacity(10);
         let big = wav::generate_n(1, wav::Sound::Tone, 8); // 44 + 16 = 60 bytes
         assert!(big.len() > 10);
-        let result = store.accept(big, None);
+        let result = store.accept(big, None).await;
         assert!(
             matches!(result, Err(ListendError::TooLarge { .. })),
             "an item larger than the bound must be refused, got {result:?}"
@@ -701,8 +708,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[test]
-    fn a_file_larger_than_the_store_bound_is_skipped_without_being_read() {
+    #[tokio::test]
+    async fn a_file_larger_than_the_store_bound_is_skipped_without_being_read() {
         let dir = temp_dir("toolarge");
         let (mut store, _) = AudioStore::with_directory(&dir, 64).unwrap();
         // A valid WAV whose bytes exceed the bound, named with its real hash.
@@ -713,7 +720,7 @@ mod tests {
 
         // A second, small item so the load has something to accept.
         let small = wav::generate_n(3, wav::Sound::Tone, 4);
-        let small_hash = store.accept(small, None).unwrap();
+        let small_hash = store.accept(small, None).await.unwrap();
 
         let (reopened, report) = AudioStore::with_directory(&dir, 64).unwrap();
         assert_eq!(report.loaded, 1, "only the item that fits is loaded");
@@ -723,14 +730,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[test]
-    fn a_persist_failure_refuses_the_inbound() {
+    #[tokio::test]
+    async fn a_persist_failure_refuses_the_inbound() {
         // A path that is a file cannot be a directory, so create_dir_all fails.
         let blocker = temp_dir("blocked");
         let file = blocker.join("not-a-dir");
         std::fs::write(&file, b"x").unwrap();
         let mut store = AudioStore::with_directory_path_for_test(file, 1024 * 1024);
-        let result = store.accept(wav::generate(3, wav::Sound::Tone), None);
+        let result = store.accept(wav::generate(3, wav::Sound::Tone), None).await;
         assert!(matches!(result, Err(ListendError::Persist(_))), "got {result:?}");
         let _ = std::fs::remove_dir_all(&blocker);
     }

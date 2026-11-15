@@ -122,7 +122,7 @@ impl ListendServer {
         }
         let mut report = GeneratedReport::default();
         for bytes in crate::wav::sounds(seed, count) {
-            match store.accept(bytes, Some("audio/wav".to_string())) {
+            match store.accept(bytes, Some("audio/wav".to_string())).await {
                 Ok(hash) => report.accepted.push(hash),
                 Err(e) => report.rejected.push(e.to_string()),
             }
@@ -240,7 +240,7 @@ pub(crate) async fn handle(request: Request, store: &Arc<Mutex<AudioStore>>) -> 
         }
         Request::Publish { declared_media_type, bytes } => {
             let mut store = store.lock().await;
-            match store.accept(bytes, declared_media_type) {
+            match store.accept(bytes, declared_media_type).await {
                 Ok(content_hash) => Response::Published { content_hash },
                 // The rejection carries the rule, never the bytes that were refused.
                 Err(ListendError::NotAudio) => Response::Rejected {

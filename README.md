@@ -66,7 +66,8 @@ All three carriers share one store, and all accept audio and nothing else.
     curl http://127.0.0.1:7101/audio/<hash>
 
 Every entry is re-checked on load (name must be the BLAKE3 of the bytes, bytes must sniff as
-audio), and a write failure refuses the inbound rather than losing it silently. The startup report
+audio), and a write failure refuses the inbound rather than losing it silently. The write is
+asynchronous, so a slow disk delays the answer rather than stalling every carrier. The startup report
 separates `loaded`, `skipped`, and `evicted`, so a bound that pushed entries out is visible rather
 than counted as held.
 

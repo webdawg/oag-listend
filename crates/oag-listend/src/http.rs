@@ -393,7 +393,7 @@ async fn route(request: HttpRequest, store: &Arc<Mutex<AudioStore>>) -> HttpResp
         }
         ("POST", "/audio") => {
             let mut store = store.lock().await;
-            match store.accept(request.body, request.content_type) {
+            match store.accept(request.body, request.content_type).await {
                 Ok(hash) => HttpResponse::text(201, "Created", hash.as_bytes()),
                 Err(ListendError::NotAudio) => {
                     HttpResponse::text(400, "Bad Request", ListendError::NotAudio.to_string().as_bytes())
