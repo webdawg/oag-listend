@@ -557,7 +557,12 @@ async fn route(request: HttpRequest, store: &Arc<Mutex<AudioStore>>) -> HttpResp
                 response.reason = "Not Modified";
                 response.content_range = None;
                 response.accept_ranges = false;
-                response.content_length = None;
+                // A 304 has no body, but a HEAD still reports the entity it describes.
+                response.content_length = if head_only {
+                    Some(item.bytes.len())
+                } else {
+                    None
+                };
                 response.body.clear();
             }
             response
