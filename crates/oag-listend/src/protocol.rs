@@ -371,7 +371,7 @@ pub fn decode_response(body: &[u8]) -> Result<Response, WireError> {
         OP_RESP_AUDIO => {
             let content_hash = r.hash()?;
             let len = r.u32()? as usize;
-            if len > r.buf.len() {
+            if len > r.remaining() {
                 return Err(WireError::Truncated);
             }
             Ok(Response::Audio {
@@ -389,7 +389,7 @@ pub fn decode_response(body: &[u8]) -> Result<Response, WireError> {
             let total = r.u32()? as usize;
             let offset = r.u32()? as usize;
             let count = r.u32()? as usize;
-            if count > r.buf.len() {
+            if count > r.remaining() {
                 return Err(WireError::Truncated);
             }
             let mut content_hashes = Vec::with_capacity(count);
