@@ -394,6 +394,14 @@ async fn route(request: HttpRequest, store: &Arc<Mutex<AudioStore>>) -> HttpResp
                 }
             };
 
+            // A real filename, so a browser or player that saves the audio gets `<hash>.wav`
+            // rather than a bare hash.
+            if let Some(format) = AudioFormat::sniff(&item.bytes) {
+                response.extra_headers.push((
+                    "Content-Disposition".to_string(),
+                    format!("inline; filename=\"{hash}.{}\"", format.file_extension()),
+                ));
+            }
             // The item is content-addressed, so it is immutable: a client may cache it for a year
             // and revalidate with the hash instead of re-downloading it.
             response.extra_headers.push(("ETag".to_string(), etag));

@@ -237,6 +237,18 @@ impl AudioFormat {
             Self::Aiff => "audio/aiff",
         }
     }
+
+    /// A file extension for the format, for a `Content-Disposition` filename.
+    pub fn file_extension(&self) -> &'static str {
+        match self {
+            Self::Wav => "wav",
+            Self::Flac => "flac",
+            Self::Ogg => "ogg",
+            Self::Mp3 => "mp3",
+            Self::M4a => "m4a",
+            Self::Aiff => "aiff",
+        }
+    }
 }
 
 /// The audio surface: everything the daemon can serve, keyed by content hash.
@@ -558,6 +570,7 @@ mod tests {
         ] {
             assert_eq!(format.media_type(), expected);
             assert!(format.media_type().starts_with("audio/"));
+            assert!(!format.file_extension().contains('.'));
         }
     }
 

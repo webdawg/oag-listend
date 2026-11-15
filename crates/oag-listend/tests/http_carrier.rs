@@ -507,6 +507,11 @@ async fn caching() {
     assert_eq!(status_of(&full), 200);
     assert!(head_contains(&full, &format!("etag: {etag}")), "{}", String::from_utf8_lossy(&full));
     assert!(head_contains(&full, "cache-control: public, max-age=31536000, immutable"));
+    assert!(
+        head_contains(&full, &format!("content-disposition: inline; filename=\"{hash}.wav\"")),
+        "a saved file should have a real name: {}",
+        String::from_utf8_lossy(&full)
+    );
 
     let revalidated = get_with(addr, &url, &format!("If-None-Match: {etag}\r\n")).await;
     assert_eq!(status_of(&revalidated), 304, "{}", String::from_utf8_lossy(&revalidated));
