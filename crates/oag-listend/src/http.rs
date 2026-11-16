@@ -8,8 +8,11 @@
 //!
 //! Routes:
 //! - `GET  /`             -- what this is, and how much audio it holds
+//! - `GET  /ping`         -- the canonical musical liveness item, ranged like any other audio
+//! - `GET  /audio`        -- one page of content hashes, `?offset=&limit=`
 //! - `GET  /audio/{hash}` -- the audio bytes (404 if unknown)
 //! - `POST /audio`        -- publish a body (413 if too large, 400 if not audio)
+//! - `OPTIONS`            -- preflight answer, so another origin may `fetch()`
 //! - anything else        -- 404
 
 #![forbid(unsafe_code)]

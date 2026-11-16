@@ -2,7 +2,8 @@
 //!
 //! This is the whole of what a carrier may say to the daemon. There is no command channel, no
 //! JSON-RPC, no path or method string a client could use to make the daemon do something other
-//! than audio. The operations are exactly: identify, publish audio, fetch audio, list audio.
+//! than audio. The operations are exactly: hello, publish audio, fetch audio by content hash,
+//! list known hashes, and ping (whose answer is audio). Nothing else is a request.
 //!
 //! Every frame is `u32` big-endian length followed by that many body bytes, and no body may
 //! exceed [`MAX_FRAME_BYTES`]. The length cap is enforced before the body is allocated, so a
