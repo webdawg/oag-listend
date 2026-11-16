@@ -239,24 +239,33 @@ address the daemon says so, rather than letting an operator discover it later.
 daemon handles SIGINT and SIGTERM, so `systemctl stop` is a clean stop: the accept loops return, the
 Unix socket is removed, and the process exits 0.
 
+## The IPFS mirror
+
+`--ipfs-api ADDR` also offers every accepted item to a Kubo node, so the audio reaches a network
+whose clients never have to connect to this daemon. It is a **mirror**, not a carrier and not a new
+operation: the frame protocol permits only publish / fetch-by-hash / list / hello (+ ping), so IPFS
+cannot add a way to ask for something. The BLAKE3 content hash remains the identity; the CID is an
+additional address for the same bytes.
+
+It lives in `AudioStore::accept` -- the one surface all four
+carriers pass through -- because mirroring per carrier would fork the behaviour. It is best-effort:
+the bytes are written locally first, and a mirror failure is **recorded, never propagated**. Losing a
+copy must not lose the audio. The last 64 outcomes are retained and printed at shutdown, with each
+CID (`ipfs mirror: N mirrored, M failed`, then one line per outcome).
+
+The client hand-rolls `POST /api/v0/add` as multipart form data and reads `Hash` from the reply,
+with a 10 s bound per read and write and a 64 KiB cap on the reply. It has been tested against a
+stub that mimics Kubo's add endpoint, end to end through `--ipfs-api`; it has **not** been tested
+against a real Kubo node, and it does not decode chunked replies. That limitation is stated here
+rather than discovered later.
+
 ## Next
 
-The remaining imagination carriers are IPFS and Reticulum, and both are deliberately not
-implemented. The honest status is "not built", not "built and untested". Recorded here is what
-building each would actually take, so the investigation is not repeated:
+Reticulum is the remaining imagination carrier, and it is deliberately not implemented: it needs a
+physical interface and `oag-storage`, so no code can be written or run here.
 
-- **Reticulum.** Needs a physical interface and `oag-storage`. No code can be written or run here.
-- **IPFS.** The imagination layer already has the client half: `HttpIpfsPublisher` posts to Kubo's
-  `POST /api/v0/add` as multipart form data and reads `Hash` from the JSON reply, and
-  `PublishingIpfsTransport` / `IpfsTransport` wrap it. Building the carrier in this repository would
-  mean adding an HTTP *client* (the crate deliberately hand-rolls its own HTTP server and carries no
-  framework) plus hand-built multipart encoding, and then mirroring every accepted item through that
-  client. Two constraints make it more than a small increment: the frame protocol permits only
-  publish / fetch-by-hash / list / hello (+ ping), so IPFS must be a *mirror* of accepted audio rather
-  than a new operation; and putting a network call on the accept path couples the store's durability
-  guarantee to an external service, which is a design change to settled code rather than a new file.
+Worth doing next, in order:
 
-A test against a fake Kubo endpoint is possible and would prove the client logic; it cannot prove
-real-IPFS behaviour. Anyone picking this up should build it behind `--ipfs-api ADDR`, best-effort
-(a mirror failure must never refuse audio the local store already holds), and label the result
-untested against real IPFS.
+- Test the mirror against a real Kubo node, and add chunked-reply decoding if it proves necessary.
+- Surface a served item's CID, so a client that fetched audio over TCP or HTTP can also retrieve it
+  from IPFS without asking the operator.

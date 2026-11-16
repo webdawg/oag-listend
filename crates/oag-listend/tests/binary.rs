@@ -5,6 +5,7 @@
 #![forbid(unsafe_code)]
 
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use oag_listend::protocol::{self, Request, Response};
@@ -123,6 +124,7 @@ fn version_and_help_work_and_usage_errors_exit_two() {
         "--seed U64",
         "--max-bytes N",
         "--no-generate",
+        "--ipfs-api ADDR",
     ] {
         assert!(
             help.lines().any(|line| line.trim_start().starts_with(flag)),
@@ -356,4 +358,121 @@ async fn clean_stop() {
     );
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `--ipfs-api` makes the daemon offer accepted audio to a Kubo node, and report the outcome at
+/// shutdown. The stub mimics `/api/v0/add`; this is deliberately not a real-IPFS test.
+#[tokio::test]
+async fn ipfs_api_mirrors_accepted_audio_and_reports_it() {
+    let outcome = tokio::time::timeout(BOUND, ipfs_wiring()).await;
+    outcome.expect("the ipfs wiring exchange must complete within the bound")
+}
+
+async fn ipfs_wiring() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind the stub");
+    let api_port = listener.local_addr().expect("stub addr").port();
+    let requests = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&requests);
+    let server = tokio::spawn(async move {
+        let Ok(accepted) = tokio::time::timeout(Duration::from_secs(10), listener.accept()).await
+        else {
+            return;
+        };
+        let (mut stream, _) = accepted.expect("accept");
+        let mut buf = vec![0u8; 64 * 1024];
+        let mut got = Vec::new();
+        loop {
+            let n = match tokio::time::timeout(Duration::from_secs(5), stream.read(&mut buf)).await
+            {
+                Ok(Ok(0)) => break,
+                Ok(Ok(n)) => n,
+                _ => break,
+            };
+            got.extend_from_slice(&buf[..n]);
+            if got.ends_with(b"--\r\n") {
+                break;
+            }
+        }
+        counted.fetch_add(1, Ordering::SeqCst);
+        let reply = "HTTP/1.1 200 OK\r\nContent-Length: 44\r\n\r\n\
+                     {\"Hash\":\"bafywired\",\"Name\":\"audio\"}\r\n";
+        let _ = stream.write_all(reply.as_bytes()).await;
+        let _ = stream.flush().await;
+        let _ = stream.shutdown().await;
+    });
+
+    let port = free_port();
+    let addr = format!("127.0.0.1:{port}");
+    let mut child = Command::new(binary())
+        .arg("--listen")
+        .arg(&addr)
+        .arg("--no-generate")
+        .arg("--ipfs-api")
+        .arg(format!("127.0.0.1:{api_port}"))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn the daemon");
+    // Kept: `read_to_end` below resumes where this handle was left, so the startup lines are
+    // needed separately to assert on them.
+    let (announced, mut stdout) = announce(&mut child).await;
+
+    // An operator's publish.
+    let mut stream = TcpStream::connect(&addr).await.expect("connect");
+    let tone = oag_listend::wav::generate(3, oag_listend::wav::Sound::Tone);
+    let publish = protocol::encode_frame(&protocol::encode_request(&Request::Publish {
+        declared_media_type: Some("audio/wav".into()),
+        bytes: tone,
+    }));
+    stream.write_all(&publish).await.expect("write publish");
+    stream.flush().await.expect("flush");
+    let mut prefix = [0u8; 4];
+    stream.read_exact(&mut prefix).await.expect("prefix");
+    let len = u32::from_be_bytes(prefix) as usize;
+    let mut body = vec![0u8; len];
+    stream.read_exact(&mut body).await.expect("body");
+    assert!(matches!(
+        protocol::decode_response(&body).expect("decode"),
+        Response::Published { .. }
+    ));
+    drop(stream);
+
+    let pid = child.id().expect("the daemon's pid");
+    std::process::Command::new("kill")
+        .arg("-TERM")
+        .arg(pid.to_string())
+        .status()
+        .expect("send SIGTERM");
+    let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
+        .await
+        .expect("exit bound")
+        .expect("wait");
+    assert_eq!(status.code(), Some(0));
+
+    let mut out = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), stdout.read_to_end(&mut out))
+        .await
+        .expect("read bound")
+        .expect("read stdout");
+    let mut text = String::from_utf8_lossy(&announced).into_owned();
+    text.push_str(&String::from_utf8_lossy(&out));
+    assert!(
+        text.contains("offering accepted audio to IPFS"),
+        "startup should say what it is mirroring: {text}"
+    );
+    assert!(
+        text.contains("1 mirrored, 0 failed"),
+        "the mirror outcome must be reported: {text}"
+    );
+
+    server.await.expect("join the stub");
+    assert_eq!(
+        requests.load(Ordering::SeqCst),
+        1,
+        "the accepted audio must have been offered exactly once"
+    );
 }

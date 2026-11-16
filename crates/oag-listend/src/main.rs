@@ -25,6 +25,8 @@ struct Args {
     seed: u64,
     max_bytes: usize,
     no_generate: bool,
+    /// Offer every accepted item to this Kubo node's HTTP API as well. Best-effort.
+    ipfs_api: Option<String>,
 }
 
 fn parse_args() -> Args {
@@ -38,6 +40,7 @@ fn parse_args() -> Args {
         seed: default_seed(),
         max_bytes: DEFAULT_MAX_BYTES,
         no_generate: false,
+        ipfs_api: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -59,6 +62,7 @@ fn parse_args() -> Args {
             "--seed" => args.seed = parse_value(&mut it, "--seed"),
             "--max-bytes" => args.max_bytes = parse_value(&mut it, "--max-bytes"),
             "--no-generate" => args.no_generate = true,
+            "--ipfs-api" => args.ipfs_api = Some(value(&mut it, "--ipfs-api")),
             "--help" | "-h" => {
                 println!("{}", usage());
                 std::process::exit(0);
@@ -102,7 +106,7 @@ fn usage() -> String {
 
 Usage: oag-listend [--listen ADDR] [--http ADDR] [--udp ADDR] [--unix PATH]
                    [--dir PATH] [--seed U64] [--max-bytes N] [--check]
-                   [--no-generate] [--help]
+                   [--no-generate] [--ipfs-api ADDR] [--help]
 
   --listen ADDR    native protocol bind address (default 0.0.0.0:7100)
   --http ADDR      also serve HTTP at ADDR (GET /audio/{{hash}}, POST /audio)
@@ -114,6 +118,7 @@ Usage: oag-listend [--listen ADDR] [--http ADDR] [--udp ADDR] [--unix PATH]
   --seed U64       seed for the startup sounds (default: clock)
   --max-bytes N    store bound in bytes (default {DEFAULT_MAX_BYTES})
   --no-generate    do not publish generated sounds at startup
+  --ipfs-api ADDR  also offer every accepted item to a Kubo node at ADDR (best-effort)
 
 Only audio is accepted. Everything else is rejected before it is stored."
     )
@@ -139,7 +144,7 @@ fn default_seed() -> u64 {
 #[tokio::main]
 async fn main() {
     let args = parse_args();
-    let store = match &args.dir {
+    let mut store = match &args.dir {
         Some(dir) => {
             let (store, report) =
                 AudioStore::with_directory(dir, args.max_bytes).unwrap_or_else(|e| {
@@ -157,10 +162,15 @@ async fn main() {
                     ""
                 }
             );
-            Arc::new(Mutex::new(store))
+            store
         }
-        None => Arc::new(Mutex::new(AudioStore::with_capacity(args.max_bytes))),
+        None => AudioStore::with_capacity(args.max_bytes),
     };
+    if let Some(addr) = &args.ipfs_api {
+        store.set_ipfs(Some(oag_listend::ipfs::IpfsPublisher::new(addr.clone())));
+        println!("offering accepted audio to IPFS at {addr} (best-effort)");
+    }
+    let store = Arc::new(Mutex::new(store));
 
     if args.check {
         let store = store.lock().await;
@@ -282,6 +292,22 @@ async fn main() {
         _ = sigterm => {}
     }
     println!("oag-listend shutting down");
+    if args.ipfs_api.is_some() {
+        let log = store.lock().await.mirror_log().clone();
+        let (mirrored, failed) = store.lock().await.mirror_summary();
+        println!("  ipfs mirror: {mirrored} mirrored, {failed} failed");
+        for outcome in log {
+            match outcome {
+                oag_listend::MirrorOutcome::Mirrored { content_hash, cid } => {
+                    println!("    {} -> {}", &content_hash[..16], cid)
+                }
+                oag_listend::MirrorOutcome::Failed {
+                    content_hash,
+                    reason,
+                } => println!("    {} failed: {}", &content_hash[..16], reason),
+            }
+        }
+    }
     native_shutdown.shutdown();
     if let Some(handle) = http_shutdown {
         handle.shutdown();

@@ -28,13 +28,14 @@
 #![forbid(unsafe_code)]
 
 pub mod http;
+pub mod ipfs;
 pub mod protocol;
 pub mod server;
 pub mod udp;
 pub mod unix;
 pub mod wav;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -284,7 +285,27 @@ pub struct AudioStore {
     /// Files eviction removed from the index but has not unlinked yet. Unlinking is a blocking
     /// syscall, so it is taken off the lock and done asynchronously; a load drains it inline.
     evicted: Vec<PathBuf>,
+    /// When `Some`, every accepted item is also offered to IPFS. Best-effort: a mirror failure is
+    /// recorded, never propagated, because losing a copy must not lose the audio.
+    ipfs: Option<crate::ipfs::IpfsPublisher>,
+    /// The most recent mirror outcomes, newest last, capped. Reported rather than swallowed.
+    mirror_log: VecDeque<MirrorOutcome>,
 }
+
+/// What happened when an accepted item was offered to IPFS.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MirrorOutcome {
+    /// Kubo assigned this CID to bytes we already hold.
+    Mirrored { content_hash: String, cid: String },
+    /// The mirror did not happen. The audio is still stored and served locally.
+    Failed {
+        content_hash: String,
+        reason: String,
+    },
+}
+
+/// How many mirror outcomes are kept. Enough to read, small enough that a long run cannot grow it.
+const MIRROR_LOG_LIMIT: usize = 64;
 
 /// The default store bound. Generous for a daemon, small enough that a misbehaving publisher
 /// cannot fill a disk through it.
@@ -305,6 +326,8 @@ impl AudioStore {
             max_bytes,
             dir: None,
             evicted: Vec::new(),
+            ipfs: None,
+            mirror_log: VecDeque::new(),
         }
     }
 
@@ -336,6 +359,8 @@ impl AudioStore {
             max_bytes,
             dir: Some(dir.clone()),
             evicted: Vec::new(),
+            ipfs: None,
+            mirror_log: VecDeque::new(),
         };
         let mut report = LoadReport::default();
         let mut inserted = 0usize;
@@ -465,6 +490,20 @@ impl AudioStore {
         if let Some(dir) = &self.dir {
             self.persist(dir, &item).await?;
         }
+        // Offer the same bytes to IPFS, best-effort, once they are durable here. A mirror failure
+        // is recorded, never propagated: losing a copy must not lose the audio.
+        let ipfs = self.ipfs.clone();
+        if let Some(ipfs) = ipfs {
+            let content_hash = item.content_hash.clone();
+            let outcome = match ipfs.add(&item.bytes).await {
+                Ok(cid) => MirrorOutcome::Mirrored { content_hash, cid },
+                Err(e) => MirrorOutcome::Failed {
+                    content_hash,
+                    reason: e.to_string(),
+                },
+            };
+            self.record_mirror(outcome);
+        }
         let hash = self.publish(item);
         // Unlink what eviction pushed out, off the lock. A failed unlink is best-effort, exactly
         // as the synchronous version was; the item is gone from the index either way.
@@ -502,6 +541,42 @@ impl AudioStore {
             let _ = tokio::fs::write(sidecar, media_type.as_bytes()).await;
         }
         Ok(())
+    }
+
+    /// Offer every accepted item to IPFS as well. `None` (the default) mirrors nothing, so the
+    /// daemon behaves exactly as before unless `--ipfs-api` is given.
+    pub fn set_ipfs(&mut self, publisher: Option<crate::ipfs::IpfsPublisher>) {
+        self.ipfs = publisher;
+    }
+
+    /// Whether a mirror is configured.
+    pub fn is_mirroring(&self) -> bool {
+        self.ipfs.is_some()
+    }
+
+    /// The most recent mirror outcomes, oldest first.
+    pub fn mirror_log(&self) -> &VecDeque<MirrorOutcome> {
+        &self.mirror_log
+    }
+
+    /// `(mirrored, failed)` counts over the retained log.
+    pub fn mirror_summary(&self) -> (usize, usize) {
+        let mut ok = 0;
+        let mut failed = 0;
+        for outcome in &self.mirror_log {
+            match outcome {
+                MirrorOutcome::Mirrored { .. } => ok += 1,
+                MirrorOutcome::Failed { .. } => failed += 1,
+            }
+        }
+        (ok, failed)
+    }
+
+    fn record_mirror(&mut self, outcome: MirrorOutcome) {
+        if self.mirror_log.len() >= MIRROR_LOG_LIMIT {
+            self.mirror_log.pop_front();
+        }
+        self.mirror_log.push_back(outcome);
     }
 
     /// Remove an evicted item's file, so the directory and the store agree on what is held.
@@ -598,6 +673,8 @@ impl AudioStore {
             max_bytes,
             dir: Some(dir),
             evicted: Vec::new(),
+            ipfs: None,
+            mirror_log: VecDeque::new(),
         }
     }
 }

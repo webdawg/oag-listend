@@ -44,7 +44,21 @@ store refuses is printed as a rejection rather than dropped.
 
 `--seed U64` chooses the generated sounds (the default comes from the clock and process id);
 `--no-generate` skips them entirely, for an operator who wants the daemon to serve only what it is
-given. Then exchange audio with it over the native protocol:
+given.
+
+`--ipfs-api ADDR` also offers every accepted item to a Kubo node at `ADDR`, so audio reaches a network
+whose clients never have to connect here. It is best-effort: the bytes are written locally first, and
+a mirror failure is reported rather than allowed to lose audio. At shutdown the daemon prints how many
+items were mirrored and any failures, with each CID:
+
+    oag-listend --ipfs-api 127.0.0.1:5001
+    ...
+    oag-listend shutting down
+      ipfs mirror: 1 mirrored, 0 failed
+        5f1a88dee8bd40af -> bafywired
+
+This client has been tested against a stub that mimics `/api/v0/add`; it has **not** been tested
+against a real Kubo node, and it does not decode chunked replies. See `SPEC.md`. Then exchange audio with it over the native protocol:
 
     cargo run -p oag-listend --example push_pull -- --addr 127.0.0.1:7100
     cargo run -p oag-listend --example push_pull -- --udp --addr 127.0.0.1:7120
@@ -113,7 +127,7 @@ address the daemon prints a note saying so. Use `--listen 127.0.0.1:...` to keep
 
 ## Status
 
-**Serves, and survives a restart.** Four carriers are live and tested: 56 unit tests plus 38
+**Serves, and survives a restart.** Four carriers are live and tested: 60 unit tests plus 42
 end-to-end tests (`cargo test -p oag-listend`). The store mutex covers lookup and insert, not byte
 copies or disk writes, so one slow client does not stall the others. Runs as a systemd service
 (`scripts/oag-listend.service`) and shuts down cleanly on SIGINT and SIGTERM. The native protocol, HTTP, UDP, and the Unix socket share one store,
