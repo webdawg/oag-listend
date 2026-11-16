@@ -242,7 +242,21 @@ Unix socket is removed, and the process exits 0.
 ## Next
 
 The remaining imagination carriers are IPFS and Reticulum, and both are deliberately not
-implemented: IPFS needs a Kubo node (external infrastructure) or an embedded libp2p node
-(heavyweight), and Reticulum needs a physical interface. Each would reuse `AudioStore::accept` and
-add no operations, but neither can be tested against a real network from this repository, so the
-honest status is "not built", not "built and untested".
+implemented. The honest status is "not built", not "built and untested". Recorded here is what
+building each would actually take, so the investigation is not repeated:
+
+- **Reticulum.** Needs a physical interface and `oag-storage`. No code can be written or run here.
+- **IPFS.** The imagination layer already has the client half: `HttpIpfsPublisher` posts to Kubo's
+  `POST /api/v0/add` as multipart form data and reads `Hash` from the JSON reply, and
+  `PublishingIpfsTransport` / `IpfsTransport` wrap it. Building the carrier in this repository would
+  mean adding an HTTP *client* (the crate deliberately hand-rolls its own HTTP server and carries no
+  framework) plus hand-built multipart encoding, and then mirroring every accepted item through that
+  client. Two constraints make it more than a small increment: the frame protocol permits only
+  publish / fetch-by-hash / list / hello (+ ping), so IPFS must be a *mirror* of accepted audio rather
+  than a new operation; and putting a network call on the accept path couples the store's durability
+  guarantee to an external service, which is a design change to settled code rather than a new file.
+
+A test against a fake Kubo endpoint is possible and would prove the client logic; it cannot prove
+real-IPFS behaviour. Anyone picking this up should build it behind `--ipfs-api ADDR`, best-effort
+(a mirror failure must never refuse audio the local store already holds), and label the result
+untested against real IPFS.
