@@ -3,13 +3,19 @@
 **License: GNU Affero General Public License v3.0 or later (AGPL-3.0-or-later).**
 
 **Status: serves, and survives a restart.** Four carriers are live and share one store: the
-native length-prefixed protocol over TCP, HTTP, UDP, and a Unix domain socket. The store is content-addressed, so `--dir` persists
-every accepted sound under its BLAKE3 and a restart loads it back. The daemon publishes a small
-seeded set of generated sounds, accepts audio, and serves it back with the BLAKE3 of the bytes. The
-end-to-end tests cover the native back-and-forth, both HTTP refusal and streaming, the shared
-store across carriers, UDP, the Unix socket, persistence across a restart, HTTP ranges and HEAD,
-the content type and validator-list handling, the paginated and query-aware listing, CORS,
-concurrency, and the musical ping on every carrier. The audio rules have not moved.
+native length-prefixed protocol over TCP, HTTP, UDP, and a Unix domain socket. The store is
+content-addressed, so `--dir` persists every accepted sound under its BLAKE3 and a restart loads it
+back. The daemon publishes a small seeded set of generated sounds, accepts audio, and serves it back
+with the BLAKE3 of the bytes.
+
+`cargo test -p oag-listend` runs 56 unit and 33 end-to-end tests, all green. End to end they cover:
+the native back-and-forth (publish, fetch, verify, reject non-audio, not-found); eviction under the
+byte bound; the per-frame cap refusing an oversized length before any body is read; native listing
+pagination; each of the six named audio signatures, in both directions, over the wire; HTTP serving
+every format under its own content type; HTTP refusal, streaming, ranges, HEAD, validators and
+CORS; the shared store across carriers; UDP; the Unix socket; persistence across a restart;
+concurrency; the operator binary (`--version`, `--help`, usage exit codes, start/serve/stop) and
+`--check`; and the musical ping on every carrier. The audio rules have not moved.
 
 ## The idea, recorded verbatim
 
