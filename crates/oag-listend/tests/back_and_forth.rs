@@ -274,3 +274,51 @@ async fn ping_native() {
         .expect("join")
         .expect("run");
 }
+
+/// A single frame is capped. A client that declares more than `MAX_FRAME_BYTES` must be refused
+/// before any body is read or allocated -- otherwise a four-byte lie would make the daemon wait
+/// for a body that never comes. The refusal ends the session; the daemon itself keeps serving.
+#[tokio::test]
+async fn a_frame_over_the_cap_is_refused_without_reading_a_body() {
+    let outcome = tokio::time::timeout(BOUND, oversized_frame()).await;
+    outcome.expect("the oversized-frame exchange must complete within the bound")
+}
+
+async fn oversized_frame() {
+    let (server, addr) =
+        ListendServer::bind_shared("127.0.0.1:0", Arc::new(Mutex::new(AudioStore::default())))
+            .await
+            .expect("bind");
+    let shutdown = server.shutdown_handle();
+    let run = tokio::spawn(async move { server.run().await });
+
+    // Only the prefix: no body follows, because the server should not ask for one.
+    let mut hostile = TcpStream::connect(addr).await.expect("connect");
+    let declared = (protocol::MAX_FRAME_BYTES + 1) as u32;
+    hostile
+        .write_all(&declared.to_be_bytes())
+        .await
+        .expect("write the lying prefix");
+    hostile.flush().await.expect("flush");
+
+    let mut buf = [0u8; 1];
+    let eof = tokio::time::timeout(Duration::from_secs(5), hostile.read(&mut buf))
+        .await
+        .expect("the session must close promptly, not wait for a body")
+        .expect("read");
+    assert_eq!(eof, 0, "the oversized frame must end the session");
+    drop(hostile);
+
+    // The daemon refused one frame, not the service: a fresh connection still answers.
+    let mut fresh = TcpStream::connect(addr).await.expect("reconnect");
+    send(&mut fresh, &Request::Hello).await;
+    assert!(matches!(recv(&mut fresh).await, Response::Hello { .. }));
+    drop(fresh);
+
+    shutdown.shutdown();
+    tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .expect("shutdown bound")
+        .expect("join")
+        .expect("run");
+}
