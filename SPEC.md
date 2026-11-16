@@ -173,8 +173,10 @@ silent, and never counting an evicted entry as held. Only regular files are read
 device named like a hash would block forever, and a directory would error. A sidecar larger than
 4 KiB is not a media type and is ignored rather than read into memory.
 
-Eviction deletes the file, so the directory and the store agree on what is held and the
-`--max-bytes` bound is a bound on disk too, not just memory. If a file is removed out of band, a
+Eviction unlinks the file, so the directory and the store agree on what is held and the
+`--max-bytes` bound is a bound on disk too, not just memory. The unlink is taken off the lock and
+done asynchronously after the publish returns; a load drains it inline, since startup has no lock to
+protect. If a file is removed out of band, a
 republish of the same bytes restores it, so an item cannot silently become one that the next start
 will lose; the existence check costs a syscall only on a duplicate publish, never on the read path. Without `--dir` the store is in-memory.
 

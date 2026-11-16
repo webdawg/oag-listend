@@ -281,6 +281,9 @@ pub struct AudioStore {
     /// When `Some`, every accepted item is written here under its content hash, and a restart
     /// loads it back. `None` is the in-memory store the tests and the default use.
     dir: Option<PathBuf>,
+    /// Files eviction removed from the index but has not unlinked yet. Unlinking is a blocking
+    /// syscall, so it is taken off the lock and done asynchronously; a load drains it inline.
+    evicted: Vec<PathBuf>,
 }
 
 /// The default store bound. Generous for a daemon, small enough that a misbehaving publisher
@@ -301,6 +304,7 @@ impl AudioStore {
             bytes_held: 0,
             max_bytes,
             dir: None,
+            evicted: Vec::new(),
         }
     }
 
@@ -331,6 +335,7 @@ impl AudioStore {
             bytes_held: 0,
             max_bytes,
             dir: Some(dir.clone()),
+            evicted: Vec::new(),
         };
         let mut report = LoadReport::default();
         let mut inserted = 0usize;
@@ -403,6 +408,11 @@ impl AudioStore {
             inserted += 1;
         }
 
+        // Startup has no lock to protect, so the evicted files are unlinked inline.
+        for path in std::mem::take(&mut store.evicted) {
+            let _ = std::fs::remove_file(path);
+        }
+
         report.evicted = inserted - store.len();
         report.loaded = store.len();
         Ok((store, report))
@@ -453,7 +463,21 @@ impl AudioStore {
         if let Some(dir) = &self.dir {
             self.persist(dir, &item).await?;
         }
-        Ok(self.publish(item))
+        let hash = self.publish(item);
+        // Unlink what eviction pushed out, off the lock. A failed unlink is best-effort, exactly
+        // as the synchronous version was; the item is gone from the index either way.
+        self.drain_evicted().await;
+        Ok(hash)
+    }
+
+    async fn drain_evicted(&mut self) {
+        if self.evicted.is_empty() {
+            return;
+        }
+        let paths = std::mem::take(&mut self.evicted);
+        for path in paths {
+            let _ = tokio::fs::remove_file(path).await;
+        }
     }
 
     /// Write the item under its content hash, plus a sidecar for the declared media type. The
@@ -479,10 +503,10 @@ impl AudioStore {
     }
 
     /// Remove an evicted item's file, so the directory and the store agree on what is held.
-    fn forget(&self, content_hash: &str) {
+    fn forget(&mut self, content_hash: &str) {
         if let Some(dir) = &self.dir {
-            let _ = std::fs::remove_file(dir.join(content_hash));
-            let _ = std::fs::remove_file(dir.join(format!("{content_hash}.json")));
+            self.evicted.push(dir.join(content_hash));
+            self.evicted.push(dir.join(format!("{content_hash}.json")));
         }
     }
 
@@ -571,6 +595,7 @@ impl AudioStore {
             bytes_held: 0,
             max_bytes,
             dir: Some(dir),
+            evicted: Vec::new(),
         }
     }
 }
