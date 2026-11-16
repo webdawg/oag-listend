@@ -44,12 +44,17 @@ fn parse_args() -> Args {
             "--help" | "-h" => {
                 println!(
                     "push_pull -- push audio to a daemon and pull it back\n\n\
-                     Usage: push_pull [--addr ADDR] [--udp] [--seed U64]\n\n\
+                     Usage: push_pull [--addr ADDR] [--udp] [--seed U64] [--version] [--help]\n\n\
                        --addr ADDR   daemon address (default 127.0.0.1:7100)\n\
                        --udp         use the UDP datagram carrier\n\
                        --seed U64    seed for the generated sounds (default 1)\n\
-                       --version     print the version and the frame protocol version\n\n\
-                     Sends a ping and prints the daemon's musical liveness answer."
+                       --version     print the version and the frame protocol version\n\
+                       --help        print this usage\n\n\
+                     Says hello, prints the daemon's musical liveness answer, publishes a tone and
+\
+                     a noise, fetches both back and verifies their BLAKE3, then proves the inbound
+\
+                     rule by sending non-audio and printing the rejection."
                 );
                 std::process::exit(0);
             }
