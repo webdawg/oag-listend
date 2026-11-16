@@ -96,20 +96,26 @@ fn parse_value<T: std::str::FromStr>(it: &mut impl Iterator<Item = String>, flag
 }
 
 fn usage() -> String {
+    // One literal, so the spacing an operator reads is the spacing written here.
     format!(
-        "oag-listend -- the global daemon that serves audio\n\n\
-         Usage: oag-listend [--listen ADDR] [--http ADDR] [--seed U64] [--max-bytes N] [--no-generate]\n\n\
-           --listen ADDR    native protocol bind address (default 0.0.0.0:7100)\n\
-           --http ADDR      also serve HTTP at ADDR (GET /audio/{{hash}}, POST /audio)
-           --udp ADDR       also serve the native protocol over UDP datagrams
-           --unix PATH      also serve the native protocol on a Unix domain socket
-           --dir PATH       persist the audio content-addressed under PATH
-           --check          open the store, print the load report, and exit
-           --version        print the version and the frame protocol version\n\
-           --seed U64       seed for the startup sounds (default: clock)\n\
-           --max-bytes N    store bound in bytes (default {DEFAULT_MAX_BYTES})\n\
-           --no-generate    do not publish generated sounds at startup\n\n\
-         Only audio is accepted. Everything else is rejected before it is stored."
+        "oag-listend -- the global daemon that serves audio
+
+Usage: oag-listend [--listen ADDR] [--http ADDR] [--udp ADDR] [--unix PATH]
+                   [--dir PATH] [--seed U64] [--max-bytes N] [--check]
+                   [--no-generate] [--help]
+
+  --listen ADDR    native protocol bind address (default 0.0.0.0:7100)
+  --http ADDR      also serve HTTP at ADDR (GET /audio/{{hash}}, POST /audio)
+  --udp ADDR       also serve the native protocol over UDP datagrams
+  --unix PATH      also serve the native protocol on a Unix domain socket
+  --dir PATH       persist the audio content-addressed under PATH
+  --check          open the store, print the load report, and exit
+  --version        print the version and the frame protocol version
+  --seed U64       seed for the startup sounds (default: clock)
+  --max-bytes N    store bound in bytes (default {DEFAULT_MAX_BYTES})
+  --no-generate    do not publish generated sounds at startup
+
+Only audio is accepted. Everything else is rejected before it is stored."
     )
 }
 

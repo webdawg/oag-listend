@@ -47,10 +47,41 @@ fn version_and_help_work_and_usage_errors_exit_two() {
         .output()
         .expect("run --help");
     assert!(help.status.success(), "--help must succeed");
-    assert!(
-        String::from_utf8_lossy(&help.stdout).contains("--listen"),
-        "--help must document --listen"
-    );
+    let help = String::from_utf8_lossy(&help.stdout).into_owned();
+    // Every flag the daemon accepts must appear in its own help, not just the first one.
+    for flag in [
+        "--listen",
+        "--http",
+        "--udp",
+        "--unix",
+        "--dir",
+        "--check",
+        "--seed",
+        "--max-bytes",
+        "--no-generate",
+        "--version",
+        "--help",
+    ] {
+        assert!(help.contains(flag), "--help must document {flag}:\n{help}");
+    }
+    // And each flag's description must sit on its own line: a missing newline escapes the
+    // following line into it, which is exactly how --http once swallowed --udp.
+    for flag in [
+        "--listen ADDR",
+        "--http ADDR",
+        "--udp ADDR",
+        "--unix PATH",
+        "--dir PATH",
+        "--check",
+        "--seed U64",
+        "--max-bytes N",
+        "--no-generate",
+    ] {
+        assert!(
+            help.lines().any(|line| line.trim_start().starts_with(flag)),
+            "--help must put {flag} on its own line:\n{help}"
+        );
+    }
 
     // A usage error is a typed exit 2 with a message, never a panic. Note that *omitting* --listen
     // is not one: the documented default is 0.0.0.0:7100, so that case starts the daemon instead of
