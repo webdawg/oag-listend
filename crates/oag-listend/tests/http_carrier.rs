@@ -1101,3 +1101,60 @@ async fn all_content_types() {
         .expect("join")
         .expect("run");
 }
+
+/// A header flood is refused at the cap rather than read into memory. A client that sends endless
+/// headers with no terminator must get a bad request, not hold the connection until a read timeout.
+#[tokio::test]
+async fn an_oversized_header_block_is_refused() {
+    tokio::time::timeout(BOUND, oversized_head())
+        .await
+        .expect("the header-flood exchange must complete within the bound")
+}
+
+async fn oversized_head() {
+    let store = Arc::new(Mutex::new(AudioStore::default()));
+    let (carrier, addr) = HttpCarrier::bind_shared("127.0.0.1:0", Arc::clone(&store))
+        .await
+        .expect("bind http");
+    let shutdown = carrier.shutdown_handle();
+    let run = tokio::spawn(async move { carrier.run().await });
+
+    // A valid request line followed by padding headers past the cap, with no blank line ending the
+    // head: without a cap this reader would wait forever.
+    let mut request = String::from("GET / HTTP/1.1\r\nHost: x\r\n");
+    while request.len() <= oag_listend::http::MAX_HEAD_BYTES + 1024 {
+        request.push_str("X-Pad: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\r\n");
+    }
+
+    let mut stream = TcpStream::connect(addr).await.expect("connect");
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .expect("write the flooded head");
+    stream.flush().await.expect("flush");
+    // Half-close so the daemon's post-refusal drain sees an end instead of waiting out its timeout.
+    stream.shutdown().await.expect("half-close");
+
+    let mut out = Vec::new();
+    tokio::time::timeout(BOUND, stream.read_to_end(&mut out))
+        .await
+        .expect("read bound")
+        .expect("read");
+    let text = String::from_utf8_lossy(&out);
+    assert!(
+        text.starts_with("HTTP/1.1 400"),
+        "a flooded header block is a bad request: {text}"
+    );
+    assert_eq!(
+        store.lock().await.len(),
+        0,
+        "a refused request must not store anything"
+    );
+
+    shutdown.shutdown();
+    tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .expect("shutdown bound")
+        .expect("join")
+        .expect("run");
+}
