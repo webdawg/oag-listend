@@ -13,8 +13,8 @@ use oag_listend::{wav, AudioFormat, AudioStore, MirrorOutcome};
 
 const BOUND: Duration = Duration::from_secs(20);
 
-/// A one-shot stub that answers like Kubo, and records the request body it was sent.
-async fn stub(response: String) -> (String, Arc<Mutex<Vec<u8>>>) {
+/// A stub that answers like Kubo to exactly `expected` requests, and records every request body.
+async fn stub(response: String, expected: usize) -> (String, Arc<Mutex<Vec<u8>>>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind stub");
@@ -22,29 +22,31 @@ async fn stub(response: String) -> (String, Arc<Mutex<Vec<u8>>>) {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let captured = Arc::clone(&seen);
     tokio::spawn(async move {
-        let (mut stream, _) = listener.accept().await.expect("accept");
-        let mut buf = vec![0u8; 64 * 1024];
-        let mut got = Vec::new();
-        loop {
-            let n = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut buf))
-                .await
-                .expect("read bound")
-                .expect("read");
-            if n == 0 {
+        for _ in 0..expected {
+            let Ok(Ok((mut stream, _))) =
+                tokio::time::timeout(Duration::from_secs(10), listener.accept()).await
+            else {
                 break;
+            };
+            let mut buf = vec![0u8; 64 * 1024];
+            let mut got = Vec::new();
+            loop {
+                match tokio::time::timeout(Duration::from_secs(5), stream.read(&mut buf)).await {
+                    Ok(Ok(0)) => break,
+                    Ok(Ok(n)) => {
+                        got.extend_from_slice(&buf[..n]);
+                        if got.ends_with(b"--\r\n") {
+                            break;
+                        }
+                    }
+                    _ => break,
+                }
             }
-            got.extend_from_slice(&buf[..n]);
-            if got.ends_with(b"--\r\n") {
-                break;
-            }
+            captured.lock().unwrap().extend_from_slice(&got);
+            let _ = stream.write_all(response.as_bytes()).await;
+            let _ = stream.flush().await;
+            let _ = stream.shutdown().await;
         }
-        *captured.lock().unwrap() = got.clone();
-        stream
-            .write_all(response.as_bytes())
-            .await
-            .expect("write reply");
-        stream.flush().await.expect("flush");
-        let _ = stream.shutdown().await;
     });
     (format!("127.0.0.1:{port}", port = addr.port()), seen)
 }
@@ -58,6 +60,7 @@ async fn accepted_audio_is_offered_to_ipfs_and_the_cid_is_recorded() {
 async fn mirror_ok() {
     let (addr, seen) = stub(
         "HTTP/1.1 200 OK\r\nContent-Length: 58\r\n\r\n{\"Hash\":\"bafyaccepted\",\"Name\":\"audio\",\"Size\":\"8\"}\r\n".into(),
+        1,
     )
     .await;
     let mut store = AudioStore::default();
@@ -97,8 +100,11 @@ async fn a_mirror_failure_is_recorded_and_does_not_lose_the_audio() {
 }
 
 async fn mirror_fails() {
-    let (addr, _seen) =
-        stub("HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n".into()).await;
+    let (addr, _seen) = stub(
+        "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n".into(),
+        1,
+    )
+    .await;
     let mut store = AudioStore::default();
     store.set_ipfs(Some(IpfsPublisher::new(addr)));
 
@@ -143,4 +149,86 @@ async fn an_unreachable_api_is_reported_not_fatal() {
     assert_eq!(AudioFormat::sniff(&tone), Some(AudioFormat::Wav));
     assert_eq!(store.mirror_summary(), (0, 1));
     assert!(store.serve(&hash).is_ok());
+}
+
+/// A restart with `--ipfs-api` must offer what is already stored, not only what is published later.
+#[tokio::test]
+async fn a_restart_offers_the_stored_library_to_ipfs() {
+    let outcome = tokio::time::timeout(BOUND, mirror_existing()).await;
+    outcome.expect("the startup mirror must complete within the bound")
+}
+
+async fn mirror_existing() {
+    let (addr, seen) = stub(
+        "HTTP/1.1 200 OK\r\nContent-Length: 47\r\n\r\n{\"Hash\":\"bafystart\",\"Name\":\"audio\"}\r\n".into(),
+        2,
+    )
+    .await;
+
+    // Build a store as a previous run would have left it, then attach a mirror.
+    let mut store = AudioStore::default();
+    for seed in [11u64, 12] {
+        store
+            .accept(wav::generate(seed, wav::Sound::Noise), None)
+            .await
+            .expect("seed");
+    }
+    assert_eq!(
+        store.mirror_summary(),
+        (0, 0),
+        "no mirror before one is configured"
+    );
+
+    store.set_ipfs(Some(IpfsPublisher::new(addr)));
+    let offered = store.mirror_existing(Duration::from_secs(10)).await;
+    assert_eq!(offered, 2, "every held item must be offered");
+    assert_eq!(store.mirror_summary(), (2, 0));
+    assert!(
+        seen.lock().unwrap().len() > 0,
+        "the stub must have received the audio"
+    );
+}
+
+/// The pass is bounded as a whole, so a store must not hold startup open forever behind a mirror
+/// that answers nothing.
+#[tokio::test]
+async fn the_startup_mirror_is_bounded_as_a_whole() {
+    let outcome = tokio::time::timeout(BOUND, bounded_mirror()).await;
+    outcome.expect("the bounded mirror must complete within the bound")
+}
+
+async fn bounded_mirror() {
+    // A listener that accepts and then never replies.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind a silent stub");
+    let addr = listener.local_addr().expect("stub addr").port();
+    tokio::spawn(async move {
+        // Hold the accepted stream open without replying. Dropping it would close the connection,
+        // and the client would see EOF rather than a stall.
+        if let Ok(Ok((stream, _))) =
+            tokio::time::timeout(Duration::from_secs(10), listener.accept()).await
+        {
+            let _stream = stream;
+            std::future::pending::<()>().await;
+        }
+    });
+
+    let mut store = AudioStore::default();
+    store
+        .accept(wav::generate(13, wav::Sound::Tone), None)
+        .await
+        .expect("seed");
+    store.set_ipfs(Some(IpfsPublisher::new(format!("127.0.0.1:{addr}"))));
+
+    let started = std::time::Instant::now();
+    let offered = store.mirror_existing(Duration::from_millis(200)).await;
+    assert_eq!(
+        offered, 0,
+        "a mirror that never answers must not be counted as offered"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "the whole pass must stop at its budget, not at each call's timeout"
+    );
 }

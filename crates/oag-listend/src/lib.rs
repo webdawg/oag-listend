@@ -38,6 +38,7 @@ pub mod wav;
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 pub use protocol::{Request, Response};
 pub use server::ListendServer;
@@ -307,6 +308,10 @@ pub enum MirrorOutcome {
 /// How many mirror outcomes are kept. Enough to read, small enough that a long run cannot grow it.
 const MIRROR_LOG_LIMIT: usize = 64;
 
+/// The whole startup mirror pass is bounded by this, so a large store cannot hold the daemon's
+/// startup open indefinitely.
+pub const STARTUP_MIRROR_BUDGET: Duration = Duration::from_secs(30);
+
 /// The default store bound. Generous for a daemon, small enough that a misbehaving publisher
 /// cannot fill a disk through it.
 pub const DEFAULT_MAX_BYTES: usize = 1024 * 1024 * 1024;
@@ -492,18 +497,7 @@ impl AudioStore {
         }
         // Offer the same bytes to IPFS, best-effort, once they are durable here. A mirror failure
         // is recorded, never propagated: losing a copy must not lose the audio.
-        let ipfs = self.ipfs.clone();
-        if let Some(ipfs) = ipfs {
-            let content_hash = item.content_hash.clone();
-            let outcome = match ipfs.add(&item.bytes).await {
-                Ok(cid) => MirrorOutcome::Mirrored { content_hash, cid },
-                Err(e) => MirrorOutcome::Failed {
-                    content_hash,
-                    reason: e.to_string(),
-                },
-            };
-            self.record_mirror(outcome);
-        }
+        self.offer_to_ipfs(&item.content_hash, &item.bytes).await;
         let hash = self.publish(item);
         // Unlink what eviction pushed out, off the lock. A failed unlink is best-effort, exactly
         // as the synchronous version was; the item is gone from the index either way.
@@ -570,6 +564,54 @@ impl AudioStore {
             }
         }
         (ok, failed)
+    }
+
+    /// Offer bytes to IPFS and record what happened. Never fails the caller.
+    async fn offer_to_ipfs(&mut self, content_hash: &str, bytes: &[u8]) {
+        let ipfs = self.ipfs.clone();
+        let Some(ipfs) = ipfs else { return };
+        let outcome = match ipfs.add(bytes).await {
+            Ok(cid) => MirrorOutcome::Mirrored {
+                content_hash: content_hash.to_string(),
+                cid,
+            },
+            Err(e) => MirrorOutcome::Failed {
+                content_hash: content_hash.to_string(),
+                reason: e.to_string(),
+            },
+        };
+        self.record_mirror(outcome);
+    }
+
+    /// Offer everything already held to IPFS. A restart with `--ipfs-api` would otherwise mirror
+    /// only audio published after it started, and an existing library would never reach IPFS.
+    ///
+    /// Bounded as a whole, because a large store must not hold startup open indefinitely: each
+    /// item still has its own per-call bound, and the overall deadline stops the pass. Items not
+    /// reached before the deadline are simply left for their next change.
+    pub async fn mirror_existing(&mut self, budget: Duration) -> usize {
+        let items: Vec<(String, Arc<AudioItem>)> = self
+            .items
+            .values()
+            .map(|i| (i.content_hash.clone(), Arc::clone(i)))
+            .collect();
+        let mut offered = 0usize;
+        let deadline = std::time::Instant::now() + budget;
+        for (content_hash, item) in items {
+            let remaining = match deadline.checked_duration_since(std::time::Instant::now()) {
+                Some(remaining) if !remaining.is_zero() => remaining,
+                _ => break,
+            };
+            // Each item is bounded by what is left, so the whole pass cannot exceed the budget.
+            if tokio::time::timeout(remaining, self.offer_to_ipfs(&content_hash, &item.bytes))
+                .await
+                .is_err()
+            {
+                break;
+            }
+            offered += 1;
+        }
+        offered
     }
 
     fn record_mirror(&mut self, outcome: MirrorOutcome) {

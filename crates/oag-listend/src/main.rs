@@ -169,6 +169,15 @@ async fn main() {
     if let Some(addr) = &args.ipfs_api {
         store.set_ipfs(Some(oag_listend::ipfs::IpfsPublisher::new(addr.clone())));
         println!("offering accepted audio to IPFS at {addr} (best-effort)");
+        // Audio already on disk would otherwise never reach IPFS: only publishes made after this
+        // daemon started would be mirrored.
+        let held = store.len();
+        if held > 0 {
+            let offered = store
+                .mirror_existing(oag_listend::STARTUP_MIRROR_BUDGET)
+                .await;
+            println!("  offered {offered} of {held} stored item(s) to IPFS");
+        }
     }
     let store = Arc::new(Mutex::new(store));
 

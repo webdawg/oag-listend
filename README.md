@@ -57,6 +57,10 @@ items were mirrored and any failures, with each CID:
       ipfs mirror: 1 mirrored, 0 failed
         5f1a88dee8bd40af -> bafywired
 
+A restart with `--ipfs-api` also offers what is already stored, not only audio published after it
+started, so an existing library reaches IPFS too; that pass is bounded as a whole so a large store
+cannot hold startup open.
+
 This client has been tested against a stub that mimics `/api/v0/add`; it has **not** been tested
 against a real Kubo node, and it does not decode chunked replies. See `SPEC.md`. Then exchange audio with it over the native protocol:
 
@@ -127,7 +131,7 @@ address the daemon prints a note saying so. Use `--listen 127.0.0.1:...` to keep
 
 ## Status
 
-**Serves, and survives a restart.** Four carriers are live and tested: 60 unit tests plus 42
+**Serves, and survives a restart.** Four carriers are live and tested: 60 unit tests plus 44
 end-to-end tests (`cargo test -p oag-listend`). The store mutex covers lookup and insert, not byte
 copies or disk writes, so one slow client does not stall the others. Runs as a systemd service
 (`scripts/oag-listend.service`) and shuts down cleanly on SIGINT and SIGTERM. The native protocol, HTTP, UDP, and the Unix socket share one store,

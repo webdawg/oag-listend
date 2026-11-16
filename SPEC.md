@@ -253,6 +253,11 @@ the bytes are written locally first, and a mirror failure is **recorded, never p
 copy must not lose the audio. The last 64 outcomes are retained and printed at shutdown, with each
 CID (`ipfs mirror: N mirrored, M failed`, then one line per outcome).
 
+On startup with `--ipfs-api`, everything already held is offered too -- a restart would otherwise
+mirror only audio published afterwards, and an existing library would never reach IPFS. That pass is
+bounded as a whole (`STARTUP_MIRROR_BUDGET`, 30 s) so a large store cannot hold startup open, while
+each item keeps its own per-call bound.
+
 The client hand-rolls `POST /api/v0/add` as multipart form data and reads `Hash` from the reply,
 with a 10 s bound per read and write and a 64 KiB cap on the reply. It has been tested against a
 stub that mimics Kubo's add endpoint, end to end through `--ipfs-api`; it has **not** been tested
