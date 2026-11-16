@@ -238,7 +238,9 @@ impl<'a> Reader<'a> {
         if s.len() != HASH_LEN || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(WireError::BadHash);
         }
-        Ok(s)
+        // Hex digests are case-insensitive; the store keys on the lowercase form, so an
+        // uppercased hash a client copied from somewhere still resolves.
+        Ok(s.to_ascii_lowercase())
     }
 
     fn remaining(&self) -> usize {
@@ -523,6 +525,20 @@ mod tests {
         assert_eq!(
             decode_request(&[OP_FETCH, 0, 3, b'a', b'b', b'c']),
             Err(WireError::BadHash)
+        );
+    }
+
+    #[test]
+    fn an_uppercased_hash_resolves() {
+        let lower = "ab".repeat(32);
+        let upper = lower.to_ascii_uppercase();
+        let mut body = vec![OP_FETCH];
+        put_str(&mut body, &upper);
+        assert_eq!(
+            decode_request(&body).unwrap(),
+            Request::Fetch {
+                content_hash: lower
+            }
         );
     }
 

@@ -813,6 +813,16 @@ async fn ping_http() {
     let hash = oag_listend::AudioItem::new(body.to_vec(), None).content_hash;
     assert!(head_contains(&response, &format!("etag: \"{hash}\"")));
 
+    // An uppercased hash resolves too -- hex digests are case-insensitive.
+    let upper = format!("/audio/{}", hash.to_ascii_uppercase());
+    let upper_response = http(
+        addr,
+        &format!("GET {upper} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"),
+    )
+    .await;
+    assert_eq!(status_of(&upper_response), 200, "{}", String::from_utf8_lossy(&upper_response));
+    assert_eq!(body_of(&upper_response), body);
+
     // The liveness sound ranges like any other served audio.
     let ranged = http(
         addr,

@@ -459,7 +459,9 @@ async fn route(request: HttpRequest, store: &Arc<Mutex<AudioStore>>) -> HttpResp
             response
         }
         ("GET", path) if path.starts_with("/audio/") => {
-            let hash = &path["/audio/".len()..];
+            // Hex digests are case-insensitive; normalise so an uppercased hash still resolves.
+            let hash = path["/audio/".len()..].to_ascii_lowercase();
+            let hash = hash.as_str();
             if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
                 return not_found();
             }
