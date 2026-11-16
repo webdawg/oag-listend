@@ -178,3 +178,79 @@ async fn serve() {
         "a killed daemon reports the signal, not a clean exit: {status}"
     );
 }
+
+/// `--check` is the operator's way to verify a store without serving it. It must load the
+/// content-addressed directory, report what it holds, and treat a file whose bytes no longer match
+/// its name as skipped rather than served.
+#[test]
+fn check_loads_the_store_and_reports_what_it_holds() {
+    let dir = std::env::temp_dir().join(format!(
+        "oag-listend-check-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("make the store directory");
+
+    // One genuine item, written under its own hash with its media-type sidecar.
+    let tone = oag_listend::wav::generate(5, oag_listend::wav::Sound::Tone);
+    let item = oag_listend::AudioItem::new(tone.clone(), Some("audio/wav".to_string()));
+    std::fs::write(dir.join(&item.content_hash), &tone).expect("write audio");
+    std::fs::write(
+        dir.join(format!("{}.json", item.content_hash)),
+        b"audio/wav",
+    )
+    .expect("write sidecar");
+
+    let run_check = || {
+        let output = std::process::Command::new(binary())
+            .arg("--check")
+            .arg("--dir")
+            .arg(&dir)
+            .arg("--max-bytes")
+            .arg("1048576")
+            .output()
+            .expect("run --check");
+        assert!(
+            output.status.success(),
+            "--check must succeed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+
+    let stdout = run_check();
+    assert!(stdout.contains("store ok"), "reports success: {stdout}");
+    assert!(
+        stdout.contains("loaded 1"),
+        "counts the real item: {stdout}"
+    );
+    assert!(
+        stdout.contains("skipped 0"),
+        "nothing was skipped: {stdout}"
+    );
+    assert!(
+        stdout.contains("evicted 0"),
+        "nothing was evicted: {stdout}"
+    );
+    assert!(
+        stdout.contains("items, ") && stdout.contains("bytes"),
+        "reports the store's size and bound: {stdout}"
+    );
+
+    // Corrupt the file out of band. Its name no longer matches its bytes, so it must be skipped,
+    // never served.
+    std::fs::write(dir.join(&item.content_hash), b"this is not audio").expect("corrupt");
+    let stdout = run_check();
+    assert!(
+        stdout.contains("loaded 0"),
+        "a bad file is not loaded: {stdout}"
+    );
+    assert!(
+        stdout.contains("skipped 1"),
+        "and is reported as skipped: {stdout}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
