@@ -322,3 +322,87 @@ async fn oversized_frame() {
         .expect("join")
         .expect("run");
 }
+
+/// `list known hashes` is an operation with an offset and a limit, so a client can walk the store
+/// without holding it all. Each page must report the store's real size and where it starts, and a
+/// page past the end must be empty rather than wrap or repeat.
+#[tokio::test]
+async fn the_native_listing_pages() {
+    let outcome = tokio::time::timeout(BOUND, listing_pages()).await;
+    outcome.expect("the listing exchange must complete within the bound")
+}
+
+async fn listing_pages() {
+    let (server, addr) =
+        ListendServer::bind_shared("127.0.0.1:0", Arc::new(Mutex::new(AudioStore::default())))
+            .await
+            .expect("bind");
+    let shutdown = server.shutdown_handle();
+    let run = tokio::spawn(async move { server.run().await });
+
+    let mut stream = TcpStream::connect(addr).await.expect("connect");
+    let mut hashes = Vec::new();
+    for seed in [4u64, 9, 15] {
+        send(
+            &mut stream,
+            &Request::Publish {
+                declared_media_type: Some("audio/wav".into()),
+                bytes: wav::generate(seed, wav::Sound::Noise),
+            },
+        )
+        .await;
+        match recv(&mut stream).await {
+            Response::Published { content_hash } => hashes.push(content_hash),
+            other => panic!("expected Published, got {other:?}"),
+        }
+    }
+    // The listing is sorted by hash, so sort the published hashes the same way before paging.
+    hashes.sort();
+
+    let page = |offset, limit| Request::List { offset, limit };
+    send(&mut stream, &page(0, 100)).await;
+    assert_eq!(
+        recv(&mut stream).await,
+        Response::Listing {
+            content_hashes: hashes.clone(),
+            total: 3,
+            offset: 0
+        }
+    );
+    send(&mut stream, &page(1, 1)).await;
+    assert_eq!(
+        recv(&mut stream).await,
+        Response::Listing {
+            content_hashes: hashes[1..2].to_vec(),
+            total: 3,
+            offset: 1
+        }
+    );
+    // A page that runs past the end stops there.
+    send(&mut stream, &page(2, 100)).await;
+    assert_eq!(
+        recv(&mut stream).await,
+        Response::Listing {
+            content_hashes: hashes[2..3].to_vec(),
+            total: 3,
+            offset: 2
+        }
+    );
+    // An offset beyond the store is clamped to the end and answers empty.
+    send(&mut stream, &page(99, 5)).await;
+    assert_eq!(
+        recv(&mut stream).await,
+        Response::Listing {
+            content_hashes: Vec::new(),
+            total: 3,
+            offset: 3
+        }
+    );
+
+    shutdown.shutdown();
+    tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .expect("shutdown bound")
+        .expect("join")
+        .expect("run");
+}
