@@ -40,8 +40,11 @@ One additional individual directive is implemented:
 
 The daemon binds, prints four generated items -- silence, tone, noise, and the canonical ping -- and
 serves until interrupted. The generated set seeds an empty store only -- a restart with `--dir` does not add more -- and a generated sound the
-store refuses is printed as a rejection rather than dropped. Then exchange audio
-with it over the native protocol:
+store refuses is printed as a rejection rather than dropped.
+
+`--seed U64` chooses the generated sounds (the default comes from the clock and process id);
+`--no-generate` skips them entirely, for an operator who wants the daemon to serve only what it is
+given. Then exchange audio with it over the native protocol:
 
     cargo run -p oag-listend --example push_pull -- --addr 127.0.0.1:7100
     cargo run -p oag-listend --example push_pull -- --udp --addr 127.0.0.1:7120
