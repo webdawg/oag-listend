@@ -164,20 +164,22 @@ job; a long recording belongs on TCP or HTTP.
 `--dir PATH` makes the store content-addressed: `<PATH>/<hash>` is the audio, `<PATH>/<hash>.json`
 is the declared media type. An accepted item is written before it is answerable -- a write failure
 is a refusal, not a silent loss. The write is asynchronous (`tokio::fs`), so a slow disk delays the
-answer instead of stalling every carrier's executor thread; the eviction unlink stays synchronous,
-being metadata-only. On startup every entry is re-checked: the name must be the BLAKE3
-of the bytes and the bytes must still sniff as audio, so a hand-placed file cannot smuggle anything
-in. The load is reported as `loaded` (entries now held), `skipped` (not read, or rejected),
-`evicted` (read and accepted, then pushed out by the byte bound while later entries loaded), and
-`truncated` (the directory held more than the `MAX_LOAD_ENTRIES` the load will consider) -- never
-silent, and never counting an evicted entry as held. Only regular files are read -- a FIFO or
-device named like a hash would block forever, and a directory would error. A sidecar larger than
-4 KiB is not a media type and is ignored rather than read into memory.
+answer instead of stalling every carrier's executor thread. The eviction unlink is asynchronous
+too, and is taken off the lock: a slow disk must not stall every other client's accept.
+
+On startup every entry is re-checked: the name must be the BLAKE3 of the bytes and the bytes must
+still sniff as audio, so a hand-placed file cannot smuggle anything in. The load is reported as
+`loaded` (entries now held), `skipped` (not read, or rejected), `evicted` (read and accepted, then
+pushed out by the byte bound while later entries loaded), and `truncated` (the directory held more
+than the `MAX_LOAD_ENTRIES` the load will consider) -- never silent, and never counting an evicted
+entry as held. Only regular files are read -- a FIFO or device named like a hash would block
+forever, and a directory would error. A sidecar larger than 4 KiB is not a media type and is ignored
+rather than read into memory.
 
 Eviction unlinks the file, so the directory and the store agree on what is held and the
-`--max-bytes` bound is a bound on disk too, not just memory. The unlink is taken off the lock and
-done asynchronously after the publish returns; a load drains it inline, since startup has no lock to
-protect. If a file is removed out of band, a
+`--max-bytes` bound is a bound on disk too, not just memory. Unlinking stays off the lock and
+awaited inside `accept`, so by the time a publish is answered the file it pushed out is already
+gone; a load drains it inline, since startup has no lock to protect. If a file is removed out of band, a
 republish of the same bytes restores it, so an item cannot silently become one that the next start
 will lose; the existence check costs a syscall only on a duplicate publish, never on the read path. Without `--dir` the store is in-memory.
 
