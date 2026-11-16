@@ -227,6 +227,63 @@ mod tests {
     }
 
     #[test]
+    fn the_container_sizes_agree_with_the_bytes() {
+        // A player trusts the size fields, not the magic bytes. If the RIFF or data size disagrees
+        // with the actual bytes, the daemon would sniff it, serve it, and every real player would
+        // reject it -- so validity means the sizes are right, not just that it says WAV.
+        for kind in [Sound::Silence, Sound::Tone, Sound::Noise] {
+            let seed = 11u64;
+            let bytes = generate(seed, kind);
+
+            let riff = u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize;
+            assert_eq!(
+                riff,
+                bytes.len() - 8,
+                "{kind:?}: the RIFF size must cover the rest of the file"
+            );
+
+            let fmt_size = u32::from_le_bytes(bytes[16..20].try_into().unwrap());
+            let format = u16::from_le_bytes([bytes[20], bytes[21]]);
+            let rate = u32::from_le_bytes(bytes[24..28].try_into().unwrap());
+            let byte_rate = u32::from_le_bytes(bytes[28..32].try_into().unwrap());
+            let block_align = u16::from_le_bytes([bytes[32], bytes[33]]);
+            assert_eq!(fmt_size, 16, "{kind:?}: a PCM fmt chunk is 16 bytes");
+            assert_eq!(format, 1, "{kind:?}: format 1 is PCM");
+            assert_eq!(rate, SAMPLE_RATE);
+            assert_eq!(
+                byte_rate,
+                SAMPLE_RATE * 2,
+                "{kind:?}: 16-bit mono byte rate"
+            );
+            assert_eq!(block_align, 2, "{kind:?}: 16-bit mono block align");
+
+            let data_len = u32::from_le_bytes(bytes[40..44].try_into().unwrap()) as usize;
+            assert_eq!(
+                data_len,
+                bytes.len() - 44,
+                "{kind:?}: the data size must cover the payload"
+            );
+            assert_eq!(data_len % 2, 0, "{kind:?}: 16-bit samples");
+            assert_eq!(
+                data_len / 2,
+                sample_count_for(seed),
+                "{kind:?}: the sample count must match the seed's duration"
+            );
+        }
+    }
+
+    /// The canonical ping is served on every carrier, so its container must be equally well formed.
+    #[test]
+    fn the_canonical_ping_container_sizes_agree() {
+        let bytes = twinkle();
+        let riff = u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize;
+        assert_eq!(riff, bytes.len() - 8);
+        let data_len = u32::from_le_bytes(bytes[40..44].try_into().unwrap()) as usize;
+        assert_eq!(data_len, bytes.len() - 44);
+        assert_eq!(data_len % 2, 0);
+    }
+
+    #[test]
     fn the_canonical_ping_is_a_deterministic_wav() {
         let a = twinkle();
         let b = twinkle();
