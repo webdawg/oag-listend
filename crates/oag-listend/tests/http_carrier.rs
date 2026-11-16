@@ -820,7 +820,12 @@ async fn ping_http() {
         &format!("GET {upper} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"),
     )
     .await;
-    assert_eq!(status_of(&upper_response), 200, "{}", String::from_utf8_lossy(&upper_response));
+    assert_eq!(
+        status_of(&upper_response),
+        200,
+        "{}",
+        String::from_utf8_lossy(&upper_response)
+    );
     assert_eq!(body_of(&upper_response), body);
 
     // The liveness sound ranges like any other served audio.
