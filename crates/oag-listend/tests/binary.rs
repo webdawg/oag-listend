@@ -25,6 +25,53 @@ fn free_port() -> u16 {
     listener.local_addr().expect("reserved port").port()
 }
 
+fn temp_dir(name: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "oag-listend-binary-{name}-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ))
+}
+
+/// Read the daemon's stdout until it announces its bound address, and give the handle back so a
+/// caller can read whatever follows.
+///
+/// A bind failure exits and prints the reason instead of announcing, so polling for exit turns
+/// that into a panic rather than a hang past the deadline.
+async fn announce(child: &mut tokio::process::Child) -> (Vec<u8>, tokio::process::ChildStdout) {
+    let mut stdout = child.stdout.take().expect("stdout");
+    let mut announced = Vec::new();
+    let mut chunk = [0u8; 1024];
+    let deadline = Instant::now() + BOUND;
+    loop {
+        assert!(
+            Instant::now() < deadline,
+            "the daemon never announced its address; output was {}",
+            String::from_utf8_lossy(&announced)
+        );
+        if let Some(status) = child.try_wait().expect("poll the daemon") {
+            panic!(
+                "the daemon exited before announcing: {status}; output was {}",
+                String::from_utf8_lossy(&announced)
+            );
+        }
+        let n = tokio::time::timeout(Duration::from_millis(200), stdout.read(&mut chunk))
+            .await
+            .expect("a read within the bound")
+            .expect("read stdout");
+        if n == 0 {
+            break;
+        }
+        announced.extend_from_slice(&chunk[..n]);
+        if String::from_utf8_lossy(&announced).contains("listening on") {
+            break;
+        }
+    }
+    (announced, stdout)
+}
+
 #[test]
 fn version_and_help_work_and_usage_errors_exit_two() {
     let version = std::process::Command::new(binary())
@@ -83,9 +130,10 @@ fn version_and_help_work_and_usage_errors_exit_two() {
         );
     }
 
-    // A usage error is a typed exit 2 with a message, never a panic. Note that *omitting* --listen
-    // is not one: the documented default is 0.0.0.0:7100, so that case starts the daemon instead of
-    // refusing to run.
+    // A usage error is a typed exit 2 with a message, never a panic.
+    //
+    // Note that *omitting* --listen is not one: the documented default is 0.0.0.0:7100, so that case
+    // starts the daemon instead of refusing to run.
     for args in [
         vec!["--seed", "not-a-number"],
         vec!["--max-bytes", "nope"],
@@ -113,115 +161,12 @@ fn version_and_help_work_and_usage_errors_exit_two() {
     }
 }
 
-/// Turn the real binary on, exchange audio with it over TCP, then stop it. The daemon announces its
-/// bound address on stdout, and the test waits for that line instead of sleeping.
-#[tokio::test]
-async fn the_binary_serves_audio_until_it_is_stopped() {
-    let outcome = tokio::time::timeout(BOUND, serve()).await;
-    outcome.expect("the binary exchange must complete within the bound")
-}
-
-async fn serve() {
-    let port = free_port();
-    let addr = format!("127.0.0.1:{port}");
-    let mut child = Command::new(binary())
-        .arg("--listen")
-        .arg(&addr)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn the daemon");
-    let mut stdout = child.stdout.take().expect("stdout");
-
-    // Read until the daemon says what it bound. A bind failure exits and prints the reason instead,
-    // so this cannot hang past the deadline.
-    let mut announced = Vec::new();
-    let mut chunk = [0u8; 1024];
-    let deadline = Instant::now() + BOUND;
-    loop {
-        assert!(
-            Instant::now() < deadline,
-            "the daemon never announced its address; output was {}",
-            String::from_utf8_lossy(&announced)
-        );
-        if let Some(status) = child.try_wait().expect("poll the daemon") {
-            panic!(
-                "the daemon exited before announcing: {status}; output was {}",
-                String::from_utf8_lossy(&announced)
-            );
-        }
-        let n = tokio::time::timeout(Duration::from_millis(200), stdout.read(&mut chunk))
-            .await
-            .expect("a read within the bound")
-            .expect("read stdout");
-        if n == 0 {
-            break;
-        }
-        announced.extend_from_slice(&chunk[..n]);
-        if String::from_utf8_lossy(&announced).contains("listening on") {
-            break;
-        }
-    }
-
-    let mut stream = TcpStream::connect(&addr)
-        .await
-        .expect("connect to the daemon");
-    let hello = protocol::encode_frame(&protocol::encode_request(&Request::Hello));
-    stream.write_all(&hello).await.expect("write hello");
-    stream.flush().await.expect("flush");
-    let mut prefix = [0u8; 4];
-    stream.read_exact(&mut prefix).await.expect("prefix");
-    let len = u32::from_be_bytes(prefix) as usize;
-    let mut body = vec![0u8; len];
-    stream.read_exact(&mut body).await.expect("body");
-    match protocol::decode_response(&body).expect("decode") {
-        Response::Hello {
-            protocol_version, ..
-        } => assert_eq!(protocol_version, protocol::PROTOCOL_VERSION),
-        other => panic!("expected Hello, got {other:?}"),
-    }
-
-    // The daemon publishes generated sounds at startup, so a fetch-only client receives audio.
-    let tone = oag_listend::wav::generate(2026, oag_listend::wav::Sound::Tone);
-    let publish = protocol::encode_frame(&protocol::encode_request(&Request::Publish {
-        declared_media_type: Some("audio/wav".into()),
-        bytes: tone.clone(),
-    }));
-    stream.write_all(&publish).await.expect("write publish");
-    stream.flush().await.expect("flush");
-    stream.read_exact(&mut prefix).await.expect("prefix");
-    let len = u32::from_be_bytes(prefix) as usize;
-    let mut body = vec![0u8; len];
-    stream.read_exact(&mut body).await.expect("body");
-    let hash = match protocol::decode_response(&body).expect("decode") {
-        Response::Published { content_hash } => content_hash,
-        other => panic!("expected Published, got {other:?}"),
-    };
-    assert!(oag_listend::AudioItem::verify(&hash, &tone));
-
-    child.kill().await.expect("stop the daemon");
-    let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
-        .await
-        .expect("the daemon must exit once killed")
-        .expect("wait");
-    assert!(
-        status.success() || status.code().is_none(),
-        "a killed daemon reports the signal, not a clean exit: {status}"
-    );
-}
-
 /// `--check` is the operator's way to verify a store without serving it. It must load the
 /// content-addressed directory, report what it holds, and treat a file whose bytes no longer match
 /// its name as skipped rather than served.
 #[test]
 fn check_loads_the_store_and_reports_what_it_holds() {
-    let dir = std::env::temp_dir().join(format!(
-        "oag-listend-check-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let dir = temp_dir("check");
     std::fs::create_dir_all(&dir).expect("make the store directory");
 
     // One genuine item, written under its own hash with its media-type sidecar.
@@ -281,6 +226,133 @@ fn check_loads_the_store_and_reports_what_it_holds() {
     assert!(
         stdout.contains("skipped 1"),
         "and is reported as skipped: {stdout}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Turn the real binary on, exchange audio with it over TCP, then stop it. The daemon announces its
+/// bound address on stdout, and the test waits for that line instead of sleeping.
+#[tokio::test]
+async fn the_binary_serves_audio_until_it_is_stopped() {
+    let outcome = tokio::time::timeout(BOUND, serve()).await;
+    outcome.expect("the binary exchange must complete within the bound")
+}
+
+async fn serve() {
+    let port = free_port();
+    let addr = format!("127.0.0.1:{port}");
+    let mut child = Command::new(binary())
+        .arg("--listen")
+        .arg(&addr)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn the daemon");
+    let (_announced, _stdout) = announce(&mut child).await;
+
+    let mut stream = TcpStream::connect(&addr)
+        .await
+        .expect("connect to the daemon");
+    let hello = protocol::encode_frame(&protocol::encode_request(&Request::Hello));
+    stream.write_all(&hello).await.expect("write hello");
+    stream.flush().await.expect("flush");
+    let mut prefix = [0u8; 4];
+    stream.read_exact(&mut prefix).await.expect("prefix");
+    let len = u32::from_be_bytes(prefix) as usize;
+    let mut body = vec![0u8; len];
+    stream.read_exact(&mut body).await.expect("body");
+    match protocol::decode_response(&body).expect("decode") {
+        Response::Hello {
+            protocol_version, ..
+        } => assert_eq!(protocol_version, protocol::PROTOCOL_VERSION),
+        other => panic!("expected Hello, got {other:?}"),
+    }
+
+    // The daemon publishes generated sounds at startup, so a fetch-only client receives audio.
+    let tone = oag_listend::wav::generate(2026, oag_listend::wav::Sound::Tone);
+    let publish = protocol::encode_frame(&protocol::encode_request(&Request::Publish {
+        declared_media_type: Some("audio/wav".into()),
+        bytes: tone.clone(),
+    }));
+    stream.write_all(&publish).await.expect("write publish");
+    stream.flush().await.expect("flush");
+    stream.read_exact(&mut prefix).await.expect("prefix");
+    let len = u32::from_be_bytes(prefix) as usize;
+    let mut body = vec![0u8; len];
+    stream.read_exact(&mut body).await.expect("body");
+    let hash = match protocol::decode_response(&body).expect("decode") {
+        Response::Published { content_hash } => content_hash,
+        other => panic!("expected Published, got {other:?}"),
+    };
+    assert!(oag_listend::AudioItem::verify(&hash, &tone));
+
+    child.kill().await.expect("stop the daemon");
+    let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
+        .await
+        .expect("the daemon must exit once killed")
+        .expect("wait");
+    assert!(
+        status.success() || status.code().is_none(),
+        "a killed daemon reports the signal, not a clean exit: {status}"
+    );
+}
+
+/// SIGTERM is what `systemctl stop` sends, so it must be a clean stop: the process exits 0, says it
+/// is shutting down, and removes the Unix socket rather than leaving a dead file for the next start.
+#[tokio::test]
+async fn sigterm_is_a_clean_stop() {
+    let outcome = tokio::time::timeout(BOUND, clean_stop()).await;
+    outcome.expect("the shutdown exchange must complete within the bound")
+}
+
+async fn clean_stop() {
+    let dir = temp_dir("sigterm");
+    std::fs::create_dir_all(&dir).expect("make the runtime directory");
+    let sock = dir.join("audio.sock");
+
+    let mut child = Command::new(binary())
+        .arg("--listen")
+        .arg("127.0.0.1:0")
+        .arg("--unix")
+        .arg(&sock)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn the daemon");
+    let (_announced, mut stdout) = announce(&mut child).await;
+    assert!(sock.exists(), "the daemon must create its Unix socket");
+
+    let pid = child.id().expect("the daemon's pid");
+    std::process::Command::new("kill")
+        .arg("-TERM")
+        .arg(pid.to_string())
+        .status()
+        .expect("send SIGTERM");
+
+    let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
+        .await
+        .expect("the daemon must exit after SIGTERM")
+        .expect("wait");
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "SIGTERM must be a clean exit 0, got {status}"
+    );
+    assert!(
+        !sock.exists(),
+        "a clean stop must remove the Unix socket for the next start"
+    );
+
+    let mut said = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), stdout.read_to_end(&mut said))
+        .await
+        .expect("reading the rest of stdout after exit must terminate")
+        .expect("read stdout");
+    let said = String::from_utf8_lossy(&said);
+    assert!(
+        said.contains("shutting down"),
+        "the daemon must say it is stopping: {said}"
     );
 
     let _ = std::fs::remove_dir_all(&dir);
