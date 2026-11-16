@@ -91,6 +91,7 @@ async fn round_trip_test(path: &std::path::Path) {
         Response::Audio {
             content_hash,
             bytes,
+            cid: _,
         } => {
             assert!(!bytes.is_empty());
             assert!(AudioItem::verify(&content_hash, &bytes));

@@ -85,6 +85,7 @@ async fn round_trip() {
         Response::Audio {
             content_hash,
             bytes,
+            cid: _,
         } => {
             assert_eq!(content_hash, hash);
             assert_eq!(bytes, tone, "the datagram must carry the same audio");
@@ -97,6 +98,7 @@ async fn round_trip() {
         Response::Audio {
             content_hash,
             bytes,
+            cid: _,
         } => {
             assert!(!bytes.is_empty(), "a ping must never be an empty pong");
             assert_eq!(

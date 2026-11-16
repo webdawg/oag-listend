@@ -263,6 +263,7 @@ pub(crate) async fn handle(request: Request, store: &Arc<Mutex<AudioStore>>) -> 
             Response::Audio {
                 content_hash,
                 bytes,
+                cid: None,
             }
         }
         Request::List { offset, limit } => {
@@ -299,10 +300,19 @@ pub(crate) async fn handle(request: Request, store: &Arc<Mutex<AudioStore>>) -> 
             // Clone the handle under the lock, then copy the bytes after releasing it.
             let item = store.lock().await.serve(&content_hash).ok();
             match item {
-                Some(item) => Response::Audio {
-                    content_hash,
-                    bytes: item.bytes.clone(),
-                },
+                Some(item) => {
+                    // Where else these bytes live, if this daemon mirrors to IPFS.
+                    let cid = store
+                        .lock()
+                        .await
+                        .content_id(&content_hash)
+                        .map(str::to_string);
+                    Response::Audio {
+                        content_hash,
+                        bytes: item.bytes.clone(),
+                        cid,
+                    }
+                }
                 None => Response::NotFound { content_hash },
             }
         }
@@ -621,6 +631,7 @@ mod tests {
             Response::Audio {
                 content_hash: got,
                 bytes,
+                ..
             } => {
                 assert_eq!(got, content_hash);
                 assert_eq!(bytes, wav);

@@ -112,6 +112,7 @@ async fn restart(dir: &std::path::Path) {
         Response::Audio {
             content_hash,
             bytes,
+            cid: _,
         } => {
             assert_eq!(content_hash, hash);
             assert_eq!(

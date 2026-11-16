@@ -291,6 +291,9 @@ pub struct AudioStore {
     ipfs: Option<crate::ipfs::IpfsPublisher>,
     /// The most recent mirror outcomes, newest last, capped. Reported rather than swallowed.
     mirror_log: VecDeque<MirrorOutcome>,
+    /// The CID Kubo assigned to each mirrored item, keyed by content hash, so a client that fetches
+    /// audio can be told where else to find it. Dropped when the item is evicted.
+    mirror_cids: HashMap<String, String>,
 }
 
 /// What happened when an accepted item was offered to IPFS.
@@ -333,6 +336,7 @@ impl AudioStore {
             evicted: Vec::new(),
             ipfs: None,
             mirror_log: VecDeque::new(),
+            mirror_cids: HashMap::new(),
         }
     }
 
@@ -366,6 +370,7 @@ impl AudioStore {
             evicted: Vec::new(),
             ipfs: None,
             mirror_log: VecDeque::new(),
+            mirror_cids: HashMap::new(),
         };
         let mut report = LoadReport::default();
         let mut inserted = 0usize;
@@ -580,7 +585,15 @@ impl AudioStore {
                 reason: e.to_string(),
             },
         };
+        if let MirrorOutcome::Mirrored { content_hash, cid } = &outcome {
+            self.mirror_cids.insert(content_hash.clone(), cid.clone());
+        }
         self.record_mirror(outcome);
+    }
+
+    /// Where else this item can be fetched, if the daemon has offered it to IPFS.
+    pub fn content_id(&self, content_hash: &str) -> Option<&str> {
+        self.mirror_cids.get(content_hash).map(String::as_str)
     }
 
     /// Offer everything already held to IPFS. A restart with `--ipfs-api` would otherwise mirror
@@ -623,6 +636,7 @@ impl AudioStore {
 
     /// Remove an evicted item's file, so the directory and the store agree on what is held.
     fn forget(&mut self, content_hash: &str) {
+        self.mirror_cids.remove(content_hash);
         if let Some(dir) = &self.dir {
             self.evicted.push(dir.join(content_hash));
             self.evicted.push(dir.join(format!("{content_hash}.json")));
@@ -717,6 +731,7 @@ impl AudioStore {
             evicted: Vec::new(),
             ipfs: None,
             mirror_log: VecDeque::new(),
+            mirror_cids: HashMap::new(),
         }
     }
 }

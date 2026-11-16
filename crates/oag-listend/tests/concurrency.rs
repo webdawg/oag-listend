@@ -48,6 +48,7 @@ async fn publish_and_fetch(addr: std::net::SocketAddr, wav: Vec<u8>) -> String {
         Response::Audio {
             content_hash,
             bytes,
+            cid: _,
         } => {
             assert_eq!(content_hash, hash);
             assert_eq!(bytes, wav, "the bytes must come back exactly");

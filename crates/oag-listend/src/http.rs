@@ -483,9 +483,17 @@ async fn route(request: HttpRequest, store: &Arc<Mutex<AudioStore>>) -> HttpResp
             if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
                 return not_found();
             }
-            let item = match store.lock().await.serve(hash) {
-                Ok(item) => item,
-                Err(_) => return not_found(),
+            // Look up the item and, separately, where else it lives if this daemon mirrors to
+            // IPFS. Both are read under one short lock; the byte copies happen after it is dropped.
+            let (item, cid) = {
+                let store = store.lock().await;
+                match store.serve(hash) {
+                    Ok(item) => {
+                        let cid = store.content_id(hash).map(str::to_string);
+                        (item, cid)
+                    }
+                    Err(_) => return not_found(),
+                }
             };
             // The content type comes from the bytes, not from what the publisher claimed: a WAV
             // posted as application/x-www-form-urlencoded must still be served as audio.
@@ -557,6 +565,12 @@ async fn route(request: HttpRequest, store: &Arc<Mutex<AudioStore>>) -> HttpResp
                 }
             };
 
+            // Where else these bytes can be fetched, for a client that would rather ask IPFS.
+            if let Some(cid) = cid.as_deref() {
+                response
+                    .extra_headers
+                    .push(("X-IPFS-CID".to_string(), cid.to_string()));
+            }
             // A real filename, so a browser or player that saves the audio gets `<hash>.wav`
             // rather than a bare hash.
             if let Some(format) = AudioFormat::sniff(&item.bytes) {

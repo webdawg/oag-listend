@@ -114,6 +114,7 @@ async fn handle(datagram: &[u8], store: &Arc<Mutex<AudioStore>>) -> Option<Vec<u
             Response::Audio {
                 content_hash,
                 bytes,
+                cid: None,
             }
         }
         Request::List { offset, limit } => {
@@ -132,10 +133,18 @@ async fn handle(datagram: &[u8], store: &Arc<Mutex<AudioStore>>) -> Option<Vec<u
         Request::Fetch { content_hash } => {
             let item = store.lock().await.serve(&content_hash).ok();
             match item {
-                Some(item) => Response::Audio {
-                    content_hash,
-                    bytes: item.bytes.clone(),
-                },
+                Some(item) => {
+                    let cid = store
+                        .lock()
+                        .await
+                        .content_id(&content_hash)
+                        .map(str::to_string);
+                    Response::Audio {
+                        content_hash,
+                        bytes: item.bytes.clone(),
+                        cid,
+                    }
+                }
                 None => Response::NotFound { content_hash },
             }
         }
@@ -227,7 +236,8 @@ mod tests {
             fetched,
             Response::Audio {
                 content_hash: hash,
-                bytes: tone
+                bytes: tone,
+                cid: None,
             },
             "a tone must round-trip over the datagram carrier"
         );

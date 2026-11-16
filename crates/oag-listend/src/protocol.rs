@@ -5,6 +5,9 @@
 //! than audio. The operations are exactly: hello, publish audio, fetch audio by content hash,
 //! list known hashes, and ping (whose answer is audio). Nothing else is a request.
 //!
+//! A fetched item also carries the IPFS CID when the daemon mirrors to IPFS -- an optional trailing
+//! field, so a reply from a daemon that predates it is still decodable.
+//!
 //! Every frame is `u32` big-endian length followed by that many body bytes, and no body may
 //! exceed [`MAX_FRAME_BYTES`]. The length cap is enforced before the body is allocated, so a
 //! client cannot make the daemon allocate on its word.
@@ -106,10 +109,16 @@ pub enum Response {
         protocol_version: u16,
         item_count: usize,
     },
-    /// Audio bytes, with the hash they must verify against.
+    /// Audio bytes, with the hash they must verify against. `cid` is present only when this daemon
+    /// has also offered the item to IPFS; it is an additional address for the same bytes, never a
+    /// replacement for the hash.
+    ///
+    /// The field is appended after `bytes` and a decoder that stops after the declared length
+    /// leaves it unread, so a daemon that knows about it can talk to one that does not.
     Audio {
         content_hash: String,
         bytes: Vec<u8>,
+        cid: Option<String>,
     },
     /// The inbound rule refused these bytes. `reason` describes the refusal, never the bytes.
     Rejected {
@@ -322,11 +331,13 @@ pub fn encode_response(resp: &Response) -> Vec<u8> {
         Response::Audio {
             content_hash,
             bytes,
+            cid,
         } => {
             out.push(OP_RESP_AUDIO);
             put_str(&mut out, content_hash);
             put_u32(&mut out, bytes.len() as u32);
             out.extend_from_slice(bytes);
+            put_opt_str(&mut out, cid);
         }
         Response::Rejected { reason } => {
             out.push(OP_RESP_REJECTED);
@@ -377,9 +388,18 @@ pub fn decode_response(body: &[u8]) -> Result<Response, WireError> {
             if len > r.remaining() {
                 return Err(WireError::Truncated);
             }
+            let bytes = r.take(len)?.to_vec();
+            // The CID is an additive, optional field: a reply from a daemon that predates it ends
+            // here, and a truncated value is treated as absent rather than failing the decode.
+            let cid = if r.remaining() == 0 {
+                None
+            } else {
+                r.opt_string().ok().flatten()
+            };
             Ok(Response::Audio {
                 content_hash,
-                bytes: r.take(len)?.to_vec(),
+                bytes,
+                cid,
             })
         }
         OP_RESP_REJECTED => Ok(Response::Rejected {
@@ -451,6 +471,40 @@ mod tests {
         });
     }
 
+    /// The CID is additive: a reply carrying one decodes with it, and a reply from a daemon that
+    /// predates the field still decodes -- with no CID rather than as an error.
+    #[test]
+    fn an_audio_reply_with_or_without_a_cid_both_decode() {
+        let body = encode_response(&Response::Audio {
+            content_hash: "ab".repeat(32),
+            bytes: vec![1, 2, 3],
+            cid: Some("bafycid".into()),
+        });
+        assert_eq!(
+            decode_response(&body).unwrap(),
+            Response::Audio {
+                content_hash: "ab".repeat(32),
+                bytes: vec![1, 2, 3],
+                cid: Some("bafycid".into()),
+            }
+        );
+
+        // Hand-build the older shape: op, hash, length, bytes, and nothing after.
+        let mut old = vec![OP_RESP_AUDIO];
+        put_str(&mut old, &"ab".repeat(32));
+        put_u32(&mut old, 3);
+        old.extend_from_slice(&[1, 2, 3]);
+        assert_eq!(
+            decode_response(&old).unwrap(),
+            Response::Audio {
+                content_hash: "ab".repeat(32),
+                bytes: vec![1, 2, 3],
+                cid: None,
+            },
+            "a reply without the field must still decode"
+        );
+    }
+
     #[test]
     fn hello_carries_the_daemon_identity_and_a_future_name_still_decodes() {
         let hello = Response::Hello {
@@ -482,6 +536,7 @@ mod tests {
         roundtrip_response(&Response::Audio {
             content_hash: "cd".repeat(32),
             bytes: vec![9, 8, 7],
+            cid: Some("bafyround".into()),
         });
         roundtrip_response(&Response::Rejected {
             reason: "input is not audio".into(),

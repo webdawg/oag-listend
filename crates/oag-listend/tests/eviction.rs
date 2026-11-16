@@ -121,6 +121,7 @@ async fn run(dir: &std::path::Path) {
         Response::Audio {
             content_hash,
             bytes,
+            cid: _,
         } => {
             assert_eq!(content_hash, new_hash);
             assert_eq!(bytes, smaller, "the surviving item serves its own bytes");

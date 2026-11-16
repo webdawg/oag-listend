@@ -57,6 +57,10 @@ items were mirrored and any failures, with each CID:
       ipfs mirror: 1 mirrored, 0 failed
         5f1a88dee8bd40af -> bafywired
 
+A client that fetches audio is told where else it lives: the reply carries the CID when the item
+has been mirrored -- as `X-IPFS-CID` on HTTP, and as an optional trailing field on the native
+protocol's audio response (a daemon that predates it sends nothing, and still decodes).
+
 A restart with `--ipfs-api` also offers what is already stored, not only audio published after it
 started, so an existing library reaches IPFS too; that pass is bounded as a whole so a large store
 cannot hold startup open.
@@ -131,8 +135,9 @@ address the daemon prints a note saying so. Use `--listen 127.0.0.1:...` to keep
 
 ## Status
 
-**Serves, and survives a restart.** Four carriers are live and tested: 60 unit tests plus 44
-end-to-end tests (`cargo test -p oag-listend`). The store mutex covers lookup and insert, not byte
+**Serves, and survives a restart.** Five ways to reach the audio are live and tested: the native
+protocol over TCP, HTTP, UDP, a Unix socket, and an IPFS mirror -- 61 unit tests plus 45 end-to-end
+tests (`cargo test -p oag-listend`). The store mutex covers lookup and insert, not byte
 copies or disk writes, so one slow client does not stall the others. Runs as a systemd service
 (`scripts/oag-listend.service`) and shuts down cleanly on SIGINT and SIGTERM. The native protocol, HTTP, UDP, and the Unix socket share one store,
 and all were verified by hand: audio posted to HTTP came back byte-identical, `push_pull` verified

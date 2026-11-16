@@ -7,9 +7,13 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
+use tokio::sync::Mutex as TokioMutex;
 
+use oag_listend::http::HttpCarrier;
 use oag_listend::ipfs::IpfsPublisher;
-use oag_listend::{wav, AudioFormat, AudioStore, MirrorOutcome};
+use oag_listend::protocol::{self, Request, Response};
+use oag_listend::{wav, AudioFormat, AudioStore, ListendServer, MirrorOutcome};
 
 const BOUND: Duration = Duration::from_secs(20);
 
@@ -231,4 +235,107 @@ async fn bounded_mirror() {
         started.elapsed() < Duration::from_secs(10),
         "the whole pass must stop at its budget, not at each call's timeout"
     );
+}
+
+/// A client that fetches audio is told where else it lives: the CID rides on the native reply and
+/// on an HTTP header, so the same bytes can be fetched from IPFS later without asking the operator.
+#[tokio::test]
+async fn a_client_is_told_where_else_the_audio_lives() {
+    let outcome = tokio::time::timeout(BOUND, cid_on_the_wire()).await;
+    outcome.expect("the CID-on-the-wire exchange must complete within the bound")
+}
+
+async fn cid_on_the_wire() {
+    let (addr, _seen) = stub(
+        "HTTP/1.1 200 OK\r\nContent-Length: 47\r\n\r\n{\"Hash\":\"bafywire\",\"Name\":\"audio\"}\r\n".into(),
+        1,
+    )
+    .await;
+
+    let mut store = AudioStore::default();
+    store.set_ipfs(Some(IpfsPublisher::new(addr)));
+    let shared = Arc::new(TokioMutex::new(store));
+
+    let (native, native_addr) = ListendServer::bind_shared("127.0.0.1:0", Arc::clone(&shared))
+        .await
+        .expect("bind native");
+    let (http, http_addr) = HttpCarrier::bind_shared("127.0.0.1:0", Arc::clone(&shared))
+        .await
+        .expect("bind http");
+    let native_shutdown = native.shutdown_handle();
+    let http_shutdown = http.shutdown_handle();
+    let native_run = tokio::spawn(async move { native.run().await });
+    let http_run = tokio::spawn(async move { http.run().await });
+
+    let tone = wav::generate(21, wav::Sound::Tone);
+    let hash = match exchange(
+        native_addr,
+        &Request::Publish {
+            declared_media_type: Some("audio/wav".into()),
+            bytes: tone.clone(),
+        },
+    )
+    .await
+    {
+        Response::Published { content_hash } => content_hash,
+        other => panic!("expected Published, got {other:?}"),
+    };
+
+    match exchange(
+        native_addr,
+        &Request::Fetch {
+            content_hash: hash.clone(),
+        },
+    )
+    .await
+    {
+        Response::Audio { cid, bytes, .. } => {
+            assert_eq!(bytes, tone, "the bytes are unchanged");
+            assert_eq!(cid.as_deref(), Some("bafywire"), "the CID must ride along");
+        }
+        other => panic!("expected Audio, got {other:?}"),
+    }
+
+    let response = http_get(http_addr, &format!("/audio/{hash}")).await;
+    let head = String::from_utf8_lossy(&response).to_ascii_lowercase();
+    assert!(
+        head.contains("x-ipfs-cid: bafywire"),
+        "HTTP must expose the CID too: {head}"
+    );
+
+    native_shutdown.shutdown();
+    http_shutdown.shutdown();
+    for run in [native_run, http_run] {
+        tokio::time::timeout(Duration::from_secs(5), run)
+            .await
+            .expect("shutdown bound")
+            .expect("join")
+            .expect("run");
+    }
+}
+
+async fn exchange(addr: std::net::SocketAddr, request: &Request) -> Response {
+    let mut stream = TcpStream::connect(addr).await.expect("connect");
+    let frame = protocol::encode_frame(&protocol::encode_request(request));
+    stream.write_all(&frame).await.expect("write");
+    stream.flush().await.expect("flush");
+    let mut prefix = [0u8; 4];
+    stream.read_exact(&mut prefix).await.expect("prefix");
+    let len = u32::from_be_bytes(prefix) as usize;
+    let mut body = vec![0u8; len];
+    stream.read_exact(&mut body).await.expect("body");
+    protocol::decode_response(&body).expect("decode")
+}
+
+async fn http_get(addr: std::net::SocketAddr, path: &str) -> Vec<u8> {
+    let mut stream = TcpStream::connect(addr).await.expect("connect");
+    let request = format!("GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+    stream.write_all(request.as_bytes()).await.expect("write");
+    stream.flush().await.expect("flush");
+    let mut out = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut out))
+        .await
+        .expect("read bound")
+        .expect("read");
+    out
 }

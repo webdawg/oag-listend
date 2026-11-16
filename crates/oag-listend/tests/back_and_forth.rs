@@ -97,6 +97,7 @@ async fn back_and_forth() {
         Response::Audio {
             content_hash,
             bytes,
+            cid: _,
         } => {
             assert_eq!(content_hash, hash);
             assert_eq!(bytes, tone, "audio out must be the audio that went in");
@@ -256,6 +257,7 @@ async fn ping_native() {
         Response::Audio {
             content_hash,
             bytes,
+            cid: _,
         } => {
             assert!(!bytes.is_empty(), "a ping must never be an empty pong");
             assert_eq!(AudioFormat::sniff(&bytes), Some(AudioFormat::Wav));
@@ -484,6 +486,7 @@ async fn formats_on_the_wire() {
             Response::Audio {
                 content_hash,
                 bytes: fetched,
+                cid: _,
             } => {
                 assert_eq!(content_hash, hash);
                 assert_eq!(fetched, bytes, "{label} came back as different bytes");

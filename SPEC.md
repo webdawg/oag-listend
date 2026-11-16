@@ -2,8 +2,9 @@
 
 **License: GNU Affero General Public License v3.0 or later (AGPL-3.0-or-later).**
 
-**Status: serves, and survives a restart.** Four carriers are live and share one store: the
-native length-prefixed protocol over TCP, HTTP, UDP, and a Unix domain socket. The store is
+**Status: serves, and survives a restart.** Four carriers are live and share one store -- the
+native length-prefixed protocol over TCP, HTTP, UDP, and a Unix domain socket -- and `--ipfs-api`
+additionally mirrors accepted audio to IPFS. The store is
 content-addressed, so `--dir` persists every accepted sound under its BLAKE3 and a restart loads it
 back. The daemon publishes a small seeded set of generated sounds, accepts audio, and serves it back
 with the BLAKE3 of the bytes.
@@ -258,6 +259,12 @@ mirror only audio published afterwards, and an existing library would never reac
 bounded as a whole (`STARTUP_MIRROR_BUDGET`, 30 s) so a large store cannot hold startup open, while
 each item keeps its own per-call bound.
 
+A client that fetches an item is told where else it lives: the store remembers the CID per content
+hash, `Response::Audio` carries it as an **optional trailing field**, and HTTP exposes it as
+`X-IPFS-CID`. The field is appended after the bytes, so a decoder that stops after the declared length
+ignores it and a reply from a daemon that predates it still decodes -- no protocol version change,
+because nothing that already worked stops working. Eviction drops the remembered CID.
+
 The client hand-rolls `POST /api/v0/add` as multipart form data and reads `Hash` from the reply,
 with a 10 s bound per read and write and a 64 KiB cap on the reply. It has been tested against a
 stub that mimics Kubo's add endpoint, end to end through `--ipfs-api`; it has **not** been tested
@@ -272,5 +279,6 @@ physical interface and `oag-storage`, so no code can be written or run here.
 Worth doing next, in order:
 
 - Test the mirror against a real Kubo node, and add chunked-reply decoding if it proves necessary.
-- Surface a served item's CID, so a client that fetched audio over TCP or HTTP can also retrieve it
-  from IPFS without asking the operator.
+- Serve audio by CID, not just mirror to it: today a client can learn a CID but still needs this
+  daemon (or its own IPFS node) to fetch the bytes, because the frame protocol deliberately has no
+  operation for asking by CID.

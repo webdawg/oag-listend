@@ -174,6 +174,7 @@ async fn exchange(args: &Args) -> std::io::Result<()> {
         Response::Audio {
             content_hash,
             bytes,
+            cid: _,
         } => println!(
             "ping:    {} ({} bytes, verified={})",
             &content_hash[..16],
@@ -215,6 +216,7 @@ async fn exchange(args: &Args) -> std::io::Result<()> {
             Response::Audio {
                 content_hash,
                 bytes: fetched,
+                cid: _,
             } => {
                 let verified = AudioItem::verify(&content_hash, &fetched);
                 println!(
