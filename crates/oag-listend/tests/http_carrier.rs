@@ -1016,3 +1016,88 @@ async fn store_bound() {
         .expect("join")
         .expect("run");
 }
+
+/// Every format the daemon recognises must be served under its own audio content type, whatever the
+/// publisher claimed. A browser decides whether it can play from this header, so a FLAC or an MP3
+/// mislabelled as WAV would silently fail to play.
+#[tokio::test]
+async fn every_recognised_format_is_served_with_its_own_content_type() {
+    tokio::time::timeout(BOUND, all_content_types())
+        .await
+        .expect("content-type exchange within the bound")
+}
+
+async fn all_content_types() {
+    let store = Arc::new(Mutex::new(AudioStore::default()));
+    let (carrier, addr) = HttpCarrier::bind_shared("127.0.0.1:0", Arc::clone(&store))
+        .await
+        .expect("bind http");
+    let shutdown = carrier.shutdown_handle();
+    let run = tokio::spawn(async move { carrier.run().await });
+
+    let ogg_bos = || {
+        let mut out = Vec::new();
+        out.extend_from_slice(b"OggS");
+        out.push(0);
+        out.push(0x02); // beginning of stream
+        out.extend_from_slice(&[0u8; 8]); // granule position
+        out.extend_from_slice(&[0u8; 4]); // serial number
+        out.extend_from_slice(&[0u8; 4]); // page sequence
+        out.extend_from_slice(&[0u8; 4]); // checksum
+        out.push(1); // one segment
+        out.push(8); // segment length: the eight-byte codec header
+        out.extend_from_slice(b"OpusHead");
+        out
+    };
+    let m4a = || {
+        let mut out = vec![0u8, 0, 0, 0];
+        out.extend_from_slice(b"ftypisom");
+        out.extend_from_slice(&[0, 0, 0, 1]);
+        out.extend_from_slice(b"M4A ");
+        out
+    };
+
+    // Each fixture is posted labelled as a web form, so only the bytes can decide the answer's type.
+    let fixtures: [(&str, Vec<u8>, &str); 6] = [
+        ("wav", b"RIFF\x24\x00\x00\x00WAVE".to_vec(), "audio/wav"),
+        ("aiff", b"FORM\x00\x00\x00\x00AIFF".to_vec(), "audio/aiff"),
+        ("flac", b"fLaC\x00\x00\x00\x22".to_vec(), "audio/flac"),
+        ("ogg", ogg_bos(), "audio/ogg"),
+        (
+            "mp3",
+            b"ID3\x04\x00\x00\x00\x00\x00\x00".to_vec(),
+            "audio/mpeg",
+        ),
+        ("m4a", m4a(), "audio/mp4"),
+    ];
+
+    for (label, bytes, expected) in fixtures {
+        let posted = http_post(addr, &bytes, "application/x-www-form-urlencoded").await;
+        assert_eq!(status_of(&posted), 201, "{label} was not accepted");
+        let hash = String::from_utf8_lossy(body_of(&posted)).trim().to_string();
+
+        let fetched = http(
+            addr,
+            &format!("GET /audio/{hash} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"),
+        )
+        .await;
+        assert_eq!(status_of(&fetched), 200, "{label}");
+        assert!(
+            head_contains(&fetched, &format!("content-type: {expected}")),
+            "{label} must be served as {expected}: {}",
+            String::from_utf8_lossy(&fetched)
+        );
+        assert_eq!(
+            body_of(&fetched),
+            &bytes[..],
+            "{label} came back as different bytes"
+        );
+    }
+
+    shutdown.shutdown();
+    tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .expect("shutdown bound")
+        .expect("join")
+        .expect("run");
+}
