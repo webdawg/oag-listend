@@ -897,10 +897,14 @@ async fn oversized_expect() {
         .expect("read");
     let status = String::from_utf8_lossy(&first[..n]);
     assert!(
-        status.starts_with("HTTP/1.1 400"),
-        "the interim must not be sent, got {status:?}"
+        status.starts_with("HTTP/1.1 413"),
+        "an oversized body is too large, not malformed: {status:?}"
     );
     assert!(!status.starts_with("HTTP/1.1 100"), "got the interim");
+    assert!(
+        !status.starts_with("HTTP/1.1 400"),
+        "it is not a bad request either"
+    );
 
     shutdown.shutdown();
     tokio::time::timeout(Duration::from_secs(5), run)
@@ -947,6 +951,63 @@ async fn chunked() {
         text
     );
     assert!(store.lock().await.is_empty(), "nothing is stored");
+
+    shutdown.shutdown();
+    tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .expect("shutdown bound")
+        .expect("join")
+        .expect("run");
+}
+
+/// Audio that is larger than the store's own bound is refused as too large, with the same status an
+/// oversized request body gets -- a client can react to one code for both -- and nothing is stored.
+#[tokio::test]
+async fn audio_larger_than_the_store_bound_is_too_large() {
+    tokio::time::timeout(BOUND, store_bound())
+        .await
+        .expect("within the bound")
+}
+
+async fn store_bound() {
+    let store = Arc::new(Mutex::new(AudioStore::with_capacity(256)));
+    let (carrier, addr) = HttpCarrier::bind_shared("127.0.0.1:0", Arc::clone(&store))
+        .await
+        .expect("bind http");
+    let shutdown = carrier.shutdown_handle();
+    let run = tokio::spawn(async move { carrier.run().await });
+
+    let tone = wav::generate(11, wav::Sound::Tone);
+    assert!(tone.len() > 256, "the fixture must exceed the tiny store");
+
+    let head = format!(
+        "POST /audio HTTP/1.1\r\nHost: x\r\nContent-Type: audio/wav\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        tone.len()
+    );
+    let mut stream = TcpStream::connect(addr).await.expect("connect");
+    stream.write_all(head.as_bytes()).await.expect("write head");
+    stream.write_all(&tone).await.expect("write body");
+    stream.flush().await.expect("flush");
+
+    let mut out = Vec::new();
+    tokio::time::timeout(BOUND, stream.read_to_end(&mut out))
+        .await
+        .expect("read bound")
+        .expect("read");
+    let text = String::from_utf8_lossy(&out);
+    assert!(
+        text.starts_with("HTTP/1.1 413"),
+        "a too-large item is 413, got {text}"
+    );
+    assert!(
+        text.contains("larger than") || text.to_lowercase().contains("too large"),
+        "the refusal states why: {text}"
+    );
+    assert_eq!(
+        store.lock().await.len(),
+        0,
+        "a refused item must not be stored"
+    );
 
     shutdown.shutdown();
     tokio::time::timeout(Duration::from_secs(5), run)

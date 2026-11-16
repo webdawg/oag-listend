@@ -138,7 +138,8 @@ across a restart. `GET /audio/{hash}` serves the bytes with a content type deriv
 with `Range` (206 and `Content-Range`, or 416), `HEAD`, and an `ETag` (the content hash) with
 `Cache-Control: public, max-age=31536000, immutable` and `If-None-Match` (including a comma-separated validator list, and `*`) -> 304, since a
 content-addressed item cannot change. `POST /audio` accepts a body through
-`AudioStore::accept` (201 with the content hash, 400 if the bytes are not audio) and answers
+`AudioStore::accept` (201 with the content hash, 400 if the bytes are not audio, 413 if they are
+audio but exceed the store bound or the frame cap) and answers
 `Expect: 100-continue`. A chunked upload is refused with a message saying to send a
 `Content-Length` rather than being read as zero bytes and reported as invalid audio; the unread body
 is drained after a half-close so the refusal is not lost to a TCP reset. A query string is never

@@ -161,6 +161,9 @@ struct HttpRequest {
     range: Option<String>,
     if_none_match: Option<String>,
     transfer_encoding: Option<String>,
+    /// The declared body is larger than this carrier will read. It is answered `413 Payload Too
+    /// Large` rather than `400 Bad Request`: the request is well formed, only too big.
+    too_large: bool,
     /// The request carried a body this reader did not consume. Closing with it unread makes TCP
     /// send a reset, which can discard the response we just wrote -- so it is drained first.
     unread_body: bool,
@@ -179,6 +182,7 @@ async fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<HttpRequ
                 range: None,
                 if_none_match: None,
                 transfer_encoding: None,
+                too_large: false,
                 unread_body: true,
                 body: Vec::new(),
             }));
@@ -205,6 +209,7 @@ async fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<HttpRequ
                     range: None,
                     if_none_match: None,
                     transfer_encoding: None,
+                    too_large: false,
                     unread_body: true,
                     body: Vec::new(),
                 }));
@@ -247,7 +252,8 @@ async fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<HttpRequ
                     range: None,
                     if_none_match: None,
                     transfer_encoding: None,
-                    // The body was not read, so it must be drained or the 400 is reset away.
+                    too_large: true,
+                    // The body was not read, so it must be drained or the refusal is reset away.
                     unread_body: true,
                     body: Vec::new(),
                 }));
@@ -282,6 +288,7 @@ async fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<HttpRequ
                 range,
                 if_none_match,
                 transfer_encoding,
+                too_large: false,
                 unread_body: chunked || content_length > body.len(),
                 body,
             }));
@@ -313,7 +320,15 @@ struct HttpResponse {
 
 async fn route(request: HttpRequest, store: &Arc<Mutex<AudioStore>>) -> HttpResponse {
     if request.method == "BAD" {
-        return HttpResponse::text(400, "Bad Request", b"bad request");
+        return if request.too_large {
+            HttpResponse::text(
+                413,
+                "Payload Too Large",
+                b"request body exceeds the maximum frame size",
+            )
+        } else {
+            HttpResponse::text(400, "Bad Request", b"bad request")
+        };
     }
 
     // A HEAD is a GET with no body; a player and a browser both probe with one before streaming.
@@ -586,12 +601,25 @@ async fn route(request: HttpRequest, store: &Arc<Mutex<AudioStore>>) -> HttpResp
                 );
             }
             let mut store = store.lock().await;
+            let body_len = request.body.len();
             match store.accept(request.body, request.content_type).await {
                 Ok(hash) => HttpResponse::text(201, "Created", hash.as_bytes()),
                 Err(ListendError::NotAudio) => HttpResponse::text(
                     400,
                     "Bad Request",
                     ListendError::NotAudio.to_string().as_bytes(),
+                ),
+                // Audio, but bigger than the store can hold: the same "too large" answer as an
+                // oversized request body, so a client can react to one status for both.
+                Err(ListendError::TooLarge { .. }) => HttpResponse::text(
+                    413,
+                    "Payload Too Large",
+                    ListendError::TooLarge {
+                        len: body_len,
+                        max: store.max_bytes(),
+                    }
+                    .to_string()
+                    .as_bytes(),
                 ),
                 Err(e) => HttpResponse::text(400, "Bad Request", e.to_string().as_bytes()),
             }
