@@ -219,6 +219,71 @@ async fn stalled_reader() {
         .expect("run");
 }
 
+/// The session cap is a bound, not a suggestion. SPEC documents 64 concurrent sessions per
+/// carrier; a client past it must wait for a free slot rather than be served anyway.
+#[tokio::test]
+async fn a_client_past_the_session_cap_waits_for_a_free_slot() {
+    let outcome = tokio::time::timeout(BOUND, session_cap()).await;
+    outcome.expect("the session-cap exchange must complete within the bound")
+}
+
+async fn session_cap() {
+    let (server, addr) =
+        ListendServer::bind_shared("127.0.0.1:0", Arc::new(Mutex::new(AudioStore::default())))
+            .await
+            .expect("bind");
+    let shutdown = server.shutdown_handle();
+    let run = tokio::spawn(async move { server.run().await });
+
+    // Fill every slot with a session that has proven it is live: each asked and was answered, so
+    // the permit is certainly held.
+    let mut held = Vec::new();
+    for _ in 0..oag_listend::server::MAX_CONNECTIONS {
+        let mut stream = TcpStream::connect(addr).await.expect("connect");
+        let hello = protocol::encode_frame(&protocol::encode_request(&Request::Hello));
+        stream.write_all(&hello).await.expect("write hello");
+        stream.flush().await.expect("flush hello");
+        assert!(
+            matches!(read_response(&mut stream).await, Response::Hello { .. }),
+            "the slot-holding session must be live"
+        );
+        held.push(stream);
+    }
+
+    // One more client: the kernel completes the connection, but no session slot is free.
+    let mut waiting = TcpStream::connect(addr)
+        .await
+        .expect("connect the extra client");
+    let hello = protocol::encode_frame(&protocol::encode_request(&Request::Hello));
+    waiting.write_all(&hello).await.expect("write hello");
+    waiting.flush().await.expect("flush hello");
+    let mut prefix = [0u8; 4];
+    let no_answer =
+        tokio::time::timeout(Duration::from_millis(700), waiting.read_exact(&mut prefix))
+            .await
+            .is_err();
+    assert!(
+        no_answer,
+        "a client past the session cap must wait for a slot, not be served anyway"
+    );
+
+    // Releasing one session lets the waiting client in.
+    drop(held.pop());
+    let response = tokio::time::timeout(Duration::from_secs(3), read_response(&mut waiting))
+        .await
+        .expect("a freed slot must let the waiting client in");
+    assert!(matches!(response, Response::Hello { .. }));
+
+    drop(waiting);
+    drop(held);
+    shutdown.shutdown();
+    tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .expect("bound")
+        .expect("join")
+        .expect("run");
+}
+
 /// The persistent path writes through `tokio::fs` while holding the store mutex, so a slow disk
 /// delays only the answer that caused it. Concurrent publishers must not lose an item or deadlock,
 /// and a restart must find every one of them.
