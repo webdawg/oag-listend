@@ -15,6 +15,16 @@ use tokio::sync::Mutex;
 
 const BOUND: Duration = Duration::from_secs(30);
 
+/// A byte string that carries the WAV signature and nothing else, of whatever length a test needs.
+fn large_riff(total: usize) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(total);
+    bytes.extend_from_slice(b"RIFF");
+    bytes.extend_from_slice(&((total - 8) as u32).to_le_bytes());
+    bytes.extend_from_slice(b"WAVE");
+    bytes.resize(total, 0);
+    bytes
+}
+
 async fn publish_and_fetch(addr: std::net::SocketAddr, wav: Vec<u8>) -> String {
     let mut stream = TcpStream::connect(addr).await.expect("connect");
     let frame = protocol::encode_frame(&protocol::encode_request(&Request::Publish {
@@ -128,8 +138,90 @@ async fn concurrent_memory() {
         .expect("run");
 }
 
-/// The persistent path does a blocking `std::fs::write` while holding the store mutex. Concurrent
-/// publishers must not lose an item or deadlock, and a restart must find every one of them.
+/// A large item releases the lock before its bytes are copied, so one client stalled mid-read must
+/// not stall another. This is SPEC §Concurrency's claim, measured rather than asserted.
+#[tokio::test]
+async fn a_client_stalled_mid_fetch_does_not_stall_another() {
+    let outcome = tokio::time::timeout(BOUND, stalled_reader()).await;
+    outcome.expect("the stalled-reader exchange must complete within the bound")
+}
+
+async fn stalled_reader() {
+    let (server, addr) =
+        ListendServer::bind_shared("127.0.0.1:0", Arc::new(Mutex::new(AudioStore::default())))
+            .await
+            .expect("bind");
+    let shutdown = server.shutdown_handle();
+    let run = tokio::spawn(async move { server.run().await });
+
+    // Deliberately far larger than any combination of socket buffers, so a client that stops
+    // reading genuinely stalls the daemon's write instead of fitting in kernel memory. Only the
+    // signature matters: the store sniffs, it does not decode.
+    let big = large_riff(8 * 1024 * 1024);
+
+    let mut publisher = TcpStream::connect(addr).await.expect("connect");
+    let frame = protocol::encode_frame(&protocol::encode_request(&Request::Publish {
+        declared_media_type: Some("audio/wav".into()),
+        bytes: big,
+    }));
+    publisher.write_all(&frame).await.expect("publish");
+    publisher.flush().await.expect("flush publish");
+    let hash = match read_response(&mut publisher).await {
+        Response::Published { content_hash } => content_hash,
+        other => panic!("expected Published, got {other:?}"),
+    };
+
+    // A reader with a one-kilobyte receive buffer that asks for the whole item and then reads
+    // nothing. Its session blocks in the write half of the response, after the store lock is gone.
+    let socket = tokio::net::TcpSocket::new_v4().expect("socket");
+    socket
+        .set_recv_buffer_size(1024)
+        .expect("a small receive buffer");
+    socket
+        .bind("127.0.0.1:0".parse().unwrap())
+        .expect("bind the client socket");
+    let mut stalled = socket
+        .connect(addr)
+        .await
+        .expect("connect the stalled reader");
+    let frame = protocol::encode_frame(&protocol::encode_request(&Request::Fetch {
+        content_hash: hash,
+    }));
+    stalled.write_all(&frame).await.expect("ask for the item");
+    stalled.flush().await.expect("flush the request");
+    // Bounded, not a hope: long enough for the daemon to fill the buffer and block writing.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Another client must still be answered promptly.
+    let started = std::time::Instant::now();
+    let mut other = TcpStream::connect(addr)
+        .await
+        .expect("connect the second client");
+    let frame = protocol::encode_frame(&protocol::encode_request(&Request::Hello));
+    other.write_all(&frame).await.expect("hello");
+    other.flush().await.expect("flush hello");
+    let hello = tokio::time::timeout(Duration::from_secs(3), read_response(&mut other))
+        .await
+        .expect("a second client must be served while another is stalled");
+    assert!(matches!(hello, Response::Hello { .. }));
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "the second client must not queue behind the stalled one"
+    );
+
+    drop(stalled);
+    drop(publisher);
+    shutdown.shutdown();
+    tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .expect("bound")
+        .expect("join")
+        .expect("run");
+}
+
+/// The persistent path writes through `tokio::fs` while holding the store mutex, so a slow disk
+/// delays only the answer that caused it. Concurrent publishers must not lose an item or deadlock,
+/// and a restart must find every one of them.
 #[tokio::test]
 async fn concurrent_publishers_persist_every_item() {
     let dir = std::env::temp_dir().join(format!(
