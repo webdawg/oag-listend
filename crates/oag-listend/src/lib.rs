@@ -343,11 +343,6 @@ impl AudioStore {
 
         let entries = std::fs::read_dir(&dir)?;
         for entry in entries {
-            if considered >= max_entries {
-                report.truncated = true;
-                break;
-            }
-            considered += 1;
             let entry = match entry {
                 Ok(entry) => entry,
                 Err(_) => {
@@ -359,6 +354,13 @@ impl AudioStore {
             if path.extension().is_some() {
                 continue; // a sidecar, not audio
             }
+            // The cap counts audio entries, so a directory of sidecars alone cannot
+            // truncate the audio load.
+            if considered >= max_entries {
+                report.truncated = true;
+                break;
+            }
+            considered += 1;
             // Only regular files. A FIFO or device named like a hash would make `std::fs::read`
             // block forever, and a directory would error; both are skipped rather than read.
             let metadata = match entry.metadata() {
@@ -903,6 +905,21 @@ mod tests {
         let (reopened, report) = AudioStore::with_directory(&dir, 1024 * 1024).unwrap();
         assert_eq!(report.loaded, 1);
         assert!(reopened.serve(&hash).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn sidecars_do_not_count_toward_the_load_cap() {
+        let dir = temp_dir("sidecarcap");
+        let (mut seed, _) = AudioStore::with_directory(&dir, 1024 * 1024).unwrap();
+        for seed_n in 0..3u64 {
+            let wav = wav::generate_n(seed_n, wav::Sound::Tone, 4);
+            seed.accept(wav, None).await.unwrap();
+        }
+        // Three audio entries plus their sidecars, cap three: all three load.
+        let (store, report) = AudioStore::load_dir(&dir, 1024 * 1024, 3).unwrap();
+        assert_eq!(store.len(), 3, "sidecars must not count toward the cap");
+        assert!(!report.truncated);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
