@@ -674,6 +674,74 @@ mod tests {
         assert_eq!(AudioFormat::sniff(&bytes), Some(AudioFormat::M4a));
     }
 
+    /// Each container and codec the inbound rule recognises, asserted from its signature alone.
+    /// The directive names WAV, AIFF, FLAC, Ogg, MP3, and M4A. If one of them stops being
+    /// recognised, valid audio is refused; the near-miss test below covers the other direction.
+    #[test]
+    fn every_named_signature_is_recognised_from_its_bytes() {
+        // RIFF .... WAVE
+        assert_eq!(
+            AudioFormat::sniff(b"RIFF\x24\x00\x00\x00WAVE"),
+            Some(AudioFormat::Wav)
+        );
+        // FORM .... AIFF, and the compressed form AIFC
+        assert_eq!(
+            AudioFormat::sniff(b"FORM\x00\x00\x00\x00AIFF"),
+            Some(AudioFormat::Aiff)
+        );
+        assert_eq!(
+            AudioFormat::sniff(b"FORM\x00\x00\x00\x00AIFC"),
+            Some(AudioFormat::Aiff)
+        );
+        // FLAC stream marker
+        assert_eq!(
+            AudioFormat::sniff(b"fLaC\x00\x00\x00\x22"),
+            Some(AudioFormat::Flac)
+        );
+        // An ID3v2 tag before MPEG audio
+        assert_eq!(
+            AudioFormat::sniff(b"ID3\x04\x00\x00\x00\x00\x00\x00"),
+            Some(AudioFormat::Mp3)
+        );
+        // A raw MPEG-1 Layer III frame header: eleven sync bits, version 3, layer 1, bitrate 9.
+        assert_eq!(
+            AudioFormat::sniff(&[0xFF, 0xFB, 0x90, 0x00]),
+            Some(AudioFormat::Mp3)
+        );
+        // Audio codecs inside an Ogg container, read from the beginning-of-stream page.
+        assert_eq!(
+            AudioFormat::sniff(&ogg_bos(b"\x01vorbis")),
+            Some(AudioFormat::Ogg)
+        );
+        assert_eq!(
+            AudioFormat::sniff(&ogg_bos(b"OpusHead")),
+            Some(AudioFormat::Ogg)
+        );
+        assert_eq!(
+            AudioFormat::sniff(&ogg_bos(b"\x7fFLAC")),
+            Some(AudioFormat::Ogg)
+        );
+    }
+
+    /// Near-misses must stay rejected. The rule is "audio only", so a plausible-looking but wrong
+    /// signature is still refused -- otherwise the sniff would become a suggestion.
+    #[test]
+    fn near_miss_signatures_are_not_audio() {
+        // RIFF carrying a video form type
+        assert_eq!(AudioFormat::sniff(b"RIFF\x00\x00\x00\x00AVI "), None);
+        // FORM carrying a non-AIFF form type
+        assert_eq!(AudioFormat::sniff(b"FORM\x00\x00\x00\x008SVX"), None);
+        // An MPEG frame header with the reserved version field set
+        assert_eq!(AudioFormat::sniff(&[0xFF, 0xE8, 0x90, 0x00]), None);
+        // An MPEG frame header with a zero bitrate field (none defined)
+        assert_eq!(AudioFormat::sniff(&[0xFF, 0xFB, 0x00, 0x00]), None);
+        // Theora video inside an Ogg container: same marker, not audio
+        assert_eq!(AudioFormat::sniff(&ogg_bos(b"\x80theora")), None);
+        // Plain text, and nothing at all
+        assert_eq!(AudioFormat::sniff(b"plain text, not audio"), None);
+        assert_eq!(AudioFormat::sniff(b""), None);
+    }
+
     #[test]
     fn an_item_is_served_by_its_content_hash_and_verifies() {
         let mut store = AudioStore::default();

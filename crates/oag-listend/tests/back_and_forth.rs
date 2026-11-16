@@ -406,3 +406,96 @@ async fn listing_pages() {
         .expect("join")
         .expect("run");
 }
+
+/// Every format the inbound rule recognises must travel over the wire, not only WAV. The sniff is
+/// the whole of what the daemon knows about format, so a signature-carrying body is exactly what it
+/// admits -- and a client holding a FLAC or an AIFF recording reaches the same surface.
+#[tokio::test]
+async fn every_recognised_format_travels_over_the_wire() {
+    let outcome = tokio::time::timeout(BOUND, formats_on_the_wire()).await;
+    outcome.expect("the format exchange must complete within the bound")
+}
+
+async fn formats_on_the_wire() {
+    let (server, addr) =
+        ListendServer::bind_shared("127.0.0.1:0", Arc::new(Mutex::new(AudioStore::default())))
+            .await
+            .expect("bind");
+    let shutdown = server.shutdown_handle();
+    let run = tokio::spawn(async move { server.run().await });
+
+    // The same signatures the sniff tests pin, minus the WAV the other tests already carry.
+    let ogg_bos = || {
+        let mut out = Vec::new();
+        out.extend_from_slice(b"OggS");
+        out.push(0); // stream structure version
+        out.push(0x02); // beginning of stream
+        out.extend_from_slice(&[0u8; 8]); // granule position
+        out.extend_from_slice(&[0u8; 4]); // serial number
+        out.extend_from_slice(&[0u8; 4]); // page sequence
+        out.extend_from_slice(&[0u8; 4]); // checksum
+        out.push(1); // one segment
+        out.push(8); // segment length: the eight-byte codec header
+        out.extend_from_slice(b"OpusHead");
+        out
+    };
+    let m4a = || {
+        let mut out = vec![0u8, 0, 0, 0];
+        out.extend_from_slice(b"ftypisom");
+        out.extend_from_slice(&[0, 0, 0, 1]);
+        out.extend_from_slice(b"M4A ");
+        out
+    };
+
+    let fixtures: [(&str, Vec<u8>); 5] = [
+        ("AIFF", b"FORM\x00\x00\x00\x00AIFF".to_vec()),
+        ("FLAC", b"fLaC\x00\x00\x00\x22".to_vec()),
+        ("MP3/ID3", b"ID3\x04\x00\x00\x00\x00\x00\x00".to_vec()),
+        ("Ogg/Opus", ogg_bos()),
+        ("M4A", m4a()),
+    ];
+
+    let mut stream = TcpStream::connect(addr).await.expect("connect");
+    for (label, bytes) in fixtures {
+        send(
+            &mut stream,
+            &Request::Publish {
+                declared_media_type: Some("audio/octet-stream".into()),
+                bytes: bytes.clone(),
+            },
+        )
+        .await;
+        let hash = match recv(&mut stream).await {
+            Response::Published { content_hash } => content_hash,
+            other => panic!("{label} was refused: {other:?}"),
+        };
+        assert!(
+            AudioItem::verify(&hash, &bytes),
+            "{label} must be served under its own BLAKE3"
+        );
+        send(
+            &mut stream,
+            &Request::Fetch {
+                content_hash: hash.clone(),
+            },
+        )
+        .await;
+        match recv(&mut stream).await {
+            Response::Audio {
+                content_hash,
+                bytes: fetched,
+            } => {
+                assert_eq!(content_hash, hash);
+                assert_eq!(fetched, bytes, "{label} came back as different bytes");
+            }
+            other => panic!("{label} did not come back: {other:?}"),
+        }
+    }
+
+    shutdown.shutdown();
+    tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .expect("shutdown bound")
+        .expect("join")
+        .expect("run");
+}
