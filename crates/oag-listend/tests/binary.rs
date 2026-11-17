@@ -163,6 +163,52 @@ fn version_and_help_work_and_usage_errors_exit_two() {
     }
 }
 
+/// The operator client is a shipped artefact too, and its `--help` has drifted before. Locate the
+/// built example relative to this test binary (`target/debug/deps/.. /examples/push_pull`).
+fn push_pull() -> std::path::PathBuf {
+    let mut path = std::env::current_exe().expect("the test binary's path");
+    path.pop(); // deps/
+    path.pop(); // debug/
+    path.push("examples");
+    path.push("push_pull");
+    assert!(
+        path.exists(),
+        "the push_pull example must be built to test it: {}",
+        path.display()
+    );
+    path
+}
+
+#[test]
+fn the_client_help_documents_every_option_and_refuses_unknown_flags() {
+    let help = std::process::Command::new(push_pull())
+        .arg("--help")
+        .output()
+        .expect("run push_pull --help");
+    assert!(help.status.success());
+    let help = String::from_utf8_lossy(&help.stdout);
+    for flag in ["--addr", "--udp", "--unix", "--seed", "--version", "--help"] {
+        assert!(
+            help.contains(flag),
+            "push_pull --help must document {flag}:\n{help}"
+        );
+    }
+
+    let version = std::process::Command::new(push_pull())
+        .arg("--version")
+        .output()
+        .expect("run push_pull --version");
+    assert!(version.status.success());
+
+    // A usage error is exit 2, never a panic.
+    let bad = std::process::Command::new(push_pull())
+        .arg("--nonsense")
+        .output()
+        .expect("run push_pull --nonsense");
+    assert_eq!(bad.status.code(), Some(2));
+    assert!(!bad.stderr.is_empty());
+}
+
 /// A check must stay a store verification. Passing `--ipfs-api` must not make it contact a node or
 /// spend its mirror budget: operators and scripts call `--check` expecting a quick answer.
 #[test]
