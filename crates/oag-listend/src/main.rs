@@ -166,6 +166,19 @@ async fn main() {
         }
         None => AudioStore::with_capacity(args.max_bytes),
     };
+    if args.check {
+        // A check is purely a store verification: it must not contact an IPFS node or spend its
+        // mirror budget, because operators and scripts call it expecting a quick answer.
+        println!(
+            "store ok: {} items, {} bytes (bound {}, item bound {})",
+            store.len(),
+            store.bytes_held(),
+            args.max_bytes,
+            oag_listend::servable_bound(args.max_bytes)
+        );
+        return;
+    }
+
     if let Some(addr) = &args.ipfs_api {
         store.set_ipfs(Some(oag_listend::ipfs::IpfsPublisher::new(addr.clone())));
         println!("offering accepted audio to IPFS at {addr} (best-effort)");
@@ -180,18 +193,6 @@ async fn main() {
         }
     }
     let store = Arc::new(Mutex::new(store));
-
-    if args.check {
-        let store = store.lock().await;
-        println!(
-            "store ok: {} items, {} bytes (bound {}, item bound {})",
-            store.len(),
-            store.bytes_held(),
-            args.max_bytes,
-            oag_listend::servable_bound(args.max_bytes)
-        );
-        return;
-    }
 
     let (server, native_addr) = ListendServer::bind_shared(&args.listen, Arc::clone(&store))
         .await

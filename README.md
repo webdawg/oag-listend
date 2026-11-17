@@ -126,8 +126,8 @@ Install and start it with:
     sudo systemctl daemon-reload
     sudo systemctl enable --now oag-listend
 
-`--check` opens the store and prints the load report without serving, so a store can be verified
-before the service is started; `--version` prints the binary version and the frame protocol
+`--check` opens the store and prints the load report without serving and without contacting an IPFS
+node, so a store can be verified quickly before the service is started; `--version` prints the binary version and the frame protocol
 version.
 
 The daemon handles both SIGINT and SIGTERM, so `systemctl stop` is a clean stop: the accept loops
@@ -139,7 +139,7 @@ address the daemon prints a note saying so. Use `--listen 127.0.0.1:...` to keep
 ## Status
 
 **Serves, and survives a restart.** Five ways to reach the audio are live and tested: the native
-protocol over TCP, HTTP, UDP, a Unix socket, and an IPFS mirror -- 62 unit tests plus 46 end-to-end
+protocol over TCP, HTTP, UDP, a Unix socket, and an IPFS mirror -- 62 unit tests plus 47 end-to-end
 tests (`cargo test -p oag-listend`). The store mutex covers lookup and insert, not byte
 copies or disk writes, so one slow client does not stall the others. Runs as a systemd service
 (`scripts/oag-listend.service`) and shuts down cleanly on SIGINT and SIGTERM. The native protocol, HTTP, UDP, and the Unix socket share one store,

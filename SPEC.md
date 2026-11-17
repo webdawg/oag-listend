@@ -168,6 +168,9 @@ job; a long recording belongs on TCP or HTTP.
 
 ## Persistence
 
+`--check` is purely a store verification: it does not serve and does not contact IPFS, so operators
+and scripts can call it for a quick answer even when a mirror is configured.
+
 `--dir PATH` makes the store content-addressed: `<PATH>/<hash>` is the audio, `<PATH>/<hash>.json`
 is the declared media type. An accepted item is written before it is answerable -- a write failure
 is a refusal, not a silent loss. The write is asynchronous (`tokio::fs`), so a slow disk delays the

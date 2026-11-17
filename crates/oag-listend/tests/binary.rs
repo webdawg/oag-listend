@@ -163,6 +163,41 @@ fn version_and_help_work_and_usage_errors_exit_two() {
     }
 }
 
+/// A check must stay a store verification. Passing `--ipfs-api` must not make it contact a node or
+/// spend its mirror budget: operators and scripts call `--check` expecting a quick answer.
+#[test]
+fn check_does_not_contact_the_ipfs_node() {
+    let dir = temp_dir("check-ipfs");
+    std::fs::create_dir_all(&dir).expect("make the store directory");
+
+    // A port with nothing listening: if the daemon tried to reach it, the check would be slow and
+    // the output would say so.
+    let output = std::process::Command::new(binary())
+        .arg("--check")
+        .arg("--dir")
+        .arg(&dir)
+        .arg("--ipfs-api")
+        .arg("127.0.0.1:1")
+        .output()
+        .expect("run --check --ipfs-api");
+    assert!(
+        output.status.success(),
+        "--check must succeed without a reachable IPFS API: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("store ok"),
+        "still reports the store: {stdout}"
+    );
+    assert!(
+        !stdout.contains("offering accepted audio"),
+        "a check must not announce a mirror: {stdout}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// `--check` is the operator's way to verify a store without serving it. It must load the
 /// content-addressed directory, report what it holds, and treat a file whose bytes no longer match
 /// its name as skipped rather than served.
