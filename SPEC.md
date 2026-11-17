@@ -312,7 +312,8 @@ with a 10 s bound per read and write and a 64 KiB cap on the reply. A `https://`
 speaking plain HTTP to a TLS port would look configured while sending audio in clear. A chunked
 reply is refused by **both** halves rather than decoded as content, because reading the framing as
 audio would silently corrupt what is served. It has been tested against a
-stub that mimics Kubo's add endpoint, end to end through `--ipfs-api`; it has **not** been tested
+stub that mimics Kubo's add and cat endpoints, end to end through `--ipfs-api`; it has **not**
+been tested
 against a real Kubo node, and it does not decode chunked replies. That limitation is stated here
 rather than discovered later.
 
