@@ -10,6 +10,15 @@ The same three files exist, byte-identical, in all five repositories:
 `oag-imagination-random-data-compute`, `oag-listend`. If you change one, copy the change to
 the other four.
 
+## Other files in this directory
+
+Not part of the pruning machinery, so not copied to the other four repositories:
+
+| File | Role |
+|---|---|
+| `check.sh` | Runs every quality gate on `oag-listend`: fmt, clippy, rustdoc with warnings denied, the test suite, and `systemd-analyze verify` on the unit. `--release` adds the release suite. |
+| `oag-listend.service` | systemd unit for the daemon. See "Run it as a service" in the repository README. |
+
 ## Files
 
 | File | Role |
