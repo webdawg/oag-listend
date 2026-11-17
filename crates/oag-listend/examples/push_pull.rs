@@ -216,11 +216,11 @@ async fn exchange(args: &Args) -> std::io::Result<()> {
             Response::Audio {
                 content_hash,
                 bytes: fetched,
-                cid: _,
+                cid,
             } => {
                 let verified = AudioItem::verify(&content_hash, &fetched);
                 println!(
-                    "fetched {label}: {} {} {} bytes verified={}",
+                    "fetched {label}: {} {} {} bytes verified={}{}",
                     &content_hash[..16],
                     if content_hash == hash {
                         "same-hash"
@@ -228,7 +228,11 @@ async fn exchange(args: &Args) -> std::io::Result<()> {
                         "HASH-MISMATCH"
                     },
                     fetched.len(),
-                    verified
+                    verified,
+                    match cid {
+                        Some(cid) => format!(" ipfs={cid}"),
+                        None => String::new(),
+                    }
                 );
                 if !verified || fetched != bytes {
                     eprintln!("push_pull: the bytes came back different");
