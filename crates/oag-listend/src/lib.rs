@@ -358,6 +358,9 @@ pub enum MirrorOutcome {
 /// How many mirror outcomes are kept. Enough to read, small enough that a long run cannot grow it.
 const MIRROR_LOG_LIMIT: usize = 64;
 
+/// A recorded CID is short text. A longer sidecar is not one and is ignored rather than read.
+const MAX_CID_SIDECAR_BYTES: usize = 128;
+
 /// The whole startup mirror pass is bounded by this, so a large store cannot hold the daemon's
 /// startup open indefinitely.
 pub const STARTUP_MIRROR_BUDGET: Duration = Duration::from_secs(30);
@@ -486,11 +489,16 @@ impl AudioStore {
                 continue;
             }
             let media_type = read_sidecar(&dir, &hash);
+            let cid = read_cid_sidecar(&dir, &hash);
             store.publish(AudioItem {
-                content_hash: hash,
+                content_hash: hash.clone(),
                 bytes,
                 media_type,
             });
+            if let Some(cid) = cid {
+                store.mirror_cids.insert(hash.clone(), cid.clone());
+                store.cid_index.insert(cid, hash);
+            }
             inserted += 1;
         }
 
@@ -614,12 +622,13 @@ impl AudioStore {
         (ok, failed)
     }
 
-    /// Offer bytes to IPFS and record what happened. Never fails the caller.
-    async fn offer_to_ipfs(&mut self, content_hash: &str, bytes: &[u8]) {
+    /// Offer bytes to IPFS and record what happened. Returns whether an add was actually attempted,
+    /// so a caller counting work done does not mistake a skip for an offer.
+    async fn offer_to_ipfs(&mut self, content_hash: &str, bytes: &[u8]) -> bool {
         let ipfs = self.ipfs.clone();
-        let Some(ipfs) = ipfs else { return };
+        let Some(ipfs) = ipfs else { return false };
         if self.mirror_cids.contains_key(content_hash) {
-            return; // already offered; a restart must not rewrite the library
+            return false; // already offered; a restart must not rewrite the library
         }
         let outcome = match ipfs.add(bytes).await {
             Ok(cid) => MirrorOutcome::Mirrored {
@@ -632,6 +641,7 @@ impl AudioStore {
             },
         };
         self.record_mirror(outcome);
+        true
     }
 
     /// The configured mirror, if any, so a carrier can also *read* by CID.
@@ -669,13 +679,13 @@ impl AudioStore {
                 _ => break,
             };
             // Each item is bounded by what is left, so the whole pass cannot exceed the budget.
-            if tokio::time::timeout(remaining, self.offer_to_ipfs(&content_hash, &item.bytes))
+            match tokio::time::timeout(remaining, self.offer_to_ipfs(&content_hash, &item.bytes))
                 .await
-                .is_err()
             {
-                break;
+                Ok(true) => offered += 1,
+                Ok(false) => {} // already recorded; nothing was offered
+                Err(_) => break,
             }
-            offered += 1;
         }
         offered
     }
@@ -683,6 +693,13 @@ impl AudioStore {
     /// Record a mirror outcome produced outside [`Self::accept`] -- by
     /// [`accept_and_mirror`], which sends without holding the lock.
     pub fn record_mirror_outcome(&mut self, outcome: MirrorOutcome) {
+        // Persist the association alongside the audio, so a restart skips re-adding it. Best-effort:
+        // a lost sidecar costs one redundant add, never audio.
+        if let (Some(dir), MirrorOutcome::Mirrored { content_hash, cid }) =
+            (self.dir.as_deref(), &outcome)
+        {
+            let _ = std::fs::write(dir.join(format!("{content_hash}.cid")), cid.as_bytes());
+        }
         self.record_mirror(outcome);
     }
 
@@ -709,6 +726,7 @@ impl AudioStore {
         if let Some(dir) = &self.dir {
             self.evicted.push(dir.join(content_hash));
             self.evicted.push(dir.join(format!("{content_hash}.json")));
+            self.evicted.push(dir.join(format!("{content_hash}.cid")));
         }
     }
 
@@ -824,6 +842,19 @@ pub const MAX_LOAD_ENTRIES: usize = 100_000;
 const MAX_SIDECAR_BYTES: usize = 4096;
 
 /// The declared media type recorded beside a persisted item, if any.
+/// The CID this store recorded for a content hash, if the sidecar is present and plausible. Written
+/// when an item is mirrored, so a restart can skip re-adding what is already on IPFS; the association
+/// is trustworthy because the loader verified the file's name is the BLAKE3 of its bytes.
+fn read_cid_sidecar(dir: &Path, hash: &str) -> Option<String> {
+    let bytes = std::fs::read(dir.join(format!("{hash}.cid"))).ok()?;
+    if bytes.is_empty() || bytes.len() > MAX_CID_SIDECAR_BYTES {
+        return None;
+    }
+    let cid = String::from_utf8(bytes).ok()?.trim().to_string();
+    crate::ipfs::validate_cid(&cid).ok()?;
+    Some(cid)
+}
+
 fn read_sidecar(dir: &Path, hash: &str) -> Option<String> {
     let path = dir.join(format!("{hash}.json"));
     if std::fs::metadata(&path).ok()?.len() as usize > MAX_SIDECAR_BYTES {

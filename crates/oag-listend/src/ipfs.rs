@@ -197,7 +197,7 @@ impl IpfsPublisher {
 }
 
 /// A CID is base32 or base58 text. Anything else is refused before it can reach a request line.
-fn validate_cid(cid: &str) -> Result<(), IpfsError> {
+pub(crate) fn validate_cid(cid: &str) -> Result<(), IpfsError> {
     let ok = !cid.is_empty() && cid.len() <= 128 && cid.bytes().all(|b| b.is_ascii_alphanumeric());
     if ok {
         Ok(())

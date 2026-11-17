@@ -508,6 +508,91 @@ async fn serve_by_cid() {
         .expect("run");
 }
 
+/// A restart must not re-add what the previous run recorded. The CID association is persisted beside
+/// the audio, so a fresh process reconstructs it instead of rewriting the library to IPFS.
+#[tokio::test]
+async fn a_restart_does_not_readd_what_the_store_recorded() {
+    let outcome = tokio::time::timeout(BOUND, restart_skip()).await;
+    outcome.expect("the restart exchange must complete within the bound")
+}
+
+async fn restart_skip() {
+    let dir = std::env::temp_dir().join(format!(
+        "oag-listend-cid-persist-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("make the store directory");
+
+    // First run: one publish, mirrored, into a persistent store.
+    let tone = wav::generate(71, wav::Sound::Tone);
+    let hash = {
+        let (addr, _seen) = stub(
+            "HTTP/1.1 200 OK\r\nContent-Length: 47\r\n\r\n{\"Hash\":\"bafykeep\",\"Name\":\"a\"}\r\n".into(),
+            1,
+        )
+        .await;
+        let (store, _) = AudioStore::with_directory(&dir, 1024 * 1024).expect("open store");
+        let shared = Arc::new(TokioMutex::new(store));
+        shared.lock().await.set_ipfs(Some(IpfsPublisher::new(addr)));
+        let hash = accept(&shared, tone.clone(), None).await;
+        assert_eq!(
+            shared.lock().await.mirror_summary(),
+            (1, 0),
+            "the first run mirrors once"
+        );
+        hash
+    };
+    assert!(
+        dir.join(format!("{hash}.cid")).exists(),
+        "the CID must be recorded beside the audio"
+    );
+
+    // Second run: reload the same directory and offer everything held. Nothing should be added --
+    // proved two ways, because a redundant add could fail to connect and still count as an attempt.
+    let (addr, seen) = stub(
+        "HTTP/1.1 200 OK\r\nContent-Length: 47\r\n\r\n{\"Hash\":\"bafylate\",\"Name\":\"a\"}\r\n"
+            .into(),
+        1,
+    )
+    .await;
+    let (store, report) = AudioStore::with_directory(&dir, 1024 * 1024).expect("reopen store");
+    assert_eq!(report.loaded, 1, "the audio reloads");
+    assert_eq!(
+        store.content_id(&hash),
+        Some("bafykeep"),
+        "the CID association reloads from its sidecar"
+    );
+    assert_eq!(
+        store.hash_for_cid("bafykeep"),
+        Some(hash.as_str()),
+        "and the reverse lookup too"
+    );
+    let shared = Arc::new(TokioMutex::new(store));
+    shared.lock().await.set_ipfs(Some(IpfsPublisher::new(addr)));
+    let offered = shared
+        .lock()
+        .await
+        .mirror_existing(Duration::from_secs(5))
+        .await;
+    assert_eq!(
+        offered, 0,
+        "nothing held should need offering after a restart"
+    );
+    assert!(
+        shared.lock().await.mirror_log().is_empty(),
+        "no mirror attempt may be logged"
+    );
+    assert!(
+        seen.lock().unwrap().is_empty(),
+        "and no request may reach the node"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Republishing identical bytes must not add them again: the store treats them as one item, so a
 /// mirror that added them once should not be asked a second time. This is what keeps restarts and
 /// repeated publishes from rewriting the library.
