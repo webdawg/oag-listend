@@ -166,5 +166,12 @@ move to the wire, they were already at the surface. See `SPEC.md` for the carrie
 cargo test -p oag-listend
 ```
 
-`scripts/` holds the same build-generation pruner as every other OAG repository; see
+Run every gate in one command before pushing:
+
+```
+scripts/check.sh             # fmt, clippy, rustdoc, tests
+scripts/check.sh --release   # the same, plus the suite in release
+```
+
+`scripts/` also holds the same build-generation pruner as every other OAG repository; see
 `scripts/README.md`.
