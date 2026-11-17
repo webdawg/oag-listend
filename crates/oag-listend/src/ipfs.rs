@@ -43,6 +43,17 @@ pub enum IpfsError {
     TooLarge,
     #[error("{0:?} is not a plausible content identifier")]
     BadCid(String),
+    #[error("the IPFS API sent a chunked reply, which this client does not decode")]
+    Chunked,
+}
+
+/// Whether the reply head asks for chunked transfer encoding. Kubo does this for larger cat
+/// responses; treating the chunk framing as audio would silently corrupt it, so it is refused.
+fn is_chunked(head: &str) -> bool {
+    head.lines().any(|line| {
+        let lower = line.to_ascii_lowercase();
+        lower.starts_with("transfer-encoding:") && lower.contains("chunked")
+    })
 }
 
 /// Posts bytes to a Kubo node's `/api/v0/add` and returns the resulting CID.
@@ -163,6 +174,9 @@ impl IpfsPublisher {
 
         let head_end = find_subslice(&reply, b"\r\n\r\n").ok_or(IpfsError::NotAdd)?;
         let head = String::from_utf8_lossy(&reply[..head_end]);
+        if is_chunked(&head) {
+            return Err(IpfsError::Chunked);
+        }
         let status = head.lines().next().unwrap_or("");
         let ok = status
             .split_whitespace()
@@ -237,6 +251,9 @@ fn split_api(api: &str) -> Result<(String, String), IpfsError> {
 fn parse_add_response(reply: &[u8]) -> Result<String, IpfsError> {
     let head_end = find_subslice(reply, b"\r\n\r\n").ok_or(IpfsError::NotAdd)?;
     let head = String::from_utf8_lossy(&reply[..head_end]);
+    if is_chunked(&head) {
+        return Err(IpfsError::Chunked);
+    }
     let mut lines = head.lines();
     let status = lines.next().ok_or(IpfsError::NotAdd)?;
     let ok = status
@@ -366,6 +383,38 @@ mod tests {
             Err(IpfsError::NotAdd)
         ));
         server.await.expect("join");
+    }
+
+    /// A chunked reply is refused rather than decoded as bytes, which would corrupt the audio.
+    #[tokio::test]
+    async fn a_chunked_reply_is_refused_not_misread() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr").port();
+        tokio::spawn(async move {
+            let Ok(Ok((mut stream, _))) =
+                tokio::time::timeout(Duration::from_secs(10), listener.accept()).await
+            else {
+                return;
+            };
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf).await;
+            let _ = stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n",
+                )
+                .await;
+            let _ = stream.flush().await;
+            let _ = stream.shutdown().await;
+        });
+        match IpfsPublisher::new(format!("127.0.0.1:{addr}"))
+            .cat("bafyabc")
+            .await
+        {
+            Err(IpfsError::Chunked) => {}
+            other => panic!("expected a chunked refusal, got {other:?}"),
+        }
     }
 
     /// An implausible identifier is refused before it can reach a request line, so a crafted path

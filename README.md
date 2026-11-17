@@ -72,8 +72,9 @@ cannot hold startup open.
 A TLS (`https://`) endpoint is refused plainly rather than silently downgraded to a cleartext
 request that would appear to work.
 
-This client has been tested against a stub that mimics `/api/v0/add`; it has **not** been tested
-against a real Kubo node, and it does not decode chunked replies. See `SPEC.md`. Then exchange audio with it over the native protocol:
+A chunked reply is refused rather than misread as audio -- treating the framing as bytes would
+silently corrupt what is served. This client has been tested against stubs that mimic `/api/v0/add`
+and `/api/v0/cat`; it has **not** been tested against a real Kubo node. See `SPEC.md`. Then exchange audio with it over the native protocol:
 
     cargo run -p oag-listend --example push_pull -- --addr 127.0.0.1:7100
     cargo run -p oag-listend --example push_pull -- --udp --addr 127.0.0.1:7120
@@ -144,7 +145,7 @@ address the daemon prints a note saying so. Use `--listen 127.0.0.1:...` to keep
 ## Status
 
 **Serves, and survives a restart.** Five ways to reach the audio are live and tested: the native
-protocol over TCP, HTTP, UDP, a Unix socket, and an IPFS mirror -- 63 unit tests plus 50 end-to-end
+protocol over TCP, HTTP, UDP, a Unix socket, and an IPFS mirror -- 64 unit tests plus 50 end-to-end
 tests (`cargo test -p oag-listend`). The store mutex covers lookup and insert, not byte
 copies or disk writes, so one slow client does not stall the others. Runs as a systemd service
 (`scripts/oag-listend.service`) and shuts down cleanly on SIGINT and SIGTERM. The native protocol, HTTP, UDP, and the Unix socket share one store,
