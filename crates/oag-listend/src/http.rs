@@ -628,7 +628,18 @@ async fn route(request: HttpRequest, store: &Arc<Mutex<AudioStore>>) -> HttpResp
             let content_type = AudioFormat::sniff(&bytes)
                 .map(|format| format.media_type().to_string())
                 .unwrap_or_else(|| "application/octet-stream".into());
-            let mut extra_headers = vec![("ETag".to_string(), format!("\"{cid}\""))];
+            // Content at a CID cannot change, so a client may cache it for good; and the BLAKE3 of
+            // what we actually send lets the receiver prove the bytes are the bytes -- the same
+            // guarantee every other route gives.
+            let content_hash = crate::AudioItem::new(bytes.clone(), None).content_hash;
+            let mut extra_headers = vec![
+                ("ETag".to_string(), format!("\"{cid}\"")),
+                (
+                    "Cache-Control".to_string(),
+                    "public, max-age=31536000, immutable".to_string(),
+                ),
+                ("X-Content-Hash".to_string(), content_hash),
+            ];
             if let Some(format) = AudioFormat::sniff(&bytes) {
                 extra_headers.push((
                     "Content-Disposition".to_string(),

@@ -487,6 +487,18 @@ async fn serve_by_cid() {
         "{text}"
     );
     assert!(text.contains("ETag: \"bafyabc\""), "{text}");
+    assert!(
+        text.to_ascii_lowercase()
+            .contains("cache-control: public, max-age=31536000, immutable"),
+        "CID content is immutable and may be cached: {text}"
+    );
+    // The receiver can prove the bytes are the bytes.
+    let expected = oag_listend::AudioItem::new(tone.clone(), None).content_hash;
+    assert!(
+        text.to_ascii_lowercase()
+            .contains(&format!("x-content-hash: {expected}")),
+        "the served BLAKE3 must be published so the client can verify: {text}"
+    );
 
     shutdown.shutdown();
     tokio::time::timeout(Duration::from_secs(5), run)

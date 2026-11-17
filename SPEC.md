@@ -274,8 +274,10 @@ because nothing that already worked stops working. Eviction drops the remembered
 `GET /ipfs/{cid}` is the read half: it calls `/api/v0/cat`, then applies the same sniff rule as
 every other inbound path. What comes back is served only if it is audio; anything else is refused
 without being echoed or stored, an implausible identifier is refused before any request is sent, and
-an unreachable node answers `502`. The bytes are identified by the CID the caller asked for -- this
-crate deliberately carries no multihash implementation, so it cannot check that they hash to it.
+an unreachable node answers `502`. Responses carry `Cache-Control: immutable`, an `ETag` of the CID,
+and `X-Content-Hash` with the BLAKE3 of the bytes actually sent, so the receiver can verify them. The
+bytes are identified by the CID the caller asked for -- this crate deliberately carries no multihash
+implementation, so it cannot check that they hash to it.
 
 The write client hand-rolls `POST /api/v0/add` as multipart form data and reads `Hash` from the reply,
 with a 10 s bound per read and write and a 64 KiB cap on the reply. A `https://` address is refused:

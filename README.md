@@ -59,7 +59,9 @@ items were mirrored and any failures, with each CID:
 
 `GET /ipfs/{cid}` also *reads* by content identifier: it fetches the object from Kubo and applies
 the same audio rule as every other inbound path, so a non-audio object is refused (never echoed,
-never stored) and an unreachable node answers 502. Without `--ipfs-api` the route does not exist.
+never stored) and an unreachable node answers 502. It answers with `Cache-Control: immutable`, an
+`ETag` of the CID, and `X-Content-Hash` carrying the BLAKE3 of the bytes actually sent, so the
+receiver can prove what it got. Without `--ipfs-api` the route does not exist.
 
 A client that fetches audio is told where else it lives: the reply carries the CID when the item
 has been mirrored -- as `X-IPFS-CID` on HTTP, and as an optional trailing field on the native
