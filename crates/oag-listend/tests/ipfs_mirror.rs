@@ -508,6 +508,56 @@ async fn serve_by_cid() {
         .expect("run");
 }
 
+/// Eviction must take the recorded CID with the audio, or a later restart would skip re-adding
+/// something that is no longer held.
+#[tokio::test]
+async fn eviction_removes_the_recorded_cid() {
+    let outcome = tokio::time::timeout(BOUND, evict_cid()).await;
+    outcome.expect("the eviction exchange must complete within the bound")
+}
+
+async fn evict_cid() {
+    let dir = std::env::temp_dir().join(format!(
+        "oag-listend-cid-evict-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("make the store directory");
+
+    // A bound that holds one sound but not two, so the second publish evicts the first.
+    let (addr, _seen) = stub(
+        "HTTP/1.1 200 OK\r\nContent-Length: 47\r\n\r\n{\"Hash\":\"bafyold\",\"Name\":\"a\"}\r\n"
+            .into(),
+        2,
+    )
+    .await;
+    let (store, _) = AudioStore::with_directory(&dir, 1_500).expect("open a small store");
+    let shared = Arc::new(TokioMutex::new(store));
+    shared.lock().await.set_ipfs(Some(IpfsPublisher::new(addr)));
+
+    let first = wav::generate(81, wav::Sound::Tone);
+    let first_hash = accept(&shared, first.clone(), None).await;
+    assert!(dir.join(format!("{first_hash}.cid")).exists());
+
+    let second = wav::generate(82, wav::Sound::Noise);
+    let second_hash = accept(&shared, second.clone(), None).await;
+
+    assert_ne!(first_hash, second_hash);
+    assert!(!dir.join(&first_hash).exists(), "the evicted audio is gone");
+    assert!(
+        !dir.join(format!("{first_hash}.cid")).exists(),
+        "its recorded CID must be evicted with it"
+    );
+    assert!(
+        dir.join(format!("{second_hash}.cid")).exists(),
+        "the survivor keeps its CID"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A restart must not re-add what the previous run recorded. The CID association is persisted beside
 /// the audio, so a fresh process reconstructs it instead of rewriting the library to IPFS.
 #[tokio::test]
