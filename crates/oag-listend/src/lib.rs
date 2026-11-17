@@ -673,7 +673,7 @@ impl AudioStore {
     }
 
     /// Record a mirror outcome produced outside [`Self::accept`] -- by
-    /// [`accept_and_mirror`](crate::accept_and_mirror), which sends without holding the lock.
+    /// [`accept_and_mirror`], which sends without holding the lock.
     pub fn record_mirror_outcome(&mut self, outcome: MirrorOutcome) {
         self.record_mirror(outcome);
     }
