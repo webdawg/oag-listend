@@ -19,6 +19,7 @@ use tokio::net::{TcpStream, UdpSocket};
 struct Args {
     addr: String,
     udp: bool,
+    unix: Option<String>,
     seed: u64,
 }
 
@@ -26,6 +27,7 @@ fn parse_args() -> Args {
     let mut args = Args {
         addr: "127.0.0.1:7100".into(),
         udp: false,
+        unix: None,
         seed: 1,
     };
     let mut it = std::env::args().skip(1);
@@ -33,6 +35,7 @@ fn parse_args() -> Args {
         match arg.as_str() {
             "--addr" => args.addr = flag_value(&mut it, "--addr"),
             "--udp" => args.udp = true,
+            "--unix" => args.unix = Some(flag_value(&mut it, "--unix")),
             "--version" | "-V" => {
                 println!(
                     "push_pull {} (frame protocol {})",
@@ -44,9 +47,11 @@ fn parse_args() -> Args {
             "--help" | "-h" => {
                 println!(
                     "push_pull -- push audio to a daemon and pull it back\n\n\
-                     Usage: push_pull [--addr ADDR] [--udp] [--seed U64] [--version] [--help]\n\n\
+                     Usage: push_pull [--addr ADDR] [--udp] [--unix PATH] [--seed U64]\n\
+                                      [--version] [--help]\n\n\
                        --addr ADDR   daemon address (default 127.0.0.1:7100)\n\
                        --udp         use the UDP datagram carrier\n\
+                       --unix PATH   use the Unix domain socket at PATH instead of a network\n\
                        --seed U64    seed for the generated sounds (default 1)\n\
                        --version     print the version and the frame protocol version\n\
                        --help        print this usage\n\n\
@@ -108,6 +113,22 @@ async fn main() {
 /// transport differs.
 async fn round_trip(args: &Args, request: &Request) -> std::io::Result<Response> {
     let frame = protocol::encode_frame(&protocol::encode_request(request));
+    if let Some(path) = &args.unix {
+        // The same session loop as TCP, over a filesystem socket: identical protocol and bounds.
+        let mut stream = tokio::net::UnixStream::connect(path).await?;
+        stream.write_all(&frame).await?;
+        stream.flush().await?;
+        let mut prefix = [0u8; 4];
+        tokio::time::timeout(Duration::from_secs(10), stream.read_exact(&mut prefix))
+            .await
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "read timed out"))??;
+        let len = u32::from_be_bytes(prefix) as usize;
+        let mut body = vec![0u8; len];
+        tokio::time::timeout(Duration::from_secs(10), stream.read_exact(&mut body))
+            .await
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "read timed out"))??;
+        return decode_body(&body);
+    }
     if args.udp {
         let socket = UdpSocket::bind("127.0.0.1:0").await?;
         let addr: std::net::SocketAddr = match args.addr.parse() {

@@ -82,6 +82,7 @@ and `/api/v0/cat`; it has **not** been tested against a real Kubo node. See `SPE
 
     cargo run -p oag-listend --example push_pull -- --addr 127.0.0.1:7100
     cargo run -p oag-listend --example push_pull -- --udp --addr 127.0.0.1:7120
+    cargo run -p oag-listend --example push_pull -- --unix /tmp/oag-listend.sock
 
 or over HTTP, with any client:
 
