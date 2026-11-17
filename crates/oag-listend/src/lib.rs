@@ -318,6 +318,11 @@ pub async fn accept_and_mirror(
     };
     let publisher = store.lock().await.ipfs.clone();
     if let Some(publisher) = publisher {
+        // These exact bytes are already on IPFS under a CID we recorded, so do not add them again.
+        // Without this, every repeated publish and every restart would rewrite the library.
+        if store.lock().await.mirror_cids.contains_key(&hash) {
+            return Ok(hash);
+        }
         // Read the bytes under a short lock, then send them without it.
         let item = match store.lock().await.serve(&hash) {
             Ok(item) => item,
@@ -613,6 +618,9 @@ impl AudioStore {
     async fn offer_to_ipfs(&mut self, content_hash: &str, bytes: &[u8]) {
         let ipfs = self.ipfs.clone();
         let Some(ipfs) = ipfs else { return };
+        if self.mirror_cids.contains_key(content_hash) {
+            return; // already offered; a restart must not rewrite the library
+        }
         let outcome = match ipfs.add(bytes).await {
             Ok(cid) => MirrorOutcome::Mirrored {
                 content_hash: content_hash.to_string(),

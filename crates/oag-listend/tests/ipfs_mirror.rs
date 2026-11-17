@@ -508,6 +508,49 @@ async fn serve_by_cid() {
         .expect("run");
 }
 
+/// Republishing identical bytes must not add them again: the store treats them as one item, so a
+/// mirror that added them once should not be asked a second time. This is what keeps restarts and
+/// repeated publishes from rewriting the library.
+#[tokio::test]
+async fn republishing_identical_audio_is_not_added_twice() {
+    let outcome = tokio::time::timeout(BOUND, duplicate_add()).await;
+    outcome.expect("within the bound")
+}
+
+async fn duplicate_add() {
+    let (addr, seen) = stub(
+        "HTTP/1.1 200 OK\r\nContent-Length: 47\r\n\r\n{\"Hash\":\"bafydup\",\"Name\":\"a\"}\r\n"
+            .into(),
+        1,
+    )
+    .await;
+    let store = Arc::new(TokioMutex::new(AudioStore::default()));
+    store.lock().await.set_ipfs(Some(IpfsPublisher::new(addr)));
+
+    let tone = wav::generate(61, wav::Sound::Tone);
+    let first = accept(&store, tone.clone(), None).await;
+    let second = accept(&store, tone.clone(), None).await;
+    assert_eq!(first, second, "identical bytes have one content hash");
+    assert_eq!(store.lock().await.len(), 1);
+    // The decisive evidence: the mirror log records one attempt, not two. A redundant add may
+    // fail to connect -- but it would still be logged, so this cannot pass vacuously.
+    assert_eq!(
+        store.lock().await.mirror_log().len(),
+        1,
+        "a duplicate publish must not attempt a second add"
+    );
+    // Exactly one add reached the node: the first publish.
+    let requests = std::mem::take(&mut *seen.lock().unwrap());
+    assert_eq!(
+        requests
+            .windows(b"POST ".len())
+            .filter(|w| *w == b"POST ")
+            .count(),
+        1,
+        "the same bytes must be offered exactly once"
+    );
+}
+
 /// A CID for audio we already hold must be served from here, so a Kubo node that answers adds but
 /// not cats cannot take held audio with it.
 #[tokio::test]
