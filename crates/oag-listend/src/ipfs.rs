@@ -125,12 +125,18 @@ impl IpfsPublisher {
 }
 
 /// Split `http://host:port/` or `host:port` into the connect address and the request path.
+///
+/// TLS is deliberately refused rather than half-supported: stripping `https://` and speaking plain
+/// HTTP to that port would look like a working configuration and silently send audio in clear.
 fn split_api(api: &str) -> Result<(String, String), IpfsError> {
-    let rest = api
-        .trim()
-        .strip_prefix("http://")
-        .or_else(|| api.trim().strip_prefix("https://"))
-        .unwrap_or(api.trim());
+    let trimmed = api.trim();
+    if trimmed.starts_with("https://") {
+        return Err(IpfsError::Connect {
+            api: api.to_string(),
+            reason: "https is not supported; give an http:// Kubo address".into(),
+        });
+    }
+    let rest = trimmed.strip_prefix("http://").unwrap_or(trimmed);
     let (host, path) = match rest.find('/') {
         Some(0) => {
             return Err(IpfsError::Connect {
@@ -285,6 +291,19 @@ mod tests {
             Err(IpfsError::NotAdd)
         ));
         server.await.expect("join");
+    }
+
+    /// A TLS endpoint must be refused plainly, not downgraded to a cleartext request that appears
+    /// to work.
+    #[test]
+    fn a_tls_endpoint_is_refused_rather_than_sent_in_clear() {
+        match split_api("https://127.0.0.1:5001") {
+            Err(e) => assert!(e.to_string().contains("https is not supported"), "{e}"),
+            Ok(_) => panic!("a TLS endpoint must not be accepted"),
+        }
+        // Plain http and a bare host:port both still resolve.
+        assert!(split_api("http://127.0.0.1:5001").is_ok());
+        assert!(split_api("127.0.0.1:5001").is_ok());
     }
 
     #[tokio::test]

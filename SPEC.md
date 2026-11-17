@@ -269,7 +269,8 @@ ignores it and a reply from a daemon that predates it still decodes -- no protoc
 because nothing that already worked stops working. Eviction drops the remembered CID.
 
 The client hand-rolls `POST /api/v0/add` as multipart form data and reads `Hash` from the reply,
-with a 10 s bound per read and write and a 64 KiB cap on the reply. It has been tested against a
+with a 10 s bound per read and write and a 64 KiB cap on the reply. A `https://` address is refused:
+speaking plain HTTP to a TLS port would look configured while sending audio in clear. It has been tested against a
 stub that mimics Kubo's add endpoint, end to end through `--ipfs-api`; it has **not** been tested
 against a real Kubo node, and it does not decode chunked replies. That limitation is stated here
 rather than discovered later.

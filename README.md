@@ -65,6 +65,9 @@ A restart with `--ipfs-api` also offers what is already stored, not only audio p
 started, so an existing library reaches IPFS too; that pass is bounded as a whole so a large store
 cannot hold startup open.
 
+A TLS (`https://`) endpoint is refused plainly rather than silently downgraded to a cleartext
+request that would appear to work.
+
 This client has been tested against a stub that mimics `/api/v0/add`; it has **not** been tested
 against a real Kubo node, and it does not decode chunked replies. See `SPEC.md`. Then exchange audio with it over the native protocol:
 
@@ -136,7 +139,7 @@ address the daemon prints a note saying so. Use `--listen 127.0.0.1:...` to keep
 ## Status
 
 **Serves, and survives a restart.** Five ways to reach the audio are live and tested: the native
-protocol over TCP, HTTP, UDP, a Unix socket, and an IPFS mirror -- 61 unit tests plus 46 end-to-end
+protocol over TCP, HTTP, UDP, a Unix socket, and an IPFS mirror -- 62 unit tests plus 46 end-to-end
 tests (`cargo test -p oag-listend`). The store mutex covers lookup and insert, not byte
 copies or disk writes, so one slow client does not stall the others. Runs as a systemd service
 (`scripts/oag-listend.service`) and shuts down cleanly on SIGINT and SIGTERM. The native protocol, HTTP, UDP, and the Unix socket share one store,
