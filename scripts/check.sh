@@ -30,4 +30,28 @@ echo "== tests${RELEASE:+ (release)}"
 # shellcheck disable=SC2086
 cargo test -p oag-listend $RELEASE
 
+echo "== systemd unit"
+if ! command -v systemd-analyze >/dev/null 2>&1; then
+    echo "   skipped: systemd-analyze is not installed"
+else
+    # The unit points at /usr/local/bin, which only exists after install. Verify a copy whose
+    # ExecStart names a binary this checkout has actually built.
+    BIN=""
+    for candidate in target/release/oag-listend target/debug/oag-listend; do
+        if [ -x "$candidate" ]; then
+            BIN="$(pwd)/$candidate"
+            break
+        fi
+    done
+    if [ -z "$BIN" ]; then
+        echo "   skipped: build the daemon first (no target/{release,debug}/oag-listend)"
+    else
+        TMP="$(mktemp -d)"
+        sed "s#/usr/local/bin/oag-listend#$BIN#" scripts/oag-listend.service \
+            > "$TMP/oag-listend.service"
+        systemd-analyze verify "$TMP/oag-listend.service"
+        rm -rf "$TMP"
+    fi
+fi
+
 echo "all gates passed"
