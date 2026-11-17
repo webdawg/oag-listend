@@ -586,11 +586,6 @@ impl AudioStore {
         self.ipfs = publisher;
     }
 
-    /// Whether a mirror is configured.
-    pub fn is_mirroring(&self) -> bool {
-        self.ipfs.is_some()
-    }
-
     /// The most recent mirror outcomes, oldest first.
     pub fn mirror_log(&self) -> &VecDeque<MirrorOutcome> {
         &self.mirror_log
