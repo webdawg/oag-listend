@@ -271,8 +271,10 @@ hash, `Response::Audio` carries it as an **optional trailing field**, and HTTP e
 ignores it and a reply from a daemon that predates it still decodes -- no protocol version change,
 because nothing that already worked stops working. Eviction drops the remembered CID.
 
-`GET /ipfs/{cid}` is the read half: it calls `/api/v0/cat`, then applies the same sniff rule as
-every other inbound path. What comes back is served only if it is audio; anything else is refused
+`GET /ipfs/{cid}` is the read half. A CID for audio this daemon already holds is served straight
+from the store -- those bytes are verifiable here and need no network -- and only an unfamiliar CID
+is sent to `/api/v0/cat`. Whatever comes back then faces the same sniff rule as every other inbound
+path. What comes back is served only if it is audio; anything else is refused
 without being echoed or stored, an implausible identifier is refused before any request is sent, and
 an unreachable node answers `502`. Responses carry `Cache-Control: immutable`, an `ETag` of the CID,
 and `X-Content-Hash` with the BLAKE3 of the bytes actually sent, so the receiver can verify them. The

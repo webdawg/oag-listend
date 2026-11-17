@@ -294,6 +294,9 @@ pub struct AudioStore {
     /// The CID Kubo assigned to each mirrored item, keyed by content hash, so a client that fetches
     /// audio can be told where else to find it. Dropped when the item is evicted.
     mirror_cids: HashMap<String, String>,
+    /// The same CIDs keyed the other way, so a client that arrives with only a CID can be served
+    /// from what we already hold instead of depending on the node being up.
+    cid_index: HashMap<String, String>,
 }
 
 /// Accept bytes through the inbound rule and then offer them to IPFS if a mirror is configured.
@@ -376,6 +379,7 @@ impl AudioStore {
             ipfs: None,
             mirror_log: VecDeque::new(),
             mirror_cids: HashMap::new(),
+            cid_index: HashMap::new(),
         }
     }
 
@@ -410,6 +414,7 @@ impl AudioStore {
             ipfs: None,
             mirror_log: VecDeque::new(),
             mirror_cids: HashMap::new(),
+            cid_index: HashMap::new(),
         };
         let mut report = LoadReport::default();
         let mut inserted = 0usize;
@@ -626,6 +631,11 @@ impl AudioStore {
         self.ipfs.clone()
     }
 
+    /// The content hash we hold for a CID, if this daemon has mirrored that item.
+    pub fn hash_for_cid(&self, cid: &str) -> Option<&str> {
+        self.cid_index.get(cid).map(String::as_str)
+    }
+
     /// Where else this item can be fetched, if the daemon has offered it to IPFS.
     pub fn content_id(&self, content_hash: &str) -> Option<&str> {
         self.mirror_cids.get(content_hash).map(String::as_str)
@@ -673,6 +683,9 @@ impl AudioStore {
         // fetches audio must be able to learn it, not only the shutdown report.
         if let MirrorOutcome::Mirrored { content_hash, cid } = &outcome {
             self.mirror_cids.insert(content_hash.clone(), cid.clone());
+            // And the other way round, so a client arriving with only a CID can be served from what
+            // we hold rather than depending on the node.
+            self.cid_index.insert(cid.clone(), content_hash.clone());
         }
         if self.mirror_log.len() >= MIRROR_LOG_LIMIT {
             self.mirror_log.pop_front();
@@ -682,7 +695,9 @@ impl AudioStore {
 
     /// Remove an evicted item's file, so the directory and the store agree on what is held.
     fn forget(&mut self, content_hash: &str) {
-        self.mirror_cids.remove(content_hash);
+        if let Some(cid) = self.mirror_cids.remove(content_hash) {
+            self.cid_index.remove(&cid);
+        }
         if let Some(dir) = &self.dir {
             self.evicted.push(dir.join(content_hash));
             self.evicted.push(dir.join(format!("{content_hash}.json")));
@@ -778,6 +793,7 @@ impl AudioStore {
             ipfs: None,
             mirror_log: VecDeque::new(),
             mirror_cids: HashMap::new(),
+            cid_index: HashMap::new(),
         }
     }
 }

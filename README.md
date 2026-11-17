@@ -57,7 +57,9 @@ items were mirrored and any failures, with each CID:
       ipfs mirror: 1 mirrored, 0 failed
         5f1a88dee8bd40af -> bafywired
 
-`GET /ipfs/{cid}` also *reads* by content identifier: it fetches the object from Kubo and applies
+`GET /ipfs/{cid}` also *reads* by content identifier. Audio this daemon already holds is served
+straight from the store, so a Kubo node that is down does not take held audio with it; only an
+unfamiliar CID goes out to the node, which is then fetched from Kubo and applies
 the same audio rule as every other inbound path, so a non-audio object is refused (never echoed,
 never stored) and an unreachable node answers 502. It answers with `Cache-Control: immutable`, an
 `ETag` of the CID, and `X-Content-Hash` carrying the BLAKE3 of the bytes actually sent, so the
@@ -147,7 +149,7 @@ address the daemon prints a note saying so. Use `--listen 127.0.0.1:...` to keep
 ## Status
 
 **Serves, and survives a restart.** Five ways to reach the audio are live and tested: the native
-protocol over TCP, HTTP, UDP, a Unix socket, and an IPFS mirror -- 64 unit tests plus 50 end-to-end
+protocol over TCP, HTTP, UDP, a Unix socket, and an IPFS mirror -- 64 unit tests plus 51 end-to-end
 tests (`cargo test -p oag-listend`). The store mutex covers lookup and insert, not byte
 copies or disk writes, so one slow client does not stall the others. Runs as a systemd service
 (`scripts/oag-listend.service`) and shuts down cleanly on SIGINT and SIGTERM. The native protocol, HTTP, UDP, and the Unix socket share one store,

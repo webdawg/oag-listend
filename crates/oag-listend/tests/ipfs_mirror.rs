@@ -508,6 +508,101 @@ async fn serve_by_cid() {
         .expect("run");
 }
 
+/// A CID for audio we already hold must be served from here, so a Kubo node that answers adds but
+/// not cats cannot take held audio with it.
+#[tokio::test]
+async fn a_held_cid_is_served_without_asking_the_node() {
+    let outcome = tokio::time::timeout(BOUND, held_cid_offline()).await;
+    outcome.expect("the held-CID exchange must complete within the bound")
+}
+
+async fn held_cid_offline() {
+    // Add works; cat answers 404. If the daemon asked the node, this would fail.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind stub");
+    let api_port = listener.local_addr().expect("stub addr").port();
+    tokio::spawn(async move {
+        let Ok(Ok((mut stream, _))) =
+            tokio::time::timeout(Duration::from_secs(10), listener.accept()).await
+        else {
+            return;
+        };
+        let mut buf = vec![0u8; 64 * 1024];
+        let mut got = Vec::new();
+        loop {
+            match tokio::time::timeout(Duration::from_secs(5), stream.read(&mut buf)).await {
+                Ok(Ok(0)) => break,
+                Ok(Ok(n)) => {
+                    got.extend_from_slice(&buf[..n]);
+                    if got.ends_with(b"--\r\n") {
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+        let reply = b"HTTP/1.1 200 OK\r\nContent-Length: 39\r\n\r\n{\"Hash\":\"bafyheld\",\"Name\":\"a\"}\r\n";
+        let _ = stream.write_all(reply).await;
+        let _ = stream.flush().await;
+        let _ = stream.shutdown().await;
+    });
+
+    let store = Arc::new(TokioMutex::new(AudioStore::default()));
+    store
+        .lock()
+        .await
+        .set_ipfs(Some(IpfsPublisher::new(format!("127.0.0.1:{api_port}"))));
+    let (native, native_addr) = ListendServer::bind_shared("127.0.0.1:0", Arc::clone(&store))
+        .await
+        .expect("bind native");
+    let (carrier, addr) = HttpCarrier::bind_shared("127.0.0.1:0", Arc::clone(&store))
+        .await
+        .expect("bind http");
+    let native_shutdown = native.shutdown_handle();
+    let shutdown = carrier.shutdown_handle();
+    let native_run = tokio::spawn(async move { native.run().await });
+    let run = tokio::spawn(async move { carrier.run().await });
+
+    // Publish through the native path so the item is mirrored and the CID index is filled.
+    let tone = wav::generate(51, wav::Sound::Tone);
+    let hash = match exchange(
+        native_addr,
+        &Request::Publish {
+            declared_media_type: Some("audio/wav".into()),
+            bytes: tone.clone(),
+        },
+    )
+    .await
+    {
+        Response::Published { content_hash } => content_hash,
+        other => panic!("expected Published, got {other:?}"),
+    };
+    assert_eq!(hash.len(), 64);
+
+    let response = http_get(addr, "/ipfs/bafyheld").await;
+    let text = String::from_utf8_lossy(&response);
+    assert!(
+        text.starts_with("HTTP/1.1 200"),
+        "a held CID must serve without the node's cat: {text}"
+    );
+    assert!(
+        text.to_ascii_lowercase()
+            .contains("content-type: audio/wav"),
+        "{text}"
+    );
+
+    native_shutdown.shutdown();
+    shutdown.shutdown();
+    for run in [native_run, run] {
+        tokio::time::timeout(Duration::from_secs(5), run)
+            .await
+            .expect("shutdown bound")
+            .expect("join")
+            .expect("run");
+    }
+}
+
 /// Whatever IPFS holds at a CID, only audio may come back out -- and a refusal never echoes it.
 #[tokio::test]
 async fn a_non_audio_object_is_refused_without_being_echoed() {

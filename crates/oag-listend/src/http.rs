@@ -609,13 +609,34 @@ async fn route(request: HttpRequest, store: &Arc<Mutex<AudioStore>>) -> HttpResp
             // every other inbound path applies. Nothing is stored -- this is a way to reach audio,
             // not a new inbound channel.
             let cid = &path["/ipfs/".len()..];
-            let publisher = store.lock().await.ipfs();
-            let Some(publisher) = publisher else {
-                return not_found();
+            // Prefer what we already hold: those bytes are verifiable here and need no network, so
+            // a Kubo node that is down does not take held audio with it. Only an unknown CID goes
+            // out to the node.
+            let held = {
+                let store = store.lock().await;
+                match store.hash_for_cid(cid) {
+                    Some(hash) => store.serve(hash).ok(),
+                    None => None,
+                }
             };
-            let bytes = match publisher.cat(cid).await {
-                Ok(bytes) => bytes,
-                Err(e) => return HttpResponse::text(502, "Bad Gateway", e.to_string().as_bytes()),
+            let from_node;
+            let bytes = match held {
+                Some(item) => item.bytes.clone(),
+                None => {
+                    let publisher = store.lock().await.ipfs();
+                    let Some(publisher) = publisher else {
+                        return not_found();
+                    };
+                    match publisher.cat(cid).await {
+                        Ok(bytes) => {
+                            from_node = bytes;
+                            from_node
+                        }
+                        Err(e) => {
+                            return HttpResponse::text(502, "Bad Gateway", e.to_string().as_bytes())
+                        }
+                    }
+                }
             };
             if AudioFormat::sniff(&bytes).is_none() {
                 // Never echo what came back, whatever it was.
