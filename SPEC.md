@@ -126,9 +126,9 @@ surface is the guarantee.
 
 `oag-listend` (the binary) binds an address, and `examples/push_pull.rs` exchanges audio with it.
 The protocol is length-prefixed frames with exactly five operations -- hello, publish, fetch,
-list, ping -- and nothing else. Every inbound publish goes through `AudioStore::accept`; every
-outbound fetch returns the bytes and the hash they must verify against; a ping returns the musical
-liveness item.
+list, ping -- and nothing else. Every inbound publish goes through `AudioStore::accept`, reached via
+the same `accept_and_mirror` entry point every carrier uses; every outbound fetch returns the bytes
+and the hash they must verify against; a ping returns the musical liveness item.
 
     oag-listend --listen 127.0.0.1:7100 --http 127.0.0.1:7101 --udp 127.0.0.1:7120 \
                 --unix /tmp/oag-listend.sock --dir /var/lib/oag-listend --seed 20261112
@@ -137,6 +137,7 @@ liveness item.
 bare `cargo run` should use a path it can create.)
     cargo run -p oag-listend --example push_pull -- --addr 127.0.0.1:7100
     cargo run -p oag-listend --example push_pull -- --udp --addr 127.0.0.1:7120
+    cargo run -p oag-listend --example push_pull -- --unix /tmp/oag-listend.sock
 
 Bounds: every read and write syscall has a 10 s timeout -- per syscall, not per transfer, so a
 slow client uploading or downloading the largest item is not cut off mid-transfer -- and each
@@ -195,7 +196,8 @@ job; a long recording belongs on TCP or HTTP.
 and scripts can call it for a quick answer even when a mirror is configured.
 
 `--dir PATH` makes the store content-addressed: `<PATH>/<hash>` is the audio, `<PATH>/<hash>.json`
-is the declared media type. An accepted item is written before it is answerable -- a write failure
+is the declared media type, and `<PATH>/<hash>.cid` is the IPFS CID once the item has been
+mirrored. An accepted item is written before it is answerable -- a write failure
 is a refusal, not a silent loss. The write is asynchronous (`tokio::fs`), so a slow disk delays the
 answer instead of stalling every carrier's executor thread. The eviction unlink is asynchronous
 too, and is taken off the lock: a slow disk must not stall every other client's accept.
@@ -207,7 +209,8 @@ pushed out by the byte bound while later entries loaded), and `truncated` (the d
 than the `MAX_LOAD_ENTRIES` the load will consider) -- never silent, and never counting an evicted
 entry as held. Only regular files are read -- a FIFO or device named like a hash would block
 forever, and a directory would error. A sidecar larger than 4 KiB is not a media type and is ignored
-rather than read into memory.
+rather than read into memory; a `.cid` sidecar must be a plausible identifier within 128 bytes.
+Neither sidecar counts toward the entry cap, and eviction removes both with the audio.
 
 Eviction unlinks the file, so the directory and the store agree on what is held and the
 `--max-bytes` bound is a bound on disk too, not just memory. Unlinking stays off the lock and
