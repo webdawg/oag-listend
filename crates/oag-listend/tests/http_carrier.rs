@@ -1158,3 +1158,53 @@ async fn oversized_head() {
         .expect("join")
         .expect("run");
 }
+
+/// An oversized body without `Expect: 100-continue` must be refused on the declared length too: the
+/// client is never told to commit an upload this carrier will reject, and nothing is stored.
+#[tokio::test]
+async fn an_oversized_body_without_expect_is_refused() {
+    tokio::time::timeout(BOUND, oversized_body())
+        .await
+        .expect("within the bound")
+}
+
+async fn oversized_body() {
+    let store = Arc::new(Mutex::new(AudioStore::default()));
+    let (carrier, addr) = HttpCarrier::bind_shared("127.0.0.1:0", Arc::clone(&store))
+        .await
+        .expect("bind http");
+    let shutdown = carrier.shutdown_handle();
+    let run = tokio::spawn(async move { carrier.run().await });
+
+    let head = format!(
+        "POST /audio HTTP/1.1\r\nHost: x\r\nContent-Type: audio/wav\r\n\
+         Content-Length: {}\r\nConnection: close\r\n\r\n",
+        oag_listend::http::MAX_BODY_BYTES + 1
+    );
+    let mut stream = TcpStream::connect(addr).await.expect("connect");
+    stream.write_all(head.as_bytes()).await.expect("write head");
+    // Send a few bytes so the reader can see data, but far short of the declaration.
+    stream.write_all(b"RIFF").await.expect("write body");
+    stream.flush().await.expect("flush");
+    // Half-close so the post-refusal drain ends instead of waiting out its timeout.
+    stream.shutdown().await.expect("half-close");
+
+    let mut out = Vec::new();
+    tokio::time::timeout(BOUND, stream.read_to_end(&mut out))
+        .await
+        .expect("read bound")
+        .expect("read");
+    let text = String::from_utf8_lossy(&out);
+    assert!(
+        text.starts_with("HTTP/1.1 413"),
+        "too large is 413, got {text}"
+    );
+    assert_eq!(store.lock().await.len(), 0, "nothing is stored");
+
+    shutdown.shutdown();
+    tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .expect("shutdown bound")
+        .expect("join")
+        .expect("run");
+}
