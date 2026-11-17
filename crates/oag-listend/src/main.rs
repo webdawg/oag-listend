@@ -6,6 +6,8 @@
 //! Both carriers share one store, and every inbound publish still goes through
 //! `AudioStore::accept`, so the daemon accepts audio and nothing else.
 
+#![forbid(unsafe_code)]
+
 use std::sync::Arc;
 use std::time::Duration;
 

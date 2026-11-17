@@ -6,7 +6,9 @@
 //!
 //! This is the smallest honest demonstration of the founding sentence: the daemon is on, audio
 //! goes in, audio comes back, and the receiver proves it is the same audio. Works over the native
-//! TCP carrier and the UDP datagram carrier.
+//! TCP carrier, the UDP datagram carrier, and a Unix domain socket.
+
+#![forbid(unsafe_code)]
 
 use std::time::Duration;
 
