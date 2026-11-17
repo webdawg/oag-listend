@@ -292,11 +292,18 @@ rather than discovered later.
 
 ## Next
 
-Reticulum is the remaining imagination carrier, and it is deliberately not implemented: it needs a
-physical interface and `oag-storage`, so no code can be written or run here.
+Of the imagination `Transport` seam, four are implemented in oag-listend (TCP, UDP, HTTP,
+IPFS) and one needs hardware:
+
+- **Reticulum.** Deliberately not implemented: it needs a physical interface and `oag-storage`, so
+  no code can be written or run here.
+- **HTTP CONNECT tunnel -- nothing to build.** `ProxiedTransport` is a *client* wrapper: it connects
+  to a proxy, asks for a tunnel, then runs another carrier's exchange through it. A client tunnelling
+  to this daemon's TCP listener needs no code on our side; TCP is TCP. Recording this so the carrier is
+  not re-investigated as missing.
 
 Worth doing next, in order:
 
-- Test the mirror against a real Kubo node, and add chunked-reply decoding if it proves necessary.
-- Verify the read path against a real Kubo node (`/api/v0/cat`), which needs infrastructure this
-  repository does not have.
+- Test both halves against a real Kubo node (`/api/v0/add` and `/api/v0/cat`), which needs
+  infrastructure this repository does not have. Add chunked-reply decoding only if it proves
+  necessary.
