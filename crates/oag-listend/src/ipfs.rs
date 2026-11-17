@@ -27,6 +27,9 @@ pub const ADD_TIMEOUT: Duration = Duration::from_secs(10);
 /// The reply to an add is a few hundred bytes. A larger reply is not a Kubo add response, and
 /// reading it without limit would let a hostile endpoint allocate for us.
 pub const MAX_RESPONSE_BYTES: usize = 64 * 1024;
+/// The largest object `/api/v0/cat` will return. Matches the largest item the store can serve, so
+/// fetching by CID cannot pull in more than the daemon would otherwise hold.
+pub const MAX_CAT_BYTES: usize = crate::protocol::MAX_SERVABLE_BYTES;
 
 #[derive(Debug, thiserror::Error)]
 pub enum IpfsError {
@@ -36,8 +39,10 @@ pub enum IpfsError {
     Status { status: String },
     #[error("the IPFS API reply was not an add response")]
     NotAdd,
-    #[error("the IPFS API reply exceeded {MAX_RESPONSE_BYTES} bytes")]
+    #[error("the IPFS API reply exceeded its bound")]
     TooLarge,
+    #[error("{0:?} is not a plausible content identifier")]
+    BadCid(String),
 }
 
 /// Posts bytes to a Kubo node's `/api/v0/add` and returns the resulting CID.
@@ -82,14 +87,8 @@ impl IpfsPublisher {
 
         let mut stream = tokio::time::timeout(ADD_TIMEOUT, TcpStream::connect(&host))
             .await
-            .map_err(|_| IpfsError::Connect {
-                api: self.api.clone(),
-                reason: "timed out".into(),
-            })?
-            .map_err(|e| IpfsError::Connect {
-                api: self.api.clone(),
-                reason: e.to_string(),
-            })?;
+            .map_err(|_| connect_error(&self.api, "timed out"))?
+            .map_err(|e| connect_error(&self.api, &e.to_string()))?;
 
         write_all_bounded(&mut stream, head.as_bytes(), &self.api).await?;
         write_all_bounded(&mut stream, &body, &self.api).await?;
@@ -121,6 +120,82 @@ impl IpfsPublisher {
             reply.extend_from_slice(&chunk[..n]);
         }
         parse_add_response(&reply)
+    }
+
+    /// Fetch the bytes stored at `cid`.
+    ///
+    /// This is the read half of the mirror. The bytes are whatever IPFS holds at that identifier; the
+    /// caller must still apply the audio rule, exactly as it would to bytes arriving on any other
+    /// carrier. Nothing here verifies that the bytes hash to the CID -- that needs an IPFS multihash
+    /// implementation this crate deliberately does not carry -- so the caller identifies them by CID
+    /// and says so.
+    pub async fn cat(&self, cid: &str) -> Result<Vec<u8>, IpfsError> {
+        validate_cid(cid)?;
+        let (host, _) = split_api(&self.api)?;
+        let mut stream = tokio::time::timeout(ADD_TIMEOUT, TcpStream::connect(&host))
+            .await
+            .map_err(|_| connect_error(&self.api, "timed out"))?
+            .map_err(|e| connect_error(&self.api, &e.to_string()))?;
+
+        let head = format!(
+            "POST /api/v0/cat?arg={cid} HTTP/1.1\r\n\
+         Host: {host}\r\n\
+         Content-Length: 0\r\n\
+         Connection: close\r\n\r\n"
+        );
+        write_all_bounded(&mut stream, head.as_bytes(), &self.api).await?;
+
+        let mut reply = Vec::new();
+        let mut chunk = [0u8; 8192];
+        loop {
+            if reply.len() > MAX_CAT_BYTES + MAX_RESPONSE_BYTES {
+                return Err(IpfsError::TooLarge);
+            }
+            let n = tokio::time::timeout(ADD_TIMEOUT, stream.read(&mut chunk))
+                .await
+                .map_err(|_| connect_error(&self.api, "read timed out"))?
+                .map_err(|e| connect_error(&self.api, &e.to_string()))?;
+            if n == 0 {
+                break;
+            }
+            reply.extend_from_slice(&chunk[..n]);
+        }
+
+        let head_end = find_subslice(&reply, b"\r\n\r\n").ok_or(IpfsError::NotAdd)?;
+        let head = String::from_utf8_lossy(&reply[..head_end]);
+        let status = head.lines().next().unwrap_or("");
+        let ok = status
+            .split_whitespace()
+            .nth(1)
+            .map(|code| code.starts_with('2'))
+            .unwrap_or(false);
+        if !ok {
+            return Err(IpfsError::Status {
+                status: status.to_string(),
+            });
+        }
+        let body = reply[head_end + 4..].to_vec();
+        if body.len() > MAX_CAT_BYTES {
+            return Err(IpfsError::TooLarge);
+        }
+        Ok(body)
+    }
+}
+
+/// A CID is base32 or base58 text. Anything else is refused before it can reach a request line.
+fn validate_cid(cid: &str) -> Result<(), IpfsError> {
+    let ok = !cid.is_empty() && cid.len() <= 128 && cid.bytes().all(|b| b.is_ascii_alphanumeric());
+    if ok {
+        Ok(())
+    } else {
+        Err(IpfsError::BadCid(cid.to_string()))
+    }
+}
+
+fn connect_error(api: &str, reason: &str) -> IpfsError {
+    IpfsError::Connect {
+        api: api.to_string(),
+        reason: reason.to_string(),
     }
 }
 
@@ -291,6 +366,18 @@ mod tests {
             Err(IpfsError::NotAdd)
         ));
         server.await.expect("join");
+    }
+
+    /// An implausible identifier is refused before it can reach a request line, so a crafted path
+    /// cannot turn into query injection.
+    #[tokio::test]
+    async fn an_implausible_cid_is_refused_without_a_network_call() {
+        for cid in ["", "..%2f..", "has space", &"a".repeat(200)] {
+            match IpfsPublisher::new("127.0.0.1:1").cat(cid).await {
+                Err(IpfsError::BadCid(_)) => {}
+                other => panic!("{cid:?} must be refused as a CID, got {other:?}"),
+            }
+        }
     }
 
     /// A TLS endpoint must be refused plainly, not downgraded to a cleartext request that appears

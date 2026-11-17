@@ -11,6 +11,9 @@
 //! - `GET  /ping`         -- the canonical musical liveness item, ranged like any other audio
 //! - `GET  /audio`        -- one page of content hashes, `?offset=&limit=`
 //! - `GET  /audio/{hash}` -- the audio bytes (404 if unknown)
+//! - `GET  /ipfs/{cid}`   -- audio fetched from IPFS by content identifier, sniffed like any other
+//!                           inbound bytes; 404 if no mirror is configured, 502 if it is unreachable,
+//!                           400 if what came back is not audio
 //! - `POST /audio`        -- publish a body (413 if too large, 400 if not audio)
 //! - `OPTIONS`            -- preflight answer, so another origin may `fetch()`
 //! - anything else        -- 404
@@ -597,6 +600,55 @@ async fn route(request: HttpRequest, store: &Arc<Mutex<AudioStore>>) -> HttpResp
                 } else {
                     None
                 };
+                response.body.clear();
+            }
+            response
+        }
+        ("GET", path) if path.starts_with("/ipfs/") => {
+            // The read half of the mirror: fetch by CID from IPFS and apply exactly the audio rule
+            // every other inbound path applies. Nothing is stored -- this is a way to reach audio,
+            // not a new inbound channel.
+            let cid = &path["/ipfs/".len()..];
+            let publisher = store.lock().await.ipfs();
+            let Some(publisher) = publisher else {
+                return not_found();
+            };
+            let bytes = match publisher.cat(cid).await {
+                Ok(bytes) => bytes,
+                Err(e) => return HttpResponse::text(502, "Bad Gateway", e.to_string().as_bytes()),
+            };
+            if AudioFormat::sniff(&bytes).is_none() {
+                // Never echo what came back, whatever it was.
+                return HttpResponse::text(
+                    400,
+                    "Bad Request",
+                    b"the object at that content identifier is not audio",
+                );
+            }
+            let content_type = AudioFormat::sniff(&bytes)
+                .map(|format| format.media_type().to_string())
+                .unwrap_or_else(|| "application/octet-stream".into());
+            let mut extra_headers = vec![("ETag".to_string(), format!("\"{cid}\""))];
+            if let Some(format) = AudioFormat::sniff(&bytes) {
+                extra_headers.push((
+                    "Content-Disposition".to_string(),
+                    format!("inline; filename=\"{cid}.{}\"", format.file_extension()),
+                ));
+            }
+            let mut response = HttpResponse {
+                status: 200,
+                reason: "OK",
+                content_type,
+                content_range: None,
+                accept_ranges: false,
+                content_length: None,
+                total_count: None,
+                offset: None,
+                extra_headers,
+                body: bytes,
+            };
+            if head_only {
+                response.content_length = Some(response.body.len());
                 response.body.clear();
             }
             response

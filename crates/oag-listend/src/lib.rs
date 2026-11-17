@@ -621,6 +621,11 @@ impl AudioStore {
         self.record_mirror(outcome);
     }
 
+    /// The configured mirror, if any, so a carrier can also *read* by CID.
+    pub fn ipfs(&self) -> Option<crate::ipfs::IpfsPublisher> {
+        self.ipfs.clone()
+    }
+
     /// Where else this item can be fetched, if the daemon has offered it to IPFS.
     pub fn content_id(&self, content_hash: &str) -> Option<&str> {
         self.mirror_cids.get(content_hash).map(String::as_str)

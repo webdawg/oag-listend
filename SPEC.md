@@ -271,7 +271,13 @@ hash, `Response::Audio` carries it as an **optional trailing field**, and HTTP e
 ignores it and a reply from a daemon that predates it still decodes -- no protocol version change,
 because nothing that already worked stops working. Eviction drops the remembered CID.
 
-The client hand-rolls `POST /api/v0/add` as multipart form data and reads `Hash` from the reply,
+`GET /ipfs/{cid}` is the read half: it calls `/api/v0/cat`, then applies the same sniff rule as
+every other inbound path. What comes back is served only if it is audio; anything else is refused
+without being echoed or stored, an implausible identifier is refused before any request is sent, and
+an unreachable node answers `502`. The bytes are identified by the CID the caller asked for -- this
+crate deliberately carries no multihash implementation, so it cannot check that they hash to it.
+
+The write client hand-rolls `POST /api/v0/add` as multipart form data and reads `Hash` from the reply,
 with a 10 s bound per read and write and a 64 KiB cap on the reply. A `https://` address is refused:
 speaking plain HTTP to a TLS port would look configured while sending audio in clear. It has been tested against a
 stub that mimics Kubo's add endpoint, end to end through `--ipfs-api`; it has **not** been tested
@@ -286,6 +292,5 @@ physical interface and `oag-storage`, so no code can be written or run here.
 Worth doing next, in order:
 
 - Test the mirror against a real Kubo node, and add chunked-reply decoding if it proves necessary.
-- Serve audio by CID, not just mirror to it: today a client can learn a CID but still needs this
-  daemon (or its own IPFS node) to fetch the bytes, because the frame protocol deliberately has no
-  operation for asking by CID.
+- Verify the read path against a real Kubo node (`/api/v0/cat`), which needs infrastructure this
+  repository does not have.

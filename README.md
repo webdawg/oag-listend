@@ -57,6 +57,10 @@ items were mirrored and any failures, with each CID:
       ipfs mirror: 1 mirrored, 0 failed
         5f1a88dee8bd40af -> bafywired
 
+`GET /ipfs/{cid}` also *reads* by content identifier: it fetches the object from Kubo and applies
+the same audio rule as every other inbound path, so a non-audio object is refused (never echoed,
+never stored) and an unreachable node answers 502. Without `--ipfs-api` the route does not exist.
+
 A client that fetches audio is told where else it lives: the reply carries the CID when the item
 has been mirrored -- as `X-IPFS-CID` on HTTP, and as an optional trailing field on the native
 protocol's audio response (a daemon that predates it sends nothing, and still decodes).
@@ -85,6 +89,7 @@ or over HTTP, with any client:
     curl -r 0-1023 http://127.0.0.1:7101/audio/<hash>                  # -> 206, a byte range
     curl -H 'If-None-Match: "<hash>"' http://127.0.0.1:7101/audio/<hash> # -> 304, revalidate
     curl http://127.0.0.1:7101/ping                                       # -> the musical ping
+    curl http://127.0.0.1:7101/ipfs/<cid>                                 # -> audio fetched from IPFS
 
 All four carriers share one store, and all accept audio and nothing else.
 
@@ -139,7 +144,7 @@ address the daemon prints a note saying so. Use `--listen 127.0.0.1:...` to keep
 ## Status
 
 **Serves, and survives a restart.** Five ways to reach the audio are live and tested: the native
-protocol over TCP, HTTP, UDP, a Unix socket, and an IPFS mirror -- 62 unit tests plus 47 end-to-end
+protocol over TCP, HTTP, UDP, a Unix socket, and an IPFS mirror -- 63 unit tests plus 50 end-to-end
 tests (`cargo test -p oag-listend`). The store mutex covers lookup and insert, not byte
 copies or disk writes, so one slow client does not stall the others. Runs as a systemd service
 (`scripts/oag-listend.service`) and shuts down cleanly on SIGINT and SIGTERM. The native protocol, HTTP, UDP, and the Unix socket share one store,

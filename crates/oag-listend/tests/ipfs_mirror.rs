@@ -425,3 +425,171 @@ async fn hung_mirror() {
         .expect("join")
         .expect("run");
 }
+
+/// A stub for the read half: reads one request head, then replies with `status` and `body`.
+async fn cat_stub(status: &'static str, body: Vec<u8>) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind cat stub");
+    let addr = listener.local_addr().expect("cat stub addr").port();
+    tokio::spawn(async move {
+        let Ok(Ok((mut stream, _))) =
+            tokio::time::timeout(Duration::from_secs(10), listener.accept()).await
+        else {
+            return;
+        };
+        let mut buf = vec![0u8; 8192];
+        let mut got = Vec::new();
+        while !got.windows(4).any(|w| w == b"\r\n\r\n") {
+            match tokio::time::timeout(Duration::from_secs(5), stream.read(&mut buf)).await {
+                Ok(Ok(0)) => break,
+                Ok(Ok(n)) => got.extend_from_slice(&buf[..n]),
+                _ => break,
+            }
+        }
+        let head = format!(
+            "{status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let _ = stream.write_all(head.as_bytes()).await;
+        let _ = stream.write_all(&body).await;
+        let _ = stream.flush().await;
+        let _ = stream.shutdown().await;
+    });
+    format!("127.0.0.1:{addr}")
+}
+
+/// `GET /ipfs/{cid}` reaches IPFS and applies the same audio rule as every other inbound path.
+#[tokio::test]
+async fn the_daemon_serves_audio_fetched_by_cid() {
+    let outcome = tokio::time::timeout(BOUND, serve_by_cid()).await;
+    outcome.expect("the by-CID exchange must complete within the bound")
+}
+
+async fn serve_by_cid() {
+    let tone = wav::generate(41, wav::Sound::Tone);
+    let api = cat_stub("HTTP/1.1 200 OK", tone.clone()).await;
+
+    let store = Arc::new(TokioMutex::new(AudioStore::default()));
+    store.lock().await.set_ipfs(Some(IpfsPublisher::new(api)));
+    let (carrier, addr) = HttpCarrier::bind_shared("127.0.0.1:0", Arc::clone(&store))
+        .await
+        .expect("bind http");
+    let shutdown = carrier.shutdown_handle();
+    let run = tokio::spawn(async move { carrier.run().await });
+
+    let head = http_get(addr, "/ipfs/bafyabc").await;
+    let text = String::from_utf8_lossy(&head);
+    assert!(text.starts_with("HTTP/1.1 200"), "{text}");
+    assert!(
+        text.to_ascii_lowercase()
+            .contains("content-type: audio/wav"),
+        "{text}"
+    );
+    assert!(text.contains("ETag: \"bafyabc\""), "{text}");
+
+    shutdown.shutdown();
+    tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .expect("shutdown bound")
+        .expect("join")
+        .expect("run");
+}
+
+/// Whatever IPFS holds at a CID, only audio may come back out -- and a refusal never echoes it.
+#[tokio::test]
+async fn a_non_audio_object_is_refused_without_being_echoed() {
+    let outcome = tokio::time::timeout(BOUND, refuse_non_audio()).await;
+    outcome.expect("the refusal exchange must complete within the bound")
+}
+
+async fn refuse_non_audio() {
+    let html = b"<html><body>not audio</body></html>".to_vec();
+    let api = cat_stub("HTTP/1.1 200 OK", html.clone()).await;
+
+    let store = Arc::new(TokioMutex::new(AudioStore::default()));
+    store.lock().await.set_ipfs(Some(IpfsPublisher::new(api)));
+    let (carrier, addr) = HttpCarrier::bind_shared("127.0.0.1:0", Arc::clone(&store))
+        .await
+        .expect("bind http");
+    let shutdown = carrier.shutdown_handle();
+    let run = tokio::spawn(async move { carrier.run().await });
+
+    let response = http_get(addr, "/ipfs/bafynotaudio").await;
+    let text = String::from_utf8_lossy(&response);
+    assert!(text.starts_with("HTTP/1.1 400"), "{text}");
+    assert!(
+        !text.contains("<html>"),
+        "a refusal must not echo what came back: {text}"
+    );
+
+    shutdown.shutdown();
+    tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .expect("shutdown bound")
+        .expect("join")
+        .expect("run");
+}
+
+/// Without a mirror the route does not exist; with an unreachable node it says so plainly.
+#[tokio::test]
+async fn by_cid_needs_a_reachable_mirror() {
+    let outcome = tokio::time::timeout(BOUND, by_cid_errors()).await;
+    outcome.expect("the error exchange must complete within the bound")
+}
+
+async fn by_cid_errors() {
+    // No mirror configured at all.
+    let store = Arc::new(TokioMutex::new(AudioStore::default()));
+    let (carrier, addr) = HttpCarrier::bind_shared("127.0.0.1:0", Arc::clone(&store))
+        .await
+        .expect("bind http");
+    let shutdown = carrier.shutdown_handle();
+    let run = tokio::spawn(async move { carrier.run().await });
+    let response = http_get(addr, "/ipfs/bafyabc").await;
+    assert!(
+        String::from_utf8_lossy(&response).starts_with("HTTP/1.1 404"),
+        "{}",
+        String::from_utf8_lossy(&response)
+    );
+    shutdown.shutdown();
+    tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .expect("shutdown bound")
+        .expect("join")
+        .expect("run");
+
+    // A mirror that cannot be reached.
+    let store = Arc::new(TokioMutex::new(AudioStore::default()));
+    store
+        .lock()
+        .await
+        .set_ipfs(Some(IpfsPublisher::new("127.0.0.1:1")));
+    let (carrier, addr) = HttpCarrier::bind_shared("127.0.0.1:0", Arc::clone(&store))
+        .await
+        .expect("bind http");
+    let shutdown = carrier.shutdown_handle();
+    let run = tokio::spawn(async move { carrier.run().await });
+    let response = http_get(addr, "/ipfs/bafyabc").await;
+    let text = String::from_utf8_lossy(&response);
+    assert!(text.starts_with("HTTP/1.1 502"), "{text}");
+    assert!(
+        text.to_ascii_lowercase().contains("cannot reach"),
+        "the failure should say what happened: {text}"
+    );
+
+    // An implausible identifier is refused before it can reach a request line.
+    let response = http_get(addr, "/ipfs/..%2f..%2fetc").await;
+    assert!(
+        String::from_utf8_lossy(&response).starts_with("HTTP/1.1 502"),
+        "{}",
+        String::from_utf8_lossy(&response)
+    );
+
+    shutdown.shutdown();
+    tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .expect("shutdown bound")
+        .expect("join")
+        .expect("run");
+}
