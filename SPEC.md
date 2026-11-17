@@ -9,14 +9,33 @@ content-addressed, so `--dir` persists every accepted sound under its BLAKE3 and
 back. The daemon publishes a small seeded set of generated sounds, accepts audio, and serves it back
 with the BLAKE3 of the bytes.
 
-`cargo test -p oag-listend` runs 56 unit and 33 end-to-end tests, all green. End to end they cover:
-the native back-and-forth (publish, fetch, verify, reject non-audio, not-found); eviction under the
-byte bound; the per-frame cap refusing an oversized length before any body is read; native listing
-pagination; each of the six named audio signatures, in both directions, over the wire; HTTP serving
-every format under its own content type; HTTP refusal, streaming, ranges, HEAD, validators and
-CORS; the shared store across carriers; UDP; the Unix socket; persistence across a restart;
-concurrency; the operator binary (`--version`, `--help`, usage exit codes, start/serve/stop) and
-`--check`; and the musical ping on every carrier. The audio rules have not moved.
+`cargo test -p oag-listend` runs 64 unit and 58 end-to-end tests, all green, in debug and
+release. End to end they cover:
+
+- the native back-and-forth: publish, fetch, verify, reject non-audio, not-found;
+- eviction under the byte bound, and eviction removing the recorded CID sidecar;
+- the per-frame cap refusing an oversized length before any body is read, and short or lying
+declared lengths on the stream carriers ending rather than waiting;
+- native listing pagination, including pages past the end;
+- each of the six named audio signatures, in both directions, over the wire, and HTTP serving every
+format under its own content type;
+- HTTP refusal, streaming, ranges, HEAD, validators, CORS, oversized bodies with and without
+`Expect`, header floods, and chunked uploads;
+- the shared store across carriers, UDP, the Unix socket, and persistence across a restart;
+- concurrency: many publishers, a stalled reader not stalling others, the session cap, and a hung
+IPFS node not stalling the daemon;
+- the IPFS mirror: mirroring accepted audio, serving by CID (local-first for what is held),
+idempotence within a run and across a restart, refused cleartext downgrades, refused chunked
+replies, and refusals that never echo or store what came back;
+- the musical ping on every carrier, answering with audio rather than an empty control pong;
+- hostile input: deterministic fuzzing of the codec and of all four carriers, with liveness asserted
+afterwards;
+- the operator surface: the daemon binary (`--version`, `--help`, usage exit codes, start/serve/stop,
+`--check`, refused startup generation, non-loopback warnings) and the `push_pull` client's CLI.
+
+`./scripts/check.sh [--release]` holds the whole bar in one command: fmt, clippy, rustdoc with
+warnings denied, the test suite, and `systemd-analyze verify` on the shipped unit. The audio rules
+have not moved.
 
 ## The idea, recorded verbatim
 
