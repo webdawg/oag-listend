@@ -86,7 +86,6 @@ async fn concurrent_memory() {
 
     let mut tasks = Vec::new();
     for task in 0..16u64 {
-        let addr = addr;
         tasks.push(tokio::spawn(async move {
             let mut hashes = Vec::new();
             for i in 0..20u64 {
@@ -313,7 +312,6 @@ async fn concurrent_persistent(dir: &std::path::Path) {
 
     let mut tasks = Vec::new();
     for task in 0..8u64 {
-        let addr = addr;
         tasks.push(tokio::spawn(async move {
             let mut hashes = Vec::new();
             for i in 0..10u64 {

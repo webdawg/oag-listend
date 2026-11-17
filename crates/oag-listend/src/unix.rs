@@ -40,7 +40,7 @@ impl UnixCarrier {
         store: Arc<Mutex<AudioStore>>,
     ) -> std::io::Result<(Self, PathBuf)> {
         let path = path.into();
-        if let Some(metadata) = std::fs::metadata(&path).ok() {
+        if let Ok(metadata) = std::fs::metadata(&path) {
             // Only a socket is ours to remove. A regular file or directory at the path is not a
             // stale socket, and deleting it would destroy something the operator put there.
             if !metadata.file_type().is_socket() {

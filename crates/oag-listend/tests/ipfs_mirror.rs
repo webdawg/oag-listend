@@ -202,7 +202,7 @@ async fn mirror_existing() {
     assert_eq!(offered, 2, "every held item must be offered");
     assert_eq!(store.mirror_summary(), (2, 0));
     assert!(
-        seen.lock().unwrap().len() > 0,
+        !seen.lock().unwrap().is_empty(),
         "the stub must have received the audio"
     );
 }

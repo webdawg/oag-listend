@@ -186,9 +186,9 @@ mod tests {
     use crate::wav::{self, Sound};
 
     #[test]
-    fn the_frame_bound_is_the_datagram_bound() {
-        assert!(MAX_FRAME_BYTES < MAX_DATAGRAM_BYTES);
-        assert!(MAX_FRAME_BYTES <= 65_503);
+    fn the_frame_bound_is_the_datagram_bound_minus_the_prefix() {
+        // 65,507 is the largest IPv4 UDP payload; four bytes of that are the frame prefix.
+        assert_eq!(MAX_FRAME_BYTES + 4, MAX_DATAGRAM_BYTES);
     }
 
     #[tokio::test]

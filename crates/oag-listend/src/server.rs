@@ -468,7 +468,7 @@ mod tests {
             }
             got
         });
-        super::write_all_bounded(&mut client, &vec![9u8; 100], Duration::from_millis(50))
+        super::write_all_bounded(&mut client, &[9u8; 100], Duration::from_millis(50))
             .await
             .expect("a slow but progressing write must succeed");
         let got = reader.await.unwrap();

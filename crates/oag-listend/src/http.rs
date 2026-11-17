@@ -11,9 +11,7 @@
 //! - `GET  /ping`         -- the canonical musical liveness item, ranged like any other audio
 //! - `GET  /audio`        -- one page of content hashes, `?offset=&limit=`
 //! - `GET  /audio/{hash}` -- the audio bytes (404 if unknown)
-//! - `GET  /ipfs/{cid}`   -- audio fetched from IPFS by content identifier, sniffed like any other
-//!                           inbound bytes; 404 if no mirror is configured, 502 if it is unreachable,
-//!                           400 if what came back is not audio
+//! - `GET  /ipfs/{cid}`   -- audio fetched from IPFS, sniffed like any other inbound bytes
 //! - `POST /audio`        -- publish a body (413 if too large, 400 if not audio)
 //! - `OPTIONS`            -- preflight answer, so another origin may `fetch()`
 //! - anything else        -- 404
