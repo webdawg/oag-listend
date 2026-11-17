@@ -48,8 +48,9 @@ given.
 
 `--ipfs-api ADDR` also offers every accepted item to a Kubo node at `ADDR`, so audio reaches a network
 whose clients never have to connect here. It is best-effort: the bytes are written locally first, and
-a mirror failure is reported rather than allowed to lose audio. At shutdown the daemon prints how many
-items were mirrored and any failures, with each CID:
+a mirror failure is reported rather than allowed to lose audio. It is also idempotent -- a repeated
+publish, and every restart, adds what is already recorded exactly once rather than rewriting the
+library. At shutdown the daemon prints how many items were mirrored and any failures, with each CID:
 
     oag-listend --ipfs-api 127.0.0.1:5001
     ...
@@ -59,7 +60,7 @@ items were mirrored and any failures, with each CID:
 
 `GET /ipfs/{cid}` also *reads* by content identifier. Audio this daemon already holds is served
 straight from the store, so a Kubo node that is down does not take held audio with it; only an
-unfamiliar CID goes out to the node, which is then fetched from Kubo and applies
+unfamiliar CID goes out to the node; what comes back is then held to
 the same audio rule as every other inbound path, so a non-audio object is refused (never echoed,
 never stored) and an unreachable node answers 502. It answers with `Cache-Control: immutable`, an
 `ETag` of the CID, and `X-Content-Hash` carrying the BLAKE3 of the bytes actually sent, so the
