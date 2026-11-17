@@ -12,9 +12,12 @@ use std::time::Duration;
 
 use oag_listend::http::HttpCarrier;
 use oag_listend::protocol::{self, Request, Response, WireError};
+use oag_listend::udp::UdpCarrier;
+use oag_listend::unix::UnixCarrier;
 use oag_listend::{wav, AudioFormat, AudioStore, ListendServer};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 
 const BOUND: Duration = Duration::from_secs(30);
@@ -81,10 +84,29 @@ async fn garbage() {
     let (http, http_addr) = HttpCarrier::bind_shared("127.0.0.1:0", Arc::clone(&store))
         .await
         .expect("bind http");
+    let (udp, udp_addr) = UdpCarrier::bind_shared("127.0.0.1:0", Arc::clone(&store))
+        .await
+        .expect("bind udp");
+    let sock_dir = std::env::temp_dir().join(format!(
+        "oag-listend-robustness-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&sock_dir).unwrap();
+    let sock_path = sock_dir.join("audio.sock");
+    let (unix, _) = UnixCarrier::bind_shared(&sock_path, Arc::clone(&store))
+        .await
+        .expect("bind unix");
     let native_shutdown = native.shutdown_handle();
     let http_shutdown = http.shutdown_handle();
+    let udp_shutdown = udp.shutdown_handle();
+    let unix_shutdown = unix.shutdown_handle();
     let native_run = tokio::spawn(async move { native.run().await });
     let http_run = tokio::spawn(async move { http.run().await });
+    let udp_run = tokio::spawn(async move { udp.run().await });
+    let unix_run = tokio::spawn(async move { unix.run().await });
 
     let mut lcg = Lcg(0x6A09_E667_F3BC_D001);
     // Valid framing around random bodies: the daemon reads exactly this much, so nothing blocks.
@@ -114,6 +136,30 @@ async fn garbage() {
         let _ = stream.write_all(&head).await;
         let _ = stream.flush().await;
         let _ = stream.shutdown().await;
+        let mut sink = vec![0u8; 4096];
+        let _ = tokio::time::timeout(Duration::from_millis(250), stream.read(&mut sink)).await;
+    }
+
+    // Datagrams: random framed bodies to the UDP carrier, whose receive path is its own.
+    let udp_client = UdpSocket::bind("127.0.0.1:0").await.expect("bind client");
+    for _ in 0..100 {
+        let n = (lcg.next() as usize) % 2_000;
+        let frame = protocol::encode_frame(&lcg.bytes(n));
+        if udp_client.send_to(&frame, udp_addr).await.is_err() {
+            break;
+        }
+    }
+
+    // And the Unix socket, which shares the session loop with TCP but has its own accept path.
+    for _ in 0..100 {
+        let n = (lcg.next() as usize) % 2_000;
+        let frame = protocol::encode_frame(&lcg.bytes(n));
+        let mut stream = match tokio::net::UnixStream::connect(&sock_path).await {
+            Ok(stream) => stream,
+            Err(_) => continue,
+        };
+        let _ = stream.write_all(&frame).await;
+        let _ = stream.flush().await;
         let mut sink = vec![0u8; 4096];
         let _ = tokio::time::timeout(Duration::from_millis(250), stream.read(&mut sink)).await;
     }
@@ -152,11 +198,14 @@ async fn garbage() {
 
     native_shutdown.shutdown();
     http_shutdown.shutdown();
-    for run in [native_run, http_run] {
+    udp_shutdown.shutdown();
+    unix_shutdown.shutdown();
+    for run in [native_run, http_run, udp_run, unix_run] {
         tokio::time::timeout(Duration::from_secs(5), run)
             .await
             .expect("shutdown bound")
             .expect("join")
             .expect("run");
     }
+    let _ = std::fs::remove_dir_all(&sock_dir);
 }
