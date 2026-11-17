@@ -296,6 +296,45 @@ pub struct AudioStore {
     mirror_cids: HashMap<String, String>,
 }
 
+/// Accept bytes through the inbound rule and then offer them to IPFS if a mirror is configured.
+///
+/// The two halves are deliberately separate. `accept` takes the store lock for the rule, the
+/// durable write, and the insert; the network call happens **after** that lock is released. A Kubo
+/// node that is down or slow must not stall every other client's publish and fetch behind it.
+///
+/// This is the function carriers call. `AudioStore::accept` stays the pure inbound rule, so a
+/// mirror cannot become part of what "accepted" means.
+pub async fn accept_and_mirror(
+    store: &Arc<tokio::sync::Mutex<AudioStore>>,
+    bytes: Vec<u8>,
+    declared_media_type: Option<String>,
+) -> Result<String, ListendError> {
+    let hash = {
+        let mut store = store.lock().await;
+        store.accept(bytes, declared_media_type).await?
+    };
+    let publisher = store.lock().await.ipfs.clone();
+    if let Some(publisher) = publisher {
+        // Read the bytes under a short lock, then send them without it.
+        let item = match store.lock().await.serve(&hash) {
+            Ok(item) => item,
+            Err(_) => return Ok(hash),
+        };
+        let outcome = match publisher.add(&item.bytes).await {
+            Ok(cid) => MirrorOutcome::Mirrored {
+                content_hash: hash.clone(),
+                cid,
+            },
+            Err(e) => MirrorOutcome::Failed {
+                content_hash: hash.clone(),
+                reason: e.to_string(),
+            },
+        };
+        store.lock().await.record_mirror_outcome(outcome);
+    }
+    Ok(hash)
+}
+
 /// What happened when an accepted item was offered to IPFS.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MirrorOutcome {
@@ -502,7 +541,6 @@ impl AudioStore {
         }
         // Offer the same bytes to IPFS, best-effort, once they are durable here. A mirror failure
         // is recorded, never propagated: losing a copy must not lose the audio.
-        self.offer_to_ipfs(&item.content_hash, &item.bytes).await;
         let hash = self.publish(item);
         // Unlink what eviction pushed out, off the lock. A failed unlink is best-effort, exactly
         // as the synchronous version was; the item is gone from the index either way.
@@ -585,9 +623,6 @@ impl AudioStore {
                 reason: e.to_string(),
             },
         };
-        if let MirrorOutcome::Mirrored { content_hash, cid } = &outcome {
-            self.mirror_cids.insert(content_hash.clone(), cid.clone());
-        }
         self.record_mirror(outcome);
     }
 
@@ -627,7 +662,18 @@ impl AudioStore {
         offered
     }
 
+    /// Record a mirror outcome produced outside [`Self::accept`] -- by
+    /// [`accept_and_mirror`](crate::accept_and_mirror), which sends without holding the lock.
+    pub fn record_mirror_outcome(&mut self, outcome: MirrorOutcome) {
+        self.record_mirror(outcome);
+    }
+
     fn record_mirror(&mut self, outcome: MirrorOutcome) {
+        // Remember the CID where it is known, whichever path produced the outcome: a client that
+        // fetches audio must be able to learn it, not only the shutdown report.
+        if let MirrorOutcome::Mirrored { content_hash, cid } = &outcome {
+            self.mirror_cids.insert(content_hash.clone(), cid.clone());
+        }
         if self.mirror_log.len() >= MIRROR_LOG_LIMIT {
             self.mirror_log.pop_front();
         }

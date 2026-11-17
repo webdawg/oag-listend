@@ -617,9 +617,9 @@ async fn route(request: HttpRequest, store: &Arc<Mutex<AudioStore>>) -> HttpResp
                     b"chunked transfer encoding is not supported; send Content-Length",
                 );
             }
-            let mut store = store.lock().await;
             let body_len = request.body.len();
-            match store.accept(request.body, request.content_type).await {
+            // Same entry point as every other carrier: accept under the lock, mirror after it.
+            match crate::accept_and_mirror(store, request.body, request.content_type).await {
                 Ok(hash) => HttpResponse::text(201, "Created", hash.as_bytes()),
                 Err(ListendError::NotAudio) => HttpResponse::text(
                     400,
@@ -633,7 +633,7 @@ async fn route(request: HttpRequest, store: &Arc<Mutex<AudioStore>>) -> HttpResp
                     "Payload Too Large",
                     ListendError::TooLarge {
                         len: body_len,
-                        max: store.max_bytes(),
+                        max: store.lock().await.max_bytes(),
                     }
                     .to_string()
                     .as_bytes(),

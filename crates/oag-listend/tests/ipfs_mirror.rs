@@ -17,6 +17,17 @@ use oag_listend::{wav, AudioFormat, AudioStore, ListendServer, MirrorOutcome};
 
 const BOUND: Duration = Duration::from_secs(20);
 
+/// Accept through the same entry point the carriers use, so the mirror is exercised too.
+async fn accept(
+    store: &Arc<TokioMutex<AudioStore>>,
+    bytes: Vec<u8>,
+    declared: Option<String>,
+) -> String {
+    oag_listend::accept_and_mirror(store, bytes, declared)
+        .await
+        .expect("the audio must be accepted")
+}
+
 /// A stub that answers like Kubo to exactly `expected` requests, and records every request body.
 async fn stub(response: String, expected: usize) -> (String, Arc<Mutex<Vec<u8>>>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -67,19 +78,20 @@ async fn mirror_ok() {
         1,
     )
     .await;
-    let mut store = AudioStore::default();
-    store.set_ipfs(Some(IpfsPublisher::new(addr)));
+    let store = Arc::new(TokioMutex::new(AudioStore::default()));
+    store.lock().await.set_ipfs(Some(IpfsPublisher::new(addr)));
 
     let tone = wav::generate(5, wav::Sound::Tone);
-    let hash = store
-        .accept(tone.clone(), Some("audio/wav".into()))
-        .await
-        .expect("the audio must still be accepted");
+    let hash = accept(&store, tone.clone(), Some("audio/wav".into())).await;
 
-    assert_eq!(store.mirror_summary(), (1, 0), "one mirror, no failures");
     assert_eq!(
-        store.mirror_log().back(),
-        Some(&MirrorOutcome::Mirrored {
+        store.lock().await.mirror_summary(),
+        (1, 0),
+        "one mirror, no failures"
+    );
+    assert_eq!(
+        store.lock().await.mirror_log().back().cloned(),
+        Some(MirrorOutcome::Mirrored {
             content_hash: hash.clone(),
             cid: "bafyaccepted".into(),
         })
@@ -94,7 +106,11 @@ async fn mirror_ok() {
         sent_bytes.windows(tone.len()).any(|w| w == tone.as_slice()),
         "the posted body must carry the audio"
     );
-    assert_eq!(store.len(), 1, "the audio is held locally regardless");
+    assert_eq!(
+        store.lock().await.len(),
+        1,
+        "the audio is held locally regardless"
+    );
 }
 
 #[tokio::test]
@@ -109,31 +125,29 @@ async fn mirror_fails() {
         1,
     )
     .await;
-    let mut store = AudioStore::default();
-    store.set_ipfs(Some(IpfsPublisher::new(addr)));
+    let store = Arc::new(TokioMutex::new(AudioStore::default()));
+    store.lock().await.set_ipfs(Some(IpfsPublisher::new(addr)));
 
     let noise = wav::generate(6, wav::Sound::Noise);
-    let hash = store
-        .accept(noise.clone(), None)
-        .await
-        .expect("an IPFS failure must not refuse the audio");
+    let hash = accept(&store, noise.clone(), None).await;
 
     assert_eq!(
-        store.len(),
+        store.lock().await.len(),
         1,
         "the audio is stored despite the mirror failing"
     );
     assert!(
-        store.serve(&hash).is_ok(),
+        store.lock().await.serve(&hash).is_ok(),
         "and it is served, byte for byte"
     );
-    assert_eq!(store.mirror_summary(), (0, 1));
-    match store.mirror_log().back() {
+    assert_eq!(store.lock().await.mirror_summary(), (0, 1));
+    let outcome = store.lock().await.mirror_log().back().cloned();
+    match outcome {
         Some(MirrorOutcome::Failed {
             content_hash,
             reason,
         }) => {
-            assert_eq!(content_hash, &hash);
+            assert_eq!(content_hash, hash);
             assert!(reason.contains("500"), "{reason}");
         }
         other => panic!("expected a recorded failure, got {other:?}"),
@@ -143,16 +157,16 @@ async fn mirror_fails() {
 /// An unreachable API behaves the same way: reported, never fatal.
 #[tokio::test]
 async fn an_unreachable_api_is_reported_not_fatal() {
-    let mut store = AudioStore::default();
-    store.set_ipfs(Some(IpfsPublisher::new("127.0.0.1:1")));
-    let tone = wav::generate(7, wav::Sound::Silence);
-    let hash = store
-        .accept(tone.clone(), None)
+    let store = Arc::new(TokioMutex::new(AudioStore::default()));
+    store
+        .lock()
         .await
-        .expect("an unreachable mirror must not refuse the audio");
+        .set_ipfs(Some(IpfsPublisher::new("127.0.0.1:1")));
+    let tone = wav::generate(7, wav::Sound::Silence);
+    let hash = accept(&store, tone.clone(), None).await;
     assert_eq!(AudioFormat::sniff(&tone), Some(AudioFormat::Wav));
-    assert_eq!(store.mirror_summary(), (0, 1));
-    assert!(store.serve(&hash).is_ok());
+    assert_eq!(store.lock().await.mirror_summary(), (0, 1));
+    assert!(store.lock().await.serve(&hash).is_ok());
 }
 
 /// A restart with `--ipfs-api` must offer what is already stored, not only what is published later.
@@ -281,6 +295,7 @@ async fn cid_on_the_wire() {
         other => panic!("expected Published, got {other:?}"),
     };
 
+    eprintln!("DEBUG mirror log: {:?}", shared.lock().await.mirror_log());
     match exchange(
         native_addr,
         &Request::Fetch {
@@ -338,4 +353,75 @@ async fn http_get(addr: std::net::SocketAddr, path: &str) -> Vec<u8> {
         .expect("read bound")
         .expect("read");
     out
+}
+
+/// A Kubo node that accepts and then says nothing must not stall the daemon. The mirror happens
+/// after the store lock is released, so one slow add cannot block another client's request.
+#[tokio::test]
+async fn a_hung_mirror_does_not_stall_other_clients() {
+    let outcome = tokio::time::timeout(BOUND, hung_mirror()).await;
+    outcome.expect("the hung-mirror exchange must complete within the bound")
+}
+
+async fn hung_mirror() {
+    // Accept one connection and never reply.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind a silent stub");
+    let api_port = listener.local_addr().expect("stub addr").port();
+    tokio::spawn(async move {
+        if let Ok(Ok((stream, _))) =
+            tokio::time::timeout(Duration::from_secs(20), listener.accept()).await
+        {
+            let _held = stream;
+            std::future::pending::<()>().await;
+        }
+    });
+
+    let store = Arc::new(TokioMutex::new(AudioStore::default()));
+    store
+        .lock()
+        .await
+        .set_ipfs(Some(IpfsPublisher::new(format!("127.0.0.1:{api_port}"))));
+    let (server, addr) = ListendServer::bind_shared("127.0.0.1:0", Arc::clone(&store))
+        .await
+        .expect("bind native");
+    let shutdown = server.shutdown_handle();
+    let run = tokio::spawn(async move { server.run().await });
+
+    // A publish whose mirror will hang.
+    let publisher = tokio::spawn(async move {
+        let tone = wav::generate(31, wav::Sound::Tone);
+        let _ = exchange(
+            addr,
+            &Request::Publish {
+                declared_media_type: Some("audio/wav".into()),
+                bytes: tone,
+            },
+        )
+        .await;
+    });
+    // Let it reach the hanging mirror before measuring anything else.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let started = std::time::Instant::now();
+    let answered = tokio::time::timeout(Duration::from_secs(3), exchange(addr, &Request::Hello))
+        .await
+        .expect("another client must be served while the mirror hangs");
+    assert!(
+        matches!(answered, Response::Hello { .. }),
+        "expected Hello, got {answered:?}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "a slow mirror must not queue behind the store lock"
+    );
+
+    publisher.abort();
+    shutdown.shutdown();
+    tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .expect("shutdown bound")
+        .expect("join")
+        .expect("run");
 }

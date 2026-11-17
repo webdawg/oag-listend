@@ -151,18 +151,15 @@ async fn handle(datagram: &[u8], store: &Arc<Mutex<AudioStore>>) -> Option<Vec<u
         Request::Publish {
             declared_media_type,
             bytes,
-        } => {
-            let mut store = store.lock().await;
-            match store.accept(bytes, declared_media_type).await {
-                Ok(hash) => Response::Published { content_hash: hash },
-                Err(ListendError::NotAudio) => Response::Rejected {
-                    reason: ListendError::NotAudio.to_string(),
-                },
-                Err(e) => Response::Rejected {
-                    reason: e.to_string(),
-                },
-            }
-        }
+        } => match crate::accept_and_mirror(store, bytes, declared_media_type).await {
+            Ok(hash) => Response::Published { content_hash: hash },
+            Err(ListendError::NotAudio) => Response::Rejected {
+                reason: ListendError::NotAudio.to_string(),
+            },
+            Err(e) => Response::Rejected {
+                reason: e.to_string(),
+            },
+        },
     };
 
     let frame = protocol::encode_frame(&protocol::encode_response(&response));

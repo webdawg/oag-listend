@@ -248,10 +248,13 @@ operation: the frame protocol permits only publish / fetch-by-hash / list / hell
 cannot add a way to ask for something. The BLAKE3 content hash remains the identity; the CID is an
 additional address for the same bytes.
 
-It lives in `AudioStore::accept` -- the one surface all four
-carriers pass through -- because mirroring per carrier would fork the behaviour. It is best-effort:
-the bytes are written locally first, and a mirror failure is **recorded, never propagated**. Losing a
-copy must not lose the audio. The last 64 outcomes are retained and printed at shutdown, with each
+Every carrier reaches it through one function, `accept_and_mirror`, because mirroring per carrier
+would fork the behaviour. It is best-effort: the bytes are written locally first, and a mirror
+failure is **recorded, never propagated**. Losing a copy must not lose the audio.
+
+The accept and the network call are deliberately separate: `accept` holds the store lock for the
+rule, the durable write, and the insert, and the add happens **after** that lock is released. A Kubo
+node that hangs therefore stalls only its own publish, never another client's fetch. The last 64 outcomes are retained and printed at shutdown, with each
 CID (`ipfs mirror: N mirrored, M failed`, then one line per outcome).
 
 On startup with `--ipfs-api`, everything already held is offered too -- a restart would otherwise
