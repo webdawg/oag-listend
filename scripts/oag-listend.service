@@ -31,6 +31,11 @@ RuntimeDirectory=oag-listend
 StateDirectory=oag-listend
 # The daemon serves audio to the network by design; run it as a dedicated user.
 User=oag
+
+# To also mirror accepted audio to IPFS, add:
+#     --ipfs-api 127.0.0.1:5001
+# to ExecStart. It is best-effort: a node that is down or slow never loses audio
+# and never stalls another client. See SPEC.md, "The IPFS mirror".
 Group=oag
 NoNewPrivileges=true
 ProtectSystem=strict
