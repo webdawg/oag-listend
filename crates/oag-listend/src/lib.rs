@@ -338,6 +338,11 @@ pub async fn accept_and_mirror(
                 reason: e.to_string(),
             },
         };
+        // Off the lock: a slow disk must not hold up another client's request.
+        let dir = store.lock().await.dir_path().map(Path::to_path_buf);
+        if let MirrorOutcome::Mirrored { content_hash, cid } = &outcome {
+            persist_cid(dir.as_deref(), content_hash, cid).await;
+        }
         store.lock().await.record_mirror_outcome(outcome);
     }
     Ok(hash)
@@ -640,6 +645,11 @@ impl AudioStore {
                 reason: e.to_string(),
             },
         };
+        if let (Some(dir), MirrorOutcome::Mirrored { content_hash, cid }) =
+            (self.dir.as_deref(), &outcome)
+        {
+            persist_cid(Some(dir), content_hash, cid).await;
+        }
         self.record_mirror(outcome);
         true
     }
@@ -693,13 +703,6 @@ impl AudioStore {
     /// Record a mirror outcome produced outside [`Self::accept`] -- by
     /// [`accept_and_mirror`], which sends without holding the lock.
     pub fn record_mirror_outcome(&mut self, outcome: MirrorOutcome) {
-        // Persist the association alongside the audio, so a restart skips re-adding it. Best-effort:
-        // a lost sidecar costs one redundant add, never audio.
-        if let (Some(dir), MirrorOutcome::Mirrored { content_hash, cid }) =
-            (self.dir.as_deref(), &outcome)
-        {
-            let _ = std::fs::write(dir.join(format!("{content_hash}.cid")), cid.as_bytes());
-        }
         self.record_mirror(outcome);
     }
 
@@ -782,6 +785,11 @@ impl AudioStore {
         self.bytes_held
     }
 
+    /// The persistence directory, if `--dir` was given.
+    pub fn dir_path(&self) -> Option<&Path> {
+        self.dir.as_deref()
+    }
+
     /// Every content hash currently held, sorted by hash.
     ///
     /// Sorted rather than insertion order because a restart rebuilds the store in
@@ -842,6 +850,17 @@ pub const MAX_LOAD_ENTRIES: usize = 100_000;
 const MAX_SIDECAR_BYTES: usize = 4096;
 
 /// The declared media type recorded beside a persisted item, if any.
+/// Write the `<hash>.cid` association beside the audio, so a restart skips re-adding it.
+///
+/// Called with no lock held and asynchronously, exactly like the audio write: a blocking write on the
+/// accept path would stall every other client behind one disk operation.
+async fn persist_cid(dir: Option<&Path>, content_hash: &str, cid: &str) {
+    if let Some(dir) = dir {
+        // Best-effort: a lost sidecar costs one redundant add, never audio.
+        let _ = tokio::fs::write(dir.join(format!("{content_hash}.cid")), cid.as_bytes()).await;
+    }
+}
+
 /// The CID this store recorded for a content hash, if the sidecar is present and plausible. Written
 /// when an item is mirrored, so a restart can skip re-adding what is already on IPFS; the association
 /// is trustworthy because the loader verified the file's name is the BLAKE3 of its bytes.
