@@ -164,6 +164,55 @@ async fn garbage() {
         let _ = tokio::time::timeout(Duration::from_millis(250), stream.read(&mut sink)).await;
     }
 
+    // A length the client declares but never fulfils, then half-closes: the reader must stop at the
+    // close rather than wait for bytes that will never arrive. This is the "never an unbounded read"
+    // case with a lying peer.
+    for declared in [1u32, 100, 100_000, protocol::MAX_FRAME_BYTES as u32] {
+        let mut stream = match TcpStream::connect(native_addr).await {
+            Ok(stream) => stream,
+            Err(_) => continue,
+        };
+        let mut buf = declared.to_be_bytes().to_vec();
+        buf.extend_from_slice(&[0u8; 16]); // far short of the declaration
+        let _ = stream.write_all(&buf).await;
+        let _ = stream.flush().await;
+        let _ = stream.shutdown().await;
+        // The daemon must notice the close and end the session, not wait for the missing bytes.
+        let mut sink = [0u8; 16];
+        match tokio::time::timeout(Duration::from_secs(2), stream.read(&mut sink)).await {
+            Ok(Ok(0)) => {}
+            other => panic!(
+                "a declared length the client does not fulfil must end the session at the close, \
+                 got {other:?}"
+            ),
+        }
+    }
+
+    // The same shape over HTTP: a Content-Length the body does not satisfy.
+    for content_length in [1usize, 1_000] {
+        let mut stream = match TcpStream::connect(http_addr).await {
+            Ok(stream) => stream,
+            Err(_) => continue,
+        };
+        let head = format!(
+            "POST /audio HTTP/1.1\r\nHost: x\r\nContent-Length: {content_length}\r\n\
+             Connection: close\r\n\r\n"
+        );
+        let _ = stream.write_all(head.as_bytes()).await;
+        let _ = stream.write_all(b"RIFF").await; // shorter than declared
+        let _ = stream.flush().await;
+        let _ = stream.shutdown().await;
+        // Either it answers (the partial body is not audio) or it closes; it must not hang waiting
+        // for bytes the client has already said are not coming.
+        let mut sink = vec![0u8; 4096];
+        if tokio::time::timeout(Duration::from_secs(2), stream.read(&mut sink))
+            .await
+            .is_err()
+        {
+            panic!("an unsatisfied Content-Length must not leave the HTTP request open");
+        }
+    }
+
     // However hostile the input was, the daemon must still serve normally.
     let mut stream = TcpStream::connect(native_addr).await.expect("reconnect");
     let hello = protocol::encode_frame(&protocol::encode_request(&Request::Hello));
