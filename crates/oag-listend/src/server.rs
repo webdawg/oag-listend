@@ -7,6 +7,7 @@
 
 #![forbid(unsafe_code)]
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -66,6 +67,9 @@ pub struct ListendServer {
     write_timeout: Duration,
     max_frame: usize,
     max_connections: usize,
+    /// Sessions currently being served, so a stop can give in-flight exchanges a brief
+    /// grace period instead of cutting them off mid-transfer.
+    active: Arc<AtomicUsize>,
     shutdown_tx: watch::Sender<bool>,
 }
 
@@ -97,6 +101,7 @@ impl ListendServer {
             write_timeout: WRITE_TIMEOUT,
             max_frame: MAX_FRAME_BYTES,
             max_connections: MAX_CONNECTIONS,
+            active: Arc::new(AtomicUsize::new(0)),
             shutdown_tx,
         };
         Ok((server, local_addr))
@@ -104,6 +109,16 @@ impl ListendServer {
 
     pub fn local_addr(&self) -> std::net::SocketAddr {
         self.local_addr
+    }
+
+    /// Sessions in flight right now.
+    pub fn active_sessions(&self) -> usize {
+        self.active.load(Ordering::SeqCst)
+    }
+
+    /// The live counter itself, so a caller can wait for sessions to drain.
+    pub fn active_handle(&self) -> Arc<AtomicUsize> {
+        Arc::clone(&self.active)
     }
 
     /// Publish a small seeded set of generated sounds, through [`crate::AudioStore::accept`].
@@ -164,13 +179,16 @@ impl ListendServer {
                         Err(_) => continue,
                     };
                     let Ok(permit) = semaphore.clone().acquire_owned().await else { break };
+                    let active = Arc::clone(&self.active);
                     let store = Arc::clone(&self.store);
                     let read_timeout = self.read_timeout;
                     let write_timeout = self.write_timeout;
                     let max_frame = self.max_frame;
                     tokio::spawn(async move {
                         let _permit = permit;
+                        active.fetch_add(1, Ordering::SeqCst);
                         let _ = serve_session(stream, store, read_timeout, write_timeout, max_frame).await;
+                        active.fetch_sub(1, Ordering::SeqCst);
                     });
                 }
             }

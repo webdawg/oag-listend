@@ -18,6 +18,7 @@
 
 #![forbid(unsafe_code)]
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -45,6 +46,8 @@ pub struct HttpCarrier {
     store: Arc<Mutex<AudioStore>>,
     listener: TcpListener,
     local_addr: std::net::SocketAddr,
+    /// Requests in flight, for a bounded shutdown grace period.
+    active: Arc<AtomicUsize>,
     shutdown_tx: tokio::sync::watch::Sender<bool>,
 }
 
@@ -61,6 +64,7 @@ impl HttpCarrier {
                 store,
                 listener,
                 local_addr,
+                active: Arc::new(AtomicUsize::new(0)),
                 shutdown_tx,
             },
             local_addr,
@@ -69,6 +73,16 @@ impl HttpCarrier {
 
     pub fn local_addr(&self) -> std::net::SocketAddr {
         self.local_addr
+    }
+
+    /// Requests in flight right now.
+    pub fn active_requests(&self) -> usize {
+        self.active.load(Ordering::SeqCst)
+    }
+
+    /// The live counter itself, so a caller can wait for requests to drain.
+    pub fn active_handle(&self) -> Arc<AtomicUsize> {
+        Arc::clone(&self.active)
     }
 
     pub fn shutdown_handle(&self) -> ShutdownHandle {
@@ -87,10 +101,13 @@ impl HttpCarrier {
                         Err(_) => continue,
                     };
                     let Ok(permit) = semaphore.clone().acquire_owned().await else { break };
+                    let active = Arc::clone(&self.active);
                     let store = Arc::clone(&self.store);
                     tokio::spawn(async move {
                         let _permit = permit;
+                        active.fetch_add(1, Ordering::SeqCst);
                         let _ = serve_connection(stream, store).await;
+                        active.fetch_sub(1, Ordering::SeqCst);
                     });
                 }
             }

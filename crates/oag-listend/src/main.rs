@@ -8,8 +8,9 @@
 
 #![forbid(unsafe_code)]
 
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use oag_listend::http::HttpCarrier;
 use oag_listend::udp::UdpCarrier;
@@ -135,6 +136,9 @@ fn note_public_bind(addr: std::net::SocketAddr) {
 }
 
 /// A seed from the clock and the process id, so two daemons on one machine do not sound alike.
+/// How long a stop waits for in-flight exchanges to finish before exiting anyway.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
+
 fn default_seed() -> u64 {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -203,6 +207,7 @@ async fn main() {
             std::process::exit(1);
         });
     let native_shutdown = server.shutdown_handle();
+    let mut active_counters = vec![server.active_handle()];
 
     let http = match &args.http {
         Some(addr) => {
@@ -219,6 +224,9 @@ async fn main() {
         None => None,
     };
     let http_shutdown = http.as_ref().map(|(carrier, _)| carrier.shutdown_handle());
+    if let Some((carrier, _)) = &http {
+        active_counters.push(carrier.active_handle());
+    }
 
     let udp = match &args.udp {
         Some(addr) => {
@@ -250,6 +258,9 @@ async fn main() {
         None => None,
     };
     let unix_shutdown = unix.as_ref().map(|(carrier, _)| carrier.shutdown_handle());
+    if let Some((carrier, _)) = &unix {
+        active_counters.push(carrier.active_handle());
+    }
 
     if !args.no_generate {
         let generated = server
@@ -339,5 +350,23 @@ async fn main() {
     }
     if let Some(run) = unix_run {
         let _ = tokio::time::timeout(Duration::from_secs(5), run).await;
+    }
+
+    // A stop should not cut a client off mid-transfer. Stop accepting immediately -- done
+    // above -- then give in-flight exchanges up to SHUTDOWN_GRACE to finish, and no longer:
+    // a client that never reads must not be able to hold a stop open indefinitely.
+    let deadline = Instant::now() + SHUTDOWN_GRACE;
+    while active_counters
+        .iter()
+        .any(|counter| counter.load(Ordering::SeqCst) > 0)
+    {
+        if Instant::now() >= deadline {
+            println!(
+                "  shutdown grace of {:?} elapsed with session(s) still active",
+                SHUTDOWN_GRACE
+            );
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
     }
 }

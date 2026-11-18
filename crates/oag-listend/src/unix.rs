@@ -11,6 +11,7 @@
 
 use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -28,6 +29,8 @@ pub struct UnixCarrier {
     store: Arc<Mutex<AudioStore>>,
     listener: UnixListener,
     path: PathBuf,
+    /// Sessions in flight, for a bounded shutdown grace period.
+    active: Arc<AtomicUsize>,
     shutdown_tx: watch::Sender<bool>,
 }
 
@@ -64,6 +67,7 @@ impl UnixCarrier {
                 store,
                 listener,
                 path: path.clone(),
+                active: Arc::new(AtomicUsize::new(0)),
                 shutdown_tx,
             },
             path,
@@ -72,6 +76,16 @@ impl UnixCarrier {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Sessions in flight right now.
+    pub fn active_sessions(&self) -> usize {
+        self.active.load(Ordering::SeqCst)
+    }
+
+    /// The live counter itself, so a caller can wait for sessions to drain.
+    pub fn active_handle(&self) -> Arc<AtomicUsize> {
+        Arc::clone(&self.active)
     }
 
     pub fn shutdown_handle(&self) -> ShutdownHandle {
@@ -90,9 +104,11 @@ impl UnixCarrier {
                         Err(_) => continue,
                     };
                     let Ok(permit) = semaphore.clone().acquire_owned().await else { break };
+                    let active = Arc::clone(&self.active);
                     let store = Arc::clone(&self.store);
                     tokio::spawn(async move {
                         let _permit = permit;
+                        active.fetch_add(1, Ordering::SeqCst);
                         // The same session loop as TCP: same protocol, bounds, and inbound rule.
                         let _ = serve_session(
                             stream,
@@ -102,6 +118,7 @@ impl UnixCarrier {
                             crate::protocol::MAX_FRAME_BYTES,
                         )
                         .await;
+                        active.fetch_sub(1, Ordering::SeqCst);
                     });
                 }
             }

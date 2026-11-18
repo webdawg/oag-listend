@@ -266,8 +266,10 @@ address the daemon says so, rather than letting an operator discover it later.
 ## Running it
 
 `scripts/oag-listend.service` runs all four carriers with a persistent store under systemd. The
-daemon handles SIGINT and SIGTERM, so `systemctl stop` is a clean stop: the accept loops return, the
-Unix socket is removed, and the process exits 0.
+daemon handles SIGINT and SIGTERM, so `systemctl stop` is a clean stop: accepting stops at once, then
+in-flight exchanges are given up to `SHUTDOWN_GRACE` (2 s) to finish rather than being cut off
+mid-transfer, the Unix socket is removed, and the process exits 0. A client that never reads cannot
+hold a stop open past that bound.
 
 ## The IPFS mirror
 

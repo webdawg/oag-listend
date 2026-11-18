@@ -142,8 +142,9 @@ Install and start it with:
 node, so a store can be verified quickly before the service is started; `--version` prints the binary version and the frame protocol
 version.
 
-The daemon handles both SIGINT and SIGTERM, so `systemctl stop` is a clean stop: the accept loops
-return, the Unix socket is removed, and the process exits 0.
+The daemon handles both SIGINT and SIGTERM, so `systemctl stop` is a clean stop: accepting stops
+at once, in-flight downloads are given two seconds to finish rather than being cut off
+mid-transfer, the Unix socket is removed, and the process exits 0.
 
 The default bind is `0.0.0.0`, which serves every interface; when a carrier binds a non-loopback
 address the daemon prints a note saying so. Use `--listen 127.0.0.1:...` to keep it local.
