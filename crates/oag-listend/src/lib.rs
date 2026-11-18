@@ -199,22 +199,22 @@ impl AudioFormat {
                 return Some(Self::Mp3);
             }
         }
-        // ISO BMFF: a box size, then "ftyp", then the major brand, a minor version, and zero or
-        // more compatible brands. Only an audio-bearing brand is accepted. `isom` and `mp42` are
+        // ISO BMFF: a box header, then the major brand, a minor version, and zero or more
+        // compatible brands. Only an audio-bearing brand is accepted. `isom` and `mp42` are
         // generic brands that MP4 *video* uses, so the major brand alone cannot decide this --
         // ffmpeg-written M4A often has `isom` as the major brand and `M4A ` among the compatible
         // brands. Checking the whole list separates the two.
         if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" {
             let size = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
-            // A size of 0 means the box runs to the end of the file; a size of 1 means the real
-            // size is a 64-bit field after the minor version, and the compatible brands start
-            // after it.
-            let (end, first_compatible) = match size {
-                0 => (bytes.len(), 16),
+            // A size of 0 means the box runs to the end of the file. A size of 1 means a 64-bit
+            // largesize immediately after the type field (bytes 8..16, per ISO 14496-12), which
+            // pushes the major brand, minor version, and compatible brands eight bytes along.
+            let (end, major_at, first_compatible) = match size {
+                0 => (bytes.len(), 8usize, 16usize),
                 1 if bytes.len() >= 24 => {
                     let large = u64::from_be_bytes([
-                        bytes[16], bytes[17], bytes[18], bytes[19], bytes[20], bytes[21],
-                        bytes[22], bytes[23],
+                        bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14],
+                        bytes[15],
                     ]) as usize;
                     (
                         if large == 0 {
@@ -222,12 +222,13 @@ impl AudioFormat {
                         } else {
                             large.min(bytes.len())
                         },
+                        16,
                         24,
                     )
                 }
-                _ => (size.min(bytes.len()), 16),
+                _ => (size.min(bytes.len()), 8, 16),
             };
-            if matches!(&bytes[8..12], b"M4A " | b"M4B " | b"M4P ") {
+            if matches!(&bytes[major_at..major_at + 4], b"M4A " | b"M4B " | b"M4P ") {
                 return Some(Self::M4a);
             }
             let mut offset = first_compatible;
@@ -911,21 +912,58 @@ mod tests {
 
     #[test]
     fn an_ftyp_box_that_runs_to_the_end_of_the_file_is_still_sniffed() {
-        // size 0 means "to the end of the file", which is legal and must not hide the brands.
-        let mut bytes = vec![0, 0, 0, 0];
-        bytes.extend_from_slice(b"ftypisom");
-        bytes.extend_from_slice(&[0, 0, 0, 1]);
-        bytes.extend_from_slice(b"M4A ");
-        assert_eq!(AudioFormat::sniff(&bytes), Some(AudioFormat::M4a));
+        // The box body is major brand, minor version, then compatible brands.
+        const MINOR: [u8; 4] = [0, 0, 0, 1];
 
-        // size 1 means a 64-bit largesize follows the minor version.
-        let mut bytes = vec![0, 0, 0, 1];
-        bytes.extend_from_slice(b"ftypisom");
-        bytes.extend_from_slice(&[0, 0, 0, 1]);
-        let total = bytes.len() as u64 + 12; // this 8-byte field plus the brand that follows
-        bytes.extend_from_slice(&total.to_be_bytes());
-        bytes.extend_from_slice(b"M4A ");
-        assert_eq!(AudioFormat::sniff(&bytes), Some(AudioFormat::M4a));
+        // A normal-sized box: size counts the whole box, here 8 header + 4 + 4 + 4.
+        let mut normal = Vec::new();
+        normal.extend_from_slice(&28u32.to_be_bytes());
+        normal.extend_from_slice(b"ftypisom");
+        normal.extend_from_slice(&MINOR);
+        normal.extend_from_slice(b"M4A ");
+        assert_eq!(AudioFormat::sniff(&normal), Some(AudioFormat::M4a));
+
+        // Size 0 means "the box runs to the end of the file", which must not hide the brands.
+        let mut to_end = Vec::new();
+        to_end.extend_from_slice(&[0, 0, 0, 0]);
+        to_end.extend_from_slice(b"ftypisom");
+        to_end.extend_from_slice(&MINOR);
+        to_end.extend_from_slice(b"M4A ");
+        assert_eq!(AudioFormat::sniff(&to_end), Some(AudioFormat::M4a));
+
+        // Size 1 means a 64-bit largesize **immediately after the type field** (bytes 8..16,
+        // ISO 14496-12), so the major brand sits at 16 and the compatible brands at 24.
+        let mut large = Vec::new();
+        large.extend_from_slice(&[0, 0, 0, 1]);
+        large.extend_from_slice(b"ftyp");
+        large.extend_from_slice(&28u64.to_be_bytes());
+        large.extend_from_slice(b"isom");
+        large.extend_from_slice(&MINOR);
+        large.extend_from_slice(b"M4A ");
+        assert_eq!(
+            AudioFormat::sniff(&large),
+            Some(AudioFormat::M4a),
+            "an audio brand after a 64-bit largesize must still be read"
+        );
+
+        // The same shape with the audio brand as the major brand.
+        let mut large_major = Vec::new();
+        large_major.extend_from_slice(&[0, 0, 0, 1]);
+        large_major.extend_from_slice(b"ftyp");
+        large_major.extend_from_slice(&24u64.to_be_bytes());
+        large_major.extend_from_slice(b"M4A ");
+        large_major.extend_from_slice(&MINOR);
+        assert_eq!(AudioFormat::sniff(&large_major), Some(AudioFormat::M4a));
+
+        // Video in the same shapes stays refused.
+        let mut large_video = Vec::new();
+        large_video.extend_from_slice(&[0, 0, 0, 1]);
+        large_video.extend_from_slice(b"ftyp");
+        large_video.extend_from_slice(&28u64.to_be_bytes());
+        large_video.extend_from_slice(b"avc1");
+        large_video.extend_from_slice(&MINOR);
+        large_video.extend_from_slice(b"mp42");
+        assert_eq!(AudioFormat::sniff(&large_video), None);
     }
 
     /// Each container and codec the inbound rule recognises, asserted from its signature alone.
