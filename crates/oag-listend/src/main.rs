@@ -150,6 +150,48 @@ fn default_seed() -> u64 {
 #[tokio::main]
 async fn main() {
     let args = parse_args();
+
+    // Register the stop signals before anything an operator can observe. The handler used to be
+    // installed after the "listening on" line, which left a window in which a Ctrl+C or an early
+    // `systemctl stop` was answered by the default terminate action instead of a clean stop --
+    // timing-dependent, and only visible under load.
+    let sigterm = {
+        #[cfg(unix)]
+        {
+            async {
+                match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                    Ok(mut signal) => {
+                        signal.recv().await;
+                    }
+                    Err(_) => std::future::pending().await,
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            std::future::pending::<()>()
+        }
+    };
+
+    // Same for SIGINT. `tokio::signal::ctrl_c()` must be polled to register, so an early Ctrl+C
+    // under load could still hit the default terminate action; `unix::signal` registers eagerly.
+    let sigint = {
+        #[cfg(unix)]
+        {
+            async {
+                match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()) {
+                    Ok(mut signal) => {
+                        signal.recv().await;
+                    }
+                    Err(_) => std::future::pending().await,
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            std::future::pending::<()>()
+        }
+    };
     let mut store = match &args.dir {
         Some(dir) => {
             let (store, report) =
@@ -298,20 +340,8 @@ async fn main() {
 
     // SIGINT (Ctrl+C) and SIGTERM (`systemctl stop`, `kill`) both shut down cleanly, so the
     // Unix socket is removed and the operator's stop command is not a crash.
-    #[cfg(unix)]
-    let sigterm = async {
-        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-            Ok(mut signal) => {
-                signal.recv().await;
-            }
-            Err(_) => std::future::pending().await,
-        }
-    };
-    #[cfg(not(unix))]
-    let sigterm = std::future::pending::<()>();
-
     tokio::select! {
-        _ = tokio::signal::ctrl_c() => {}
+        _ = sigint => {}
         _ = sigterm => {}
     }
     println!("oag-listend shutting down");

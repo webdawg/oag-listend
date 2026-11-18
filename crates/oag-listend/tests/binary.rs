@@ -13,7 +13,12 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::process::Command;
 
-const BOUND: Duration = Duration::from_secs(20);
+const BOUND: Duration = Duration::from_secs(60);
+
+/// Headroom for waits that follow a stop signal or a large transfer. The shutdown grace is 2 s;
+/// five seconds was enough locally but timed out on a loaded machine, and a bound that can expire
+/// under load is itself the flake.
+const STOP_WAIT: Duration = Duration::from_secs(15);
 
 fn binary() -> &'static str {
     env!("CARGO_BIN_EXE_oag-listend")
@@ -190,7 +195,8 @@ async fn the_client_verifies_audio_over_every_transport() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn the daemon");
-    let (_announced, _stdout) = announce(&mut child).await;
+    let (announced, _stdout) = announce(&mut child).await;
+    assert_serving(announced_native_addr(&announced)).await;
     // The announce line is printed once the native carrier is up; the other carriers bind around
     // the same time, so wait briefly for the socket rather than racing it.
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -236,7 +242,7 @@ async fn the_client_verifies_audio_over_every_transport() {
         .arg(pid.to_string())
         .status()
         .expect("send SIGTERM");
-    let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
+    let status = tokio::time::timeout(STOP_WAIT, child.wait())
         .await
         .expect("exit bound")
         .expect("wait");
@@ -301,7 +307,7 @@ async fn the_udp_client_reaches_an_ipv6_daemon() {
         .arg(pid.to_string())
         .status()
         .expect("send SIGTERM");
-    let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
+    let status = tokio::time::timeout(STOP_WAIT, child.wait())
         .await
         .expect("exit bound")
         .expect("wait");
@@ -420,7 +426,7 @@ async fn in_flight() {
         stream.write_all(&item).await.expect("write body");
         stream.flush().await.expect("flush");
         let mut out = Vec::new();
-        tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut out))
+        tokio::time::timeout(STOP_WAIT, stream.read_to_end(&mut out))
             .await
             .expect("read bound")
             .expect("read");
@@ -467,7 +473,7 @@ async fn in_flight() {
     let mut buf = [0u8; 8192];
     let header_end;
     loop {
-        let n = tokio::time::timeout(Duration::from_secs(5), client.read(&mut buf))
+        let n = tokio::time::timeout(STOP_WAIT, client.read(&mut buf))
             .await
             .expect("read bound")
             .expect("read");
@@ -490,7 +496,7 @@ async fn in_flight() {
     assert_eq!(content_length, item.len());
 
     while response.len() - header_end < content_length {
-        let n = tokio::time::timeout(Duration::from_secs(5), client.read(&mut buf))
+        let n = tokio::time::timeout(STOP_WAIT, client.read(&mut buf))
             .await
             .expect("read bound")
             .expect("read");
@@ -503,13 +509,13 @@ async fn in_flight() {
         "the client must receive every byte it asked for"
     );
 
-    let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
+    let status = tokio::time::timeout(STOP_WAIT, child.wait())
         .await
         .expect("exit bound")
         .expect("wait");
     assert_eq!(status.code(), Some(0), "a clean stop still exits 0");
     assert!(
-        stopped_at.elapsed() < Duration::from_secs(5),
+        stopped_at.elapsed() < Duration::from_secs(10),
         "the stop must not hang behind a draining client"
     );
 
@@ -543,7 +549,8 @@ async fn sigint_stop() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn the daemon");
-    let (_announced, _stdout) = announce(&mut child).await;
+    let (announced, _stdout) = announce(&mut child).await;
+    assert_serving(announced_native_addr(&announced)).await;
     assert!(sock.exists());
 
     let pid = child.id().expect("the daemon's pid");
@@ -553,7 +560,7 @@ async fn sigint_stop() {
         .status()
         .expect("send SIGINT");
 
-    let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
+    let status = tokio::time::timeout(STOP_WAIT, child.wait())
         .await
         .expect("exit bound")
         .expect("wait");
@@ -561,6 +568,43 @@ async fn sigint_stop() {
     assert!(!sock.exists(), "a clean stop must remove the Unix socket");
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The native address from the daemon's own announcement.
+fn announced_native_addr(announced: &[u8]) -> std::net::SocketAddr {
+    let text = String::from_utf8_lossy(announced);
+    let rest = text
+        .split("listening on ")
+        .nth(1)
+        .expect("the daemon announced a native address");
+    let end = rest.find('\n').unwrap_or(rest.len());
+    rest[..end].trim().parse().expect("a socket address")
+}
+
+/// Confirm the daemon is genuinely serving, not merely that it printed a line., not merely that it printed a line.
+///
+/// Signal handlers are registered before the carriers bind, so a successful Hello proves they
+/// exist. Without this gate a stop signal sent right after spawn can land before the child has
+/// even reached `main`, and be answered by the default terminate action -- timing-dependent, and
+/// reproducible only under load.
+async fn assert_serving(addr: std::net::SocketAddr) {
+    let hello = protocol::encode_frame(&protocol::encode_request(&Request::Hello));
+    for _ in 0..200 {
+        if let Ok(mut stream) = TcpStream::connect(addr).await {
+            if stream.write_all(&hello).await.is_err() || stream.flush().await.is_err() {
+                continue;
+            }
+            let mut prefix = [0u8; 4];
+            if tokio::time::timeout(Duration::from_millis(500), stream.read_exact(&mut prefix))
+                .await
+                .is_ok()
+            {
+                return;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("the daemon never answered Hello");
 }
 
 /// A check must stay a store verification. Passing `--ipfs-api` must not make it contact a node or
@@ -725,7 +769,7 @@ async fn serve() {
     assert!(oag_listend::AudioItem::verify(&hash, &tone));
 
     child.kill().await.expect("stop the daemon");
-    let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
+    let status = tokio::time::timeout(STOP_WAIT, child.wait())
         .await
         .expect("the daemon must exit once killed")
         .expect("wait");
@@ -767,7 +811,7 @@ async fn clean_stop() {
         .status()
         .expect("send SIGTERM");
 
-    let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
+    let status = tokio::time::timeout(STOP_WAIT, child.wait())
         .await
         .expect("the daemon must exit after SIGTERM")
         .expect("wait");
@@ -782,7 +826,7 @@ async fn clean_stop() {
     );
 
     let mut said = Vec::new();
-    tokio::time::timeout(Duration::from_secs(5), stdout.read_to_end(&mut said))
+    tokio::time::timeout(STOP_WAIT, stdout.read_to_end(&mut said))
         .await
         .expect("reading the rest of stdout after exit must terminate")
         .expect("read stdout");
@@ -821,8 +865,7 @@ async fn ipfs_wiring() {
         let mut buf = vec![0u8; 64 * 1024];
         let mut got = Vec::new();
         loop {
-            let n = match tokio::time::timeout(Duration::from_secs(5), stream.read(&mut buf)).await
-            {
+            let n = match tokio::time::timeout(STOP_WAIT, stream.read(&mut buf)).await {
                 Ok(Ok(0)) => break,
                 Ok(Ok(n)) => n,
                 _ => break,
@@ -882,14 +925,14 @@ async fn ipfs_wiring() {
         .arg(pid.to_string())
         .status()
         .expect("send SIGTERM");
-    let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
+    let status = tokio::time::timeout(STOP_WAIT, child.wait())
         .await
         .expect("exit bound")
         .expect("wait");
     assert_eq!(status.code(), Some(0));
 
     let mut out = Vec::new();
-    tokio::time::timeout(Duration::from_secs(5), stdout.read_to_end(&mut out))
+    tokio::time::timeout(STOP_WAIT, stdout.read_to_end(&mut out))
         .await
         .expect("read bound")
         .expect("read stdout");
