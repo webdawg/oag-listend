@@ -163,6 +163,70 @@ fn version_and_help_work_and_usage_errors_exit_two() {
     }
 }
 
+/// The UDP client must reach an IPv6 daemon. It once bound its local socket to IPv4
+/// unconditionally, so an IPv6 peer failed with "address family not supported". Skips cleanly where
+/// the host has no IPv6 loopback.
+#[tokio::test]
+async fn the_udp_client_reaches_an_ipv6_daemon() {
+    if tokio::net::UdpSocket::bind("[::1]:0").await.is_err() {
+        eprintln!("skipped: no IPv6 loopback on this host");
+        return;
+    }
+    let udp_port = {
+        let probe = tokio::net::UdpSocket::bind("[::1]:0")
+            .await
+            .expect("probe bind");
+        probe.local_addr().expect("probe addr").port()
+    };
+    let native_port = free_port();
+
+    let mut child = Command::new(binary())
+        .arg("--listen")
+        .arg(format!("127.0.0.1:{native_port}"))
+        .arg("--udp")
+        .arg(format!("[::1]:{udp_port}"))
+        .arg("--no-generate")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn the daemon");
+    let (_announced, _stdout) = announce(&mut child).await;
+
+    let output = std::process::Command::new(push_pull())
+        .args([
+            "--udp",
+            "--addr",
+            &format!("[::1]:{udp_port}"),
+            "--seed",
+            "3",
+        ])
+        .output()
+        .expect("run push_pull --udp over IPv6");
+    assert!(
+        output.status.success(),
+        "the UDP client must work against an IPv6 daemon: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("verified=true"), "{stdout}");
+    assert!(
+        stdout.contains("Rejected"),
+        "the inbound rule still applies: {stdout}"
+    );
+
+    let pid = child.id().expect("the daemon's pid");
+    std::process::Command::new("kill")
+        .arg("-TERM")
+        .arg(pid.to_string())
+        .status()
+        .expect("send SIGTERM");
+    let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
+        .await
+        .expect("exit bound")
+        .expect("wait");
+    assert_eq!(status.code(), Some(0));
+}
+
 /// The operator client is a shipped artefact too, and its `--help` has drifted before. Locate the
 /// built example relative to this test binary (`target/debug/deps/.. /examples/push_pull`).
 fn push_pull() -> std::path::PathBuf {
