@@ -63,7 +63,12 @@ async fn announce(child: &mut tokio::process::Child) -> (Vec<u8>, tokio::process
             .expect("a read within the bound")
             .expect("read stdout");
         if n == 0 {
-            break;
+            // Output ended without the announcement: the daemon died or never started. Returning a
+            // partial buffer here once made a bind failure look like success downstream.
+            panic!(
+                "the daemon closed its output before announcing; got {}",
+                String::from_utf8_lossy(&announced)
+            );
         }
         announced.extend_from_slice(&chunk[..n]);
         if String::from_utf8_lossy(&announced).contains("listening on") {
@@ -161,6 +166,82 @@ fn version_and_help_work_and_usage_errors_exit_two() {
             "a usage error must not panic: {stderr}"
         );
     }
+}
+
+/// The shipped client must verify audio over every transport it offers, and refuse non-audio on
+/// each. Drives the real binary three times against one live daemon.
+#[tokio::test]
+async fn the_client_verifies_audio_over_every_transport() {
+    let native_port = free_port();
+    let udp_port = free_port();
+    let dir = temp_dir("client-transports");
+    std::fs::create_dir_all(&dir).expect("make the runtime directory");
+    let sock = dir.join("audio.sock");
+
+    let mut child = Command::new(binary())
+        .arg("--listen")
+        .arg(format!("127.0.0.1:{native_port}"))
+        .arg("--udp")
+        .arg(format!("127.0.0.1:{udp_port}"))
+        .arg("--unix")
+        .arg(&sock)
+        .arg("--no-generate")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn the daemon");
+    let (_announced, _stdout) = announce(&mut child).await;
+    // The announce line is printed once the native carrier is up; the other carriers bind around
+    // the same time, so wait briefly for the socket rather than racing it.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !sock.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the daemon never created its socket at {}",
+            sock.display()
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    let cases = [
+        vec!["--addr".to_string(), format!("127.0.0.1:{native_port}")],
+        vec![
+            "--udp".to_string(),
+            "--addr".to_string(),
+            format!("127.0.0.1:{udp_port}"),
+        ],
+        vec!["--unix".to_string(), sock.display().to_string()],
+    ];
+    for args in cases {
+        let output = std::process::Command::new(push_pull())
+            .args(&args)
+            .arg("--seed")
+            .arg("5")
+            .output()
+            .expect("run push_pull");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "{args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(stdout.contains("verified=true"), "{args:?}: {stdout}");
+        assert!(stdout.contains("same-hash"), "{args:?}: {stdout}");
+        assert!(stdout.contains("Rejected"), "{args:?}: {stdout}");
+    }
+
+    let pid = child.id().expect("the daemon's pid");
+    std::process::Command::new("kill")
+        .arg("-TERM")
+        .arg(pid.to_string())
+        .status()
+        .expect("send SIGTERM");
+    let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
+        .await
+        .expect("exit bound")
+        .expect("wait");
+    assert_eq!(status.code(), Some(0));
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The UDP client must reach an IPv6 daemon. It once bound its local socket to IPv4
