@@ -198,7 +198,13 @@ impl IpfsPublisher {
 
 /// A CID is base32 or base58 text. Anything else is refused before it can reach a request line.
 pub(crate) fn validate_cid(cid: &str) -> Result<(), IpfsError> {
-    let ok = !cid.is_empty() && cid.len() <= 128 && cid.bytes().all(|b| b.is_ascii_alphanumeric());
+    // Multibase encodings use alphanumerics plus `-` and `_` (base64url); anything else is
+    // refused before it can reach a request line or a filesystem path.
+    let ok = !cid.is_empty()
+        && cid.len() <= 128
+        && cid
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
     if ok {
         Ok(())
     } else {
@@ -421,7 +427,22 @@ mod tests {
     /// cannot turn into query injection.
     #[tokio::test]
     async fn an_implausible_cid_is_refused_without_a_network_call() {
-        for cid in ["", "..%2f..", "has space", &"a".repeat(200)] {
+        // Multibase characters are accepted; separators, whitespace and over-length are not.
+        for cid in [
+            "bafyabc-_",
+            "Qm----__",
+            "",
+            "..%2f..",
+            "has space",
+            &"a".repeat(200),
+        ] {
+            if cid.contains('-') || cid.contains('_') {
+                assert!(
+                    crate::ipfs::validate_cid(cid).is_ok(),
+                    "{cid:?} is a plausible multibase identifier"
+                );
+                continue;
+            }
             match IpfsPublisher::new("127.0.0.1:1").cat(cid).await {
                 Err(IpfsError::BadCid(_)) => {}
                 other => panic!("{cid:?} must be refused as a CID, got {other:?}"),
