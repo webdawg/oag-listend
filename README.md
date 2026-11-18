@@ -176,5 +176,6 @@ scripts/check.sh --release   # the same, plus the suite in release
 
 The same gate runs on every push and pull request (`.github/workflows/check.yml`), so a merge
 cannot land without it passing.
+
 `scripts/` also holds the same build-generation pruner as every other OAG repository; see
 `scripts/README.md`.
