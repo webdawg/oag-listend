@@ -132,7 +132,6 @@ async fn round_trip(args: &Args, request: &Request) -> std::io::Result<Response>
         return decode_body(&body);
     }
     if args.udp {
-        let socket = UdpSocket::bind("127.0.0.1:0").await?;
         let addr: std::net::SocketAddr = match args.addr.parse() {
             Ok(addr) => addr,
             Err(_) => {
@@ -140,6 +139,14 @@ async fn round_trip(args: &Args, request: &Request) -> std::io::Result<Response>
                 std::process::exit(2);
             }
         };
+        // Bind a socket of the target's family: an IPv6 peer cannot be reached from an IPv4 socket,
+        // and the error ("address family not supported") gives no hint that the fix is a v6 bind.
+        let local = if addr.is_ipv6() {
+            "[::]:0"
+        } else {
+            "127.0.0.1:0"
+        };
+        let socket = UdpSocket::bind(local).await?;
         if frame.len() > MAX_DATAGRAM_BYTES {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
