@@ -26,6 +26,11 @@ cargo clippy -p oag-listend --all-targets
 echo "== rustdoc (-D warnings)"
 RUSTDOCFLAGS="-D warnings" cargo doc -p oag-listend --no-deps
 
+# Examples are not built by `cargo test`; the shipped-client tests execute push_pull.
+echo "== examples"
+# shellcheck disable=SC2086
+cargo build -p oag-listend --examples $RELEASE
+
 echo "== tests${RELEASE:+ (release)}"
 # shellcheck disable=SC2086
 cargo test -p oag-listend $RELEASE

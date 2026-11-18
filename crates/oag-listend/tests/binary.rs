@@ -316,6 +316,16 @@ fn push_pull() -> std::path::PathBuf {
     path.pop(); // debug/
     path.push("examples");
     path.push("push_pull");
+    if !path.exists() {
+        // `cargo test` does not build examples, and these tests execute the shipped client. Building
+        // it here keeps `cargo test -p oag-listend` self-sufficient on a clean tree.
+        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+        let status = std::process::Command::new(cargo)
+            .args(["build", "-p", "oag-listend", "--example", "push_pull"])
+            .status()
+            .expect("run cargo to build the push_pull example");
+        assert!(status.success(), "building the push_pull example failed");
+    }
     assert!(
         path.exists(),
         "the push_pull example must be built to test it: {}",
