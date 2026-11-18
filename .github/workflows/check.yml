@@ -1,0 +1,29 @@
+# Enforce the repository's whole bar on every push and pull request:
+# fmt, clippy, rustdoc with warnings denied, examples built, the test suite,
+# and systemd-analyze verify on the shipped unit.
+#
+# It deliberately runs scripts/check.sh rather than listing the steps, so the
+# command an operator runs and the gate CI enforces cannot drift apart.
+
+name: check
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (minimal profile)
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain stable
+          echo "${CARGO_HOME:-$HOME/.cargo}/bin" >> "$GITHUB_PATH"
+
+      - name: Run the gate
+        run: ./scripts/check.sh
