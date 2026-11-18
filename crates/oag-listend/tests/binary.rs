@@ -364,6 +364,49 @@ fn the_client_help_documents_every_option_and_refuses_unknown_flags() {
     assert!(!bad.stderr.is_empty());
 }
 
+/// SIGINT is the other half of "handles SIGINT and SIGTERM": Ctrl+C must be as clean a stop as
+/// `systemctl stop`, removing the socket and exiting 0.
+#[tokio::test]
+async fn sigint_is_also_a_clean_stop() {
+    let outcome = tokio::time::timeout(BOUND, sigint_stop()).await;
+    outcome.expect("the SIGINT exchange must complete within the bound")
+}
+
+async fn sigint_stop() {
+    let dir = temp_dir("sigint");
+    std::fs::create_dir_all(&dir).expect("make the runtime directory");
+    let sock = dir.join("audio.sock");
+
+    let mut child = Command::new(binary())
+        .arg("--listen")
+        .arg("127.0.0.1:0")
+        .arg("--unix")
+        .arg(&sock)
+        .arg("--no-generate")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn the daemon");
+    let (_announced, _stdout) = announce(&mut child).await;
+    assert!(sock.exists());
+
+    let pid = child.id().expect("the daemon's pid");
+    std::process::Command::new("kill")
+        .arg("-INT")
+        .arg(pid.to_string())
+        .status()
+        .expect("send SIGINT");
+
+    let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
+        .await
+        .expect("exit bound")
+        .expect("wait");
+    assert_eq!(status.code(), Some(0), "SIGINT must exit 0");
+    assert!(!sock.exists(), "a clean stop must remove the Unix socket");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A check must stay a store verification. Passing `--ipfs-api` must not make it contact a node or
 /// spend its mirror budget: operators and scripts call `--check` expecting a quick answer.
 #[test]
