@@ -166,3 +166,67 @@ async fn listing(dir: &std::path::Path) {
         "a restart must not change the walk a client sees"
     );
 }
+
+/// A sidecar is metadata in an operator-controlled directory, so it is bounded before it is read.
+/// An oversized `.json` or `.cid` is ignored rather than pulled into memory -- and a `.cid` that is
+/// not a plausible identifier is ignored too -- while the audio itself still loads and serves. The
+/// small sidecar in the same test proves the guard is what ignores the large one, not a path that
+/// never reads sidecars at all.
+#[tokio::test]
+async fn oversized_sidecars_are_ignored_and_the_audio_still_loads() {
+    let dir = temp_dir("sidecars");
+    let outcome = tokio::time::timeout(BOUND, sidecars(&dir)).await;
+    let _ = std::fs::remove_dir_all(&dir);
+    outcome.expect("the sidecar exchange must complete within the bound")
+}
+
+async fn sidecars(dir: &std::path::Path) {
+    // One item with a small, honest media-type sidecar: it must be read.
+    let small = wav::generate(77, wav::Sound::Tone);
+    let small_item = AudioItem::new(small.clone(), Some("audio/wav".to_string()));
+    std::fs::write(dir.join(&small_item.content_hash), &small).expect("write audio");
+    std::fs::write(
+        dir.join(format!("{}.json", small_item.content_hash)),
+        b"audio/wav",
+    )
+    .expect("write sidecar");
+
+    // One item whose sidecars are both over their bounds, and whose CID sidecar is implausible.
+    let big = wav::generate(78, wav::Sound::Tone);
+    let big_item = AudioItem::new(big.clone(), Some("audio/wav".to_string()));
+    std::fs::write(dir.join(&big_item.content_hash), &big).expect("write audio");
+    std::fs::write(
+        dir.join(format!("{}.json", big_item.content_hash)),
+        vec![b'x'; 4097],
+    )
+    .expect("write an oversized media sidecar");
+    std::fs::write(
+        dir.join(format!("{}.cid", big_item.content_hash)),
+        vec![b'c'; 129],
+    )
+    .expect("write an oversized cid sidecar");
+
+    let (store, report) = AudioStore::with_directory(dir, 1024 * 1024).expect("open store");
+    assert_eq!(report.loaded, 2, "both audio files must load");
+    assert_eq!(report.skipped, 0, "neither is corrupt");
+
+    let served = store.serve(&small_item.content_hash).expect("served");
+    assert_eq!(served.bytes, small);
+    assert_eq!(
+        served.media_type.as_deref(),
+        Some("audio/wav"),
+        "a small sidecar is read"
+    );
+
+    let served = store.serve(&big_item.content_hash).expect("served");
+    assert_eq!(served.bytes, big, "the audio is unaffected by its sidecars");
+    assert_eq!(
+        served.media_type, None,
+        "an oversized media-type sidecar is ignored, not read"
+    );
+    assert_eq!(
+        store.content_id(&big_item.content_hash),
+        None,
+        "an oversized CID sidecar is ignored"
+    );
+}
