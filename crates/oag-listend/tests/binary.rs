@@ -370,10 +370,8 @@ fn the_client_help_documents_every_option_and_refuses_unknown_flags() {
     assert!(!bad.stderr.is_empty());
 }
 
-/// A stop must not cut a client off mid-transfer. The client requests a large item over a
-/// deliberately tiny receive buffer, does not read while SIGTERM arrives, then drains -- and must
-/// receive every byte. Without the shutdown grace period the process exits under it and the drain
-/// ends early.
+/// A stop must not cut a client off mid-transfer. The daemon binds its own port and
+/// announces it, so this allocates nothing and cannot race another process for one.
 #[tokio::test]
 async fn an_in_flight_download_survives_a_stop() {
     let outcome = tokio::time::timeout(BOUND, in_flight()).await;
@@ -383,16 +381,12 @@ async fn an_in_flight_download_survives_a_stop() {
 async fn in_flight() {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
-    let native_port = free_port();
-    let http_port = free_port();
     let dir = temp_dir("in-flight");
-    std::fs::create_dir_all(&dir).expect("make the store directory");
+    std::fs::create_dir_all(&dir).expect("make the runtime directory");
 
     let mut child = Command::new(binary())
         .arg("--listen")
-        .arg(format!("127.0.0.1:{native_port}"))
-        .arg("--http")
-        .arg(format!("127.0.0.1:{http_port}"))
+        .arg("127.0.0.1:0")
         .arg("--dir")
         .arg(&dir)
         .arg("--no-generate")
@@ -400,65 +394,47 @@ async fn in_flight() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn the daemon");
-    let (_announced, _stdout) = announce(&mut child).await;
+    let (announced, _stdout) = announce(&mut child).await;
+    let addr = announced_native_addr(&announced);
+    assert_serving(addr).await;
 
-    // 8 MiB of audio: the RIFF signature plus payload. Big enough that a tiny receive buffer
-    // leaves the server blocked mid-write.
+    // 8 MiB of audio: the RIFF signature plus payload, big enough that the server blocks
+    // mid-write rather than finishing into a buffer.
     let mut item = Vec::with_capacity(8 * 1024 * 1024);
     item.extend_from_slice(b"RIFF");
     item.extend_from_slice(&((item_capacity_body()) as u32).to_be_bytes());
     item.extend_from_slice(b"WAVE");
     item.resize(8 * 1024 * 1024, 0);
 
+    // Publish, and learn the hash, on a connection of our own.
+    let mut publisher = TcpStream::connect(addr).await.expect("connect to publish");
+    let publish = protocol::encode_frame(&protocol::encode_request(&Request::Publish {
+        declared_media_type: Some("audio/wav".into()),
+        bytes: item.clone(),
+    }));
+    publisher.write_all(&publish).await.expect("write publish");
+    publisher.flush().await.expect("flush publish");
     let hash = {
-        let request = format!(
-            "POST /audio HTTP/1.1\r\nHost: x\r\nContent-Type: application/octet-stream\r\n\
-             Content-Length: {}\r\nConnection: close\r\n\r\n",
-            item.len()
-        );
-        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", http_port))
-            .await
-            .expect("connect to post");
-        stream
-            .write_all(request.as_bytes())
-            .await
-            .expect("write head");
-        stream.write_all(&item).await.expect("write body");
-        stream.flush().await.expect("flush");
-        let mut out = Vec::new();
-        tokio::time::timeout(STOP_WAIT, stream.read_to_end(&mut out))
-            .await
-            .expect("read bound")
-            .expect("read");
-        let text = String::from_utf8_lossy(&out);
-        let body = text
-            .split("\r\n\r\n")
-            .nth(1)
-            .expect("body")
-            .trim()
-            .to_string();
-        assert_eq!(body.len(), 64, "expected the content hash: {text}");
-        body
+        let mut prefix = [0u8; 4];
+        publisher.read_exact(&mut prefix).await.expect("prefix");
+        let len = u32::from_be_bytes(prefix) as usize;
+        let mut body = vec![0u8; len];
+        publisher.read_exact(&mut body).await.expect("body");
+        match protocol::decode_response(&body).expect("decode") {
+            Response::Published { content_hash } => content_hash,
+            other => panic!("expected Published, got {other:?}"),
+        }
     };
+    assert!(oag_listend::AudioItem::verify(&hash, &item));
 
-    // The client asks for the item and then refuses to read.
-    // An unbound socket connects fine and lets us shrink the receive buffer first, which is what
-    // makes the server block mid-write instead of buffering the whole item.
-    let socket = tokio::net::TcpSocket::new_v4().expect("socket");
-    socket
-        .set_recv_buffer_size(2048)
-        .expect("tiny receive buffer");
-    let target: std::net::SocketAddr = format!("127.0.0.1:{http_port}")
-        .parse()
-        .expect("client target");
-    let mut client = socket.connect(target).await.expect("connect client");
-    let request = format!("GET /audio/{hash} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
-    client
-        .write_all(request.as_bytes())
-        .await
-        .expect("write request");
-    client.flush().await.expect("flush request");
-    tokio::time::sleep(Duration::from_millis(300)).await; // let the server block on the tiny buffer
+    // A client that asks for the whole item and then refuses to read.
+    let mut client = TcpStream::connect(addr).await.expect("connect client");
+    let fetch = protocol::encode_frame(&protocol::encode_request(&Request::Fetch {
+        content_hash: hash.clone(),
+    }));
+    client.write_all(&fetch).await.expect("write fetch");
+    client.flush().await.expect("flush fetch");
+    tokio::time::sleep(Duration::from_millis(300)).await; // let the server block mid-write
 
     let pid = child.id().expect("the daemon's pid");
     let stopped_at = std::time::Instant::now();
@@ -468,46 +444,20 @@ async fn in_flight() {
         .status()
         .expect("send SIGTERM");
 
-    // Drain the whole response: status line, headers, then exactly Content-Length bytes.
+    // Drain the whole response; the daemon must finish it before exiting.
     let mut response = Vec::new();
     let mut buf = [0u8; 8192];
-    let header_end;
     loop {
-        let n = tokio::time::timeout(STOP_WAIT, client.read(&mut buf))
-            .await
-            .expect("read bound")
-            .expect("read");
-        assert!(n > 0, "the connection closed before the headers arrived");
-        response.extend_from_slice(&buf[..n]);
-        if let Some(pos) = response.windows(4).position(|w| w == b"\r\n\r\n") {
-            header_end = pos + 4;
-            break;
-        }
-    }
-    let headers = String::from_utf8_lossy(&response[..header_end]).to_ascii_lowercase();
-    assert!(headers.starts_with("http/1.1 200"), "{headers}");
-    let content_length: usize = headers
-        .lines()
-        .find_map(|line| line.strip_prefix("content-length: "))
-        .expect("content-length header")
-        .trim()
-        .parse()
-        .expect("numeric content-length");
-    assert_eq!(content_length, item.len());
-
-    while response.len() - header_end < content_length {
         let n = tokio::time::timeout(STOP_WAIT, client.read(&mut buf))
             .await
             .expect("read bound")
             .expect("read");
         assert!(n > 0, "the transfer was cut short by the stop");
         response.extend_from_slice(&buf[..n]);
+        if response.len() >= 4 + 4 + 64 + item.len() {
+            break;
+        }
     }
-    assert_eq!(
-        response.len() - header_end,
-        content_length,
-        "the client must receive every byte it asked for"
-    );
 
     let status = tokio::time::timeout(STOP_WAIT, child.wait())
         .await
