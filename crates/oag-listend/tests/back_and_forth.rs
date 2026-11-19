@@ -502,3 +502,65 @@ async fn formats_on_the_wire() {
         .expect("join")
         .expect("run");
 }
+
+/// One connection carries many exchanges. Frames written together in a single write must be
+/// answered in order: the publish lands before the listing that follows it is processed, which is
+/// only true because the length prefix delimits each request on the same stream.
+#[tokio::test]
+async fn pipelined_requests_are_answered_in_order() {
+    let outcome = tokio::time::timeout(BOUND, pipelined()).await;
+    outcome.expect("the pipelined exchange must complete within the bound")
+}
+
+async fn pipelined() {
+    let (server, addr) =
+        ListendServer::bind_shared("127.0.0.1:0", Arc::new(Mutex::new(AudioStore::default())))
+            .await
+            .expect("bind");
+    let shutdown = server.shutdown_handle();
+    let run = tokio::spawn(async move { server.run().await });
+
+    let tone = wav::generate(91, wav::Sound::Tone);
+    let mut batch = Vec::new();
+    batch.extend_from_slice(&protocol::encode_frame(&protocol::encode_request(
+        &Request::Publish {
+            declared_media_type: Some("audio/wav".into()),
+            bytes: tone.clone(),
+        },
+    )));
+    batch.extend_from_slice(&protocol::encode_frame(&protocol::encode_request(
+        &Request::List {
+            offset: 0,
+            limit: 10,
+        },
+    )));
+
+    let mut stream = TcpStream::connect(addr).await.expect("connect");
+    stream.write_all(&batch).await.expect("write both frames");
+    stream.flush().await.expect("flush");
+
+    let hash = match recv(&mut stream).await {
+        Response::Published { content_hash } => {
+            assert!(AudioItem::verify(&content_hash, &tone));
+            content_hash
+        }
+        other => panic!("expected Published first, got {other:?}"),
+    };
+    // The listing is the *second* frame, so it must already see the published item.
+    assert_eq!(
+        recv(&mut stream).await,
+        Response::Listing {
+            content_hashes: vec![hash],
+            total: 1,
+            offset: 0
+        },
+        "a pipelined listing must observe the publish that preceded it"
+    );
+
+    shutdown.shutdown();
+    tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .expect("bound")
+        .expect("join")
+        .expect("run");
+}
