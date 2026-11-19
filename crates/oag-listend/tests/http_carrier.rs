@@ -1298,3 +1298,58 @@ async fn non_chunked_transfer_encoding() {
         .expect("join")
         .expect("run");
 }
+
+/// A `GET /` request whose head -- request line, headers and the blank line -- is exactly `total`
+/// bytes.
+fn padded_head(total: usize) -> String {
+    let fixed = "GET / HTTP/1.1\r\nHost: x\r\nX-Pad: ".len() + 4; // the trailing CRLF CRLF
+    assert!(
+        total >= fixed,
+        "the bound {total} is smaller than the fixed part of the request"
+    );
+    format!(
+        "GET / HTTP/1.1\r\nHost: x\r\nX-Pad: {}\r\n\r\n",
+        "p".repeat(total - fixed)
+    )
+}
+
+/// The head bound is exact. The growth check runs once per read, so without a check on the head
+/// itself a head of `MAX_HEAD_BYTES + 1` was accepted under a `MAX_HEAD_BYTES` constant.
+#[tokio::test]
+async fn the_request_head_bound_is_exact() {
+    tokio::time::timeout(BOUND, head_bound())
+        .await
+        .expect("within the bound")
+}
+
+async fn head_bound() {
+    let store = Arc::new(Mutex::new(AudioStore::default()));
+    let (carrier, addr) = HttpCarrier::bind_shared("127.0.0.1:0", Arc::clone(&store))
+        .await
+        .expect("bind http");
+    let shutdown = carrier.shutdown_handle();
+    let run = tokio::spawn(async move { carrier.run().await });
+
+    let response = http(addr, &padded_head(oag_listend::http::MAX_HEAD_BYTES)).await;
+    assert_eq!(
+        status_of(&response),
+        200,
+        "a head at the bound is served: {}",
+        String::from_utf8_lossy(&response)
+    );
+
+    let response = http(addr, &padded_head(oag_listend::http::MAX_HEAD_BYTES + 1)).await;
+    assert_eq!(
+        status_of(&response),
+        400,
+        "one byte over the bound is refused: {}",
+        String::from_utf8_lossy(&response)
+    );
+
+    shutdown.shutdown();
+    tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .expect("shutdown bound")
+        .expect("join")
+        .expect("run");
+}

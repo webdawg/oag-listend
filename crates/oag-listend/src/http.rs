@@ -218,6 +218,23 @@ async fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<HttpRequ
         }
         head.extend_from_slice(&buf[..n]);
         if let Some(pos) = find_headers_end(&head) {
+            // The head is everything up to and including the blank line; a body that arrives in the
+            // same read does not count against it. Without this the cap is soft by up to one read
+            // chunk, because the growth check runs at the top of the loop -- a 16385-byte head was
+            // accepted under a 16384-byte constant.
+            if pos + 4 > MAX_HEAD_BYTES {
+                return Ok(Some(HttpRequest {
+                    method: "BAD".into(),
+                    path: String::new(),
+                    content_type: None,
+                    range: None,
+                    if_none_match: None,
+                    too_large: false,
+                    bad_reason: Some("request head exceeds the maximum header size"),
+                    unread_body: true,
+                    body: Vec::new(),
+                }));
+            }
             let head_str = String::from_utf8_lossy(&head[..pos]).into_owned();
             let mut lines = head_str.split("\r\n");
             let request_line = lines.next().unwrap_or("");
