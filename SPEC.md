@@ -35,6 +35,13 @@ came back;
 - the musical ping on every carrier, answering with audio rather than an empty control pong;
 - hostile input: deterministic fuzzing of the codec and of all four carriers, with liveness asserted
 afterwards;
+- bounds that are only real if observed: an item at the servable bound is fetched back whole and one
+  byte more is refused; oversized sidecars are ignored while small ones are read; a load over the
+  bound evicts and unlinks; every load-path skip reason is counted; the mirror log is capped;
+- a client hanging up mid-reply leaves both the native and HTTP carriers serving;
+- IPv6: all four carriers serve over `[::1]`, the stream and HTTP ones connecting to the literal
+  address rather than the one the carrier reported;
+- a daemon whose stdout cannot be written (`> /dev/full`) still serves audio and still exits 0;
 - the operator surface: the daemon binary (`--version`, `--help`, usage exit codes, start/serve/stop,
 `--check`, refused startup generation, non-loopback warnings) and the `push_pull` client's CLI.
 

@@ -94,7 +94,14 @@ async fn exchange() {
     )
     .await;
     assert_eq!(status_of(&root), 200, "{}", String::from_utf8_lossy(&root));
-    assert!(String::from_utf8_lossy(&root).contains("oag-listend"));
+    let root_text = String::from_utf8_lossy(&root);
+    assert!(root_text.contains("oag-listend"), "{root_text}");
+    // The index is the operator's "what is this": it must say which protocol it speaks, how much
+    // audio it holds against its bound, and that only audio is accepted.
+    assert!(root_text.contains("protocol 1"), "{root_text}");
+    assert!(root_text.contains("items: 0"), "{root_text}");
+    assert!(root_text.contains("bytes: 0 / "), "{root_text}");
+    assert!(root_text.contains("only audio is accepted"), "{root_text}");
 
     // POST /audio -- a generated tone, labelled as WAV.
     let tone = wav::generate(5, wav::Sound::Tone);
