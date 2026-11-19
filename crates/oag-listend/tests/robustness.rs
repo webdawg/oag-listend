@@ -258,3 +258,106 @@ async fn garbage() {
     }
     let _ = std::fs::remove_dir_all(&sock_dir);
 }
+
+/// A client that hangs up while the daemon is answering is ordinary, not hostile: a browser tab
+/// closes, a player seeks elsewhere, a script dies. The write must fail quietly and leave the
+/// daemon serving. This pins that on both a stream carrier and a request/response carrier.
+#[tokio::test]
+async fn clients_hanging_up_mid_reply_leave_the_daemon_serving() {
+    let outcome = tokio::time::timeout(BOUND, hangups()).await;
+    outcome.expect("the hang-up exchange must complete within the bound")
+}
+
+async fn hangups() {
+    let store = Arc::new(Mutex::new(AudioStore::default()));
+    let (native, native_addr) = ListendServer::bind_shared("127.0.0.1:0", Arc::clone(&store))
+        .await
+        .expect("bind native");
+    let (http, http_addr) = HttpCarrier::bind_shared("127.0.0.1:0", Arc::clone(&store))
+        .await
+        .expect("bind http");
+    let native_shutdown = native.shutdown_handle();
+    let http_shutdown = http.shutdown_handle();
+    let native_run = tokio::spawn(async move { native.run().await });
+    let http_run = tokio::spawn(async move { http.run().await });
+
+    // The ping is the largest reply the daemon sends unprompted, so it is the most likely to be
+    // mid-write when the peer disappears.
+    let ping = protocol::encode_frame(&protocol::encode_request(&Request::Ping));
+    for _ in 0..200 {
+        let mut stream = match TcpStream::connect(native_addr).await {
+            Ok(stream) => stream,
+            Err(_) => continue,
+        };
+        let _ = stream.write_all(&ping).await;
+        let _ = stream.flush().await;
+        // Dropped without reading, so the daemon's write lands on a closed socket.
+    }
+    for _ in 0..200 {
+        let mut stream = match TcpStream::connect(http_addr).await {
+            Ok(stream) => stream,
+            Err(_) => continue,
+        };
+        let _ = stream
+            .write_all(b"GET /ping HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            .await;
+        let _ = stream.flush().await;
+    }
+
+    // The native carrier must still answer a normal exchange.
+    let mut stream = TcpStream::connect(native_addr)
+        .await
+        .expect("reconnect to the native carrier");
+    let frame = protocol::encode_frame(&protocol::encode_request(&Request::Hello));
+    stream.write_all(&frame).await.expect("write hello");
+    stream.flush().await.expect("flush");
+    let mut prefix = [0u8; 4];
+    tokio::time::timeout(BOUND, stream.read_exact(&mut prefix))
+        .await
+        .expect("bound")
+        .expect("prefix");
+    let len = u32::from_be_bytes(prefix) as usize;
+    let mut body = vec![0u8; len];
+    tokio::time::timeout(BOUND, stream.read_exact(&mut body))
+        .await
+        .expect("bound")
+        .expect("body");
+    assert_eq!(
+        protocol::decode_response(&body).expect("decode"),
+        Response::Hello {
+            name: protocol::DAEMON_NAME.to_string(),
+            protocol_version: protocol::PROTOCOL_VERSION,
+            item_count: 0,
+        }
+    );
+
+    // And the HTTP carrier.
+    let mut stream = TcpStream::connect(http_addr)
+        .await
+        .expect("reconnect to the http carrier");
+    stream
+        .write_all(b"GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        .await
+        .expect("write request");
+    stream.flush().await.expect("flush");
+    let mut sink = Vec::new();
+    tokio::time::timeout(BOUND, stream.read_to_end(&mut sink))
+        .await
+        .expect("bound")
+        .expect("read");
+    assert!(
+        String::from_utf8_lossy(&sink).starts_with("HTTP/1.1 200"),
+        "{}",
+        String::from_utf8_lossy(&sink)
+    );
+
+    native_shutdown.shutdown();
+    http_shutdown.shutdown();
+    for run in [native_run, http_run] {
+        tokio::time::timeout(Duration::from_secs(5), run)
+            .await
+            .expect("shutdown bound")
+            .expect("join")
+            .expect("run");
+    }
+}
