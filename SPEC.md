@@ -3,8 +3,9 @@
 **License: GNU Affero General Public License v3.0 or later (AGPL-3.0-or-later).**
 
 **Status: serves, and survives a restart.** Four carriers are live and share one store -- the
-native length-prefixed protocol over TCP, HTTP, UDP, and a Unix domain socket -- and `--ipfs-api`
-additionally mirrors accepted audio to IPFS. The store is
+native length-prefixed protocol over TCP, HTTP, UDP, and a Unix domain socket -- plus an HTTP CONNECT
+tunnel that reaches that same surface through a proxy, and `--ipfs-api`, which additionally mirrors
+accepted audio to IPFS. The store is
 content-addressed, so `--dir` persists every accepted sound under its BLAKE3 and a restart loads it
 back. The daemon publishes a small seeded set of generated sounds, accepts audio, and serves it back
 with the BLAKE3 of the bytes.
@@ -12,7 +13,9 @@ with the BLAKE3 of the bytes.
 `cargo test -p oag-listend` runs 64 unit and 58 end-to-end tests, all green, in debug and
 release. End to end they cover:
 
-- the native back-and-forth: publish, fetch, verify, reject non-audio, not-found;
+- the native back-and-forth: publish, fetch, verify, reject non-audio, not-found, and frames written
+  together in one write answered in order;
+- the CONNECT tunnel: hello, publish, fetch, verify and refusal all reached through a proxy;
 - eviction under the byte bound, and eviction removing the recorded CID sidecar;
 - the per-frame cap refusing an oversized length before any body is read, and short or lying
 declared lengths on the stream carriers ending rather than waiting;
