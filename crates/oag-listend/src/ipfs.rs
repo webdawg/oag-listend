@@ -130,7 +130,15 @@ impl IpfsPublisher {
             }
             reply.extend_from_slice(&chunk[..n]);
         }
-        parse_add_response(&reply)
+        // A CID that cannot be one is refused here rather than stored, persisted, and written
+        // into a response header. The mirror is cleartext HTTP by design, so this reply comes from
+        // the network; a node (or an on-path attacker) that answers with header text would
+        // otherwise put a second header line into every `X-IPFS-CID` and `ETag` we send. Refusing
+        // it makes the mirror outcome a recorded failure, which is all a failed mirror means: the
+        // audio is still stored and served locally.
+        let cid = parse_add_response(&reply)?;
+        validate_cid(&cid)?;
+        Ok(cid)
     }
 
     /// Fetch the bytes stored at `cid`.
@@ -470,6 +478,25 @@ mod tests {
             Err(IpfsError::Connect { .. }) => {}
             other => expected_err(other),
         }
+    }
+
+    /// A CID that cannot be one must be refused at the source. It is stored, persisted, and
+    /// written into `X-IPFS-CID` / `ETag`, and the mirror is cleartext HTTP, so an unvalidated
+    /// value here is a header-injection path rather than a cosmetic one.
+    #[tokio::test]
+    async fn a_cid_that_is_not_plausible_is_refused_not_stored() {
+        let (addr, server) = stub(
+            "HTTP/1.1 200 OK\r\n\r\n{\"Hash\":\"evil\\r\\nX-Injected: yes\",\"Size\":\"8\"}\r\n"
+                .into(),
+        )
+        .await;
+        match IpfsPublisher::new(addr).add(b"RIFF....WAVE").await {
+            Err(IpfsError::BadCid(cid)) => {
+                assert!(cid.contains("X-Injected"), "{cid}");
+            }
+            other => panic!("expected a BadCid refusal, got {other:?}"),
+        }
+        server.await.expect("join");
     }
 
     fn expected_err<T: std::fmt::Debug>(other: T) {

@@ -10,7 +10,7 @@ content-addressed, so `--dir` persists every accepted sound under its BLAKE3 and
 back. The daemon publishes a small seeded set of generated sounds, accepts audio, and serves it back
 with the BLAKE3 of the bytes.
 
-`cargo test -p oag-listend` runs 64 unit and 66 end-to-end tests, all green, in debug and
+`cargo test -p oag-listend` runs 64 unit and 68 end-to-end tests, all green, in debug and
 release. End to end they cover:
 
 - the native back-and-forth: publish, fetch, verify, reject non-audio, not-found, and frames written
@@ -30,7 +30,8 @@ headers;
 IPFS node not stalling the daemon;
 - the IPFS mirror: mirroring accepted audio, serving by CID (local-first for what is held),
 idempotence within a run and across a restart, refused cleartext downgrades, refused chunked
-replies, and refusals that never echo or store what came back;
+replies, a refused non-plausible CID from the node, and refusals that never echo or store what
+came back;
 - the musical ping on every carrier, answering with audio rather than an empty control pong;
 - hostile input: deterministic fuzzing of the codec and of all four carriers, with liveness asserted
 afterwards;
@@ -315,9 +316,14 @@ and `X-Content-Hash` with the BLAKE3 of the bytes actually sent, so the receiver
 bytes are identified by the CID the caller asked for -- this crate deliberately carries no multihash
 implementation, so it cannot check that they hash to it.
 
-The write client hand-rolls `POST /api/v0/add` as multipart form data and reads `Hash` from the reply,
-with a 10 s bound per read and write and a 64 KiB cap on the reply. A `https://` address is refused:
-speaking plain HTTP to a TLS port would look configured while sending audio in clear. A chunked
+The write client hand-rolls `POST /api/v0/add` as multipart form data and reads `Hash` from the
+reply, with a 10 s bound per read and write and a 64 KiB cap on the reply. The CID it reads back is
+run through the same plausibility rule as a request-supplied one: the mirror is cleartext HTTP, so
+that reply comes from the network, and a `Hash` that is not a CID would otherwise be stored,
+persisted, and written into `X-IPFS-CID` and `ETag` on every later fetch -- a header-injection path.
+Refusing it records a mirror failure, which costs nothing: the audio is already durable locally. A
+`https://` address is refused: speaking plain HTTP to a TLS port would look configured while sending
+audio in clear. A chunked
 reply is refused by **both** halves rather than decoded as content, because reading the framing as
 audio would silently corrupt what is served. It has been tested against a
 stub that mimics Kubo's add and cat endpoints, end to end through `--ipfs-api`; it has **not**
