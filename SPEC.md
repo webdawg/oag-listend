@@ -10,7 +10,7 @@ content-addressed, so `--dir` persists every accepted sound under its BLAKE3 and
 back. The daemon publishes a small seeded set of generated sounds, accepts audio, and serves it back
 with the BLAKE3 of the bytes.
 
-`cargo test -p oag-listend` runs 64 unit and 58 end-to-end tests, all green, in debug and
+`cargo test -p oag-listend` runs 64 unit and 66 end-to-end tests, all green, in debug and
 release. End to end they cover:
 
 - the native back-and-forth: publish, fetch, verify, reject non-audio, not-found, and frames written
@@ -23,7 +23,8 @@ declared lengths on the stream carriers ending rather than waiting;
 - each of the six named audio signatures, in both directions, over the wire, and HTTP serving every
 format under its own content type;
 - HTTP refusal, streaming, ranges, HEAD, validators, CORS, oversized bodies with and without
-`Expect`, header floods, and chunked uploads;
+`Expect`, header floods, chunked and other transfer encodings, and duplicated `Content-Length`
+headers;
 - the shared store across carriers, UDP, the Unix socket, and persistence across a restart;
 - concurrency: many publishers, a stalled reader not stalling others, the session cap, and a hung
 IPFS node not stalling the daemon;
@@ -171,9 +172,11 @@ content-addressed item cannot change. `POST /audio` accepts a body through
 `AudioStore::accept` -- reached through the same `accept_and_mirror` entry point as every other
 carrier (201 with the content hash, 400 if the bytes are not audio, 413 if they are
 audio but exceed the store bound or the frame cap) and answers
-`Expect: 100-continue`. A chunked upload is refused with a message saying to send a
-`Content-Length` rather than being read as zero bytes and reported as invalid audio; the unread body
-is drained after a half-close so the refusal is not lost to a TCP reset. A query string is never
+`Expect: 100-continue`. Any transfer encoding is refused -- `Transfer-Encoding: chunked` and every
+other value alike -- with a message saying to send a `Content-Length`, and so is a request carrying
+more than one `Content-Length` header: two of them make the body's extent ambiguous and a reverse
+proxy in front may pick a different one than the daemon (RFC 7230 3.3.3 requires rejecting it). The
+unread body is drained after a half-close so the refusal is not lost to a TCP reset. A query string is never
 part of the path, so `/audio/{hash}?x=1` serves the
 audio rather than 404-ing. `GET /ipfs/{cid}` serves audio by content identifier -- held items from
 the store, anything else fetched from the configured Kubo node (see "The IPFS mirror") -- under the

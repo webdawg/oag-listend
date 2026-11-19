@@ -181,10 +181,12 @@ struct HttpRequest {
     content_type: Option<String>,
     range: Option<String>,
     if_none_match: Option<String>,
-    transfer_encoding: Option<String>,
     /// The declared body is larger than this carrier will read. It is answered `413 Payload Too
     /// Large` rather than `400 Bad Request`: the request is well formed, only too big.
     too_large: bool,
+    /// Why the head was refused. Distinct from `too_large`: a malformed head is `400`, and saying
+    /// which rule broke lets a client fix the request instead of guessing.
+    bad_reason: Option<&'static str>,
     /// The request carried a body this reader did not consume. Closing with it unread makes TCP
     /// send a reset, which can discard the response we just wrote -- so it is drained first.
     unread_body: bool,
@@ -202,8 +204,8 @@ async fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<HttpRequ
                 content_type: None,
                 range: None,
                 if_none_match: None,
-                transfer_encoding: None,
                 too_large: false,
+                bad_reason: Some("request head exceeds the maximum header size"),
                 unread_body: true,
                 body: Vec::new(),
             }));
@@ -229,22 +231,26 @@ async fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<HttpRequ
                     content_type: None,
                     range: None,
                     if_none_match: None,
-                    transfer_encoding: None,
                     too_large: false,
+                    bad_reason: Some("empty request line"),
                     unread_body: true,
                     body: Vec::new(),
                 }));
             }
             let mut content_length = 0usize;
+            let mut content_length_headers = 0usize;
             let mut content_type = None;
             let mut range = None;
             let mut if_none_match = None;
-            let mut transfer_encoding = None;
+            // Any Transfer-Encoding means the body is not framed by Content-Length. Remember that
+            // a header was seen; its value is irrelevant because every value is refused.
+            let mut saw_transfer_encoding = false;
             let mut expect_continue = false;
             for line in lines {
                 if let Some((name, value)) = line.split_once(':') {
                     let value = value.trim();
                     if name.trim().eq_ignore_ascii_case("content-length") {
+                        content_length_headers += 1;
                         content_length = value.parse().unwrap_or(0);
                     } else if name.trim().eq_ignore_ascii_case("content-type") {
                         content_type = Some(value.to_string());
@@ -253,7 +259,7 @@ async fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<HttpRequ
                     } else if name.trim().eq_ignore_ascii_case("if-none-match") {
                         if_none_match = Some(value.to_string());
                     } else if name.trim().eq_ignore_ascii_case("transfer-encoding") {
-                        transfer_encoding = Some(value.to_string());
+                        saw_transfer_encoding = true;
                     } else if name.trim().eq_ignore_ascii_case("expect")
                         && value.eq_ignore_ascii_case("100-continue")
                     {
@@ -272,9 +278,43 @@ async fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<HttpRequ
                     content_type: None,
                     range: None,
                     if_none_match: None,
-                    transfer_encoding: None,
                     too_large: true,
+                    bad_reason: None,
                     // The body was not read, so it must be drained or the refusal is reset away.
+                    unread_body: true,
+                    body: Vec::new(),
+                }));
+            }
+            // A second Content-Length makes the body's extent ambiguous, and a reverse proxy in
+            // front may pick a different one than we do -- the classic request-smuggling setup.
+            // RFC 7230 3.3.3 requires rejecting it, so the ambiguity never reaches the reader.
+            if content_length_headers > 1 {
+                return Ok(Some(HttpRequest {
+                    method: "BAD".into(),
+                    path: String::new(),
+                    content_type: None,
+                    range: None,
+                    if_none_match: None,
+                    too_large: false,
+                    bad_reason: Some("multiple Content-Length headers"),
+                    unread_body: true,
+                    body: Vec::new(),
+                }));
+            }
+            // Any transfer encoding means the body is not framed by Content-Length at all. Only
+            // chunked was refused before, which left `Transfer-Encoding: gzip` and friends to be
+            // read as if they were a plain body.
+            if saw_transfer_encoding {
+                return Ok(Some(HttpRequest {
+                    method: "BAD".into(),
+                    path: String::new(),
+                    content_type: None,
+                    range: None,
+                    if_none_match: None,
+                    too_large: false,
+                    bad_reason: Some(
+                        "chunked or other transfer encoding is not supported; send Content-Length",
+                    ),
                     unread_body: true,
                     body: Vec::new(),
                 }));
@@ -298,19 +338,15 @@ async fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<HttpRequ
                 body.extend_from_slice(&buf[..n]);
             }
             body.truncate(content_length);
-            let chunked = transfer_encoding
-                .as_deref()
-                .map(|value| value.to_ascii_lowercase().contains("chunked"))
-                .unwrap_or(false);
             return Ok(Some(HttpRequest {
                 method,
                 path,
                 content_type,
                 range,
                 if_none_match,
-                transfer_encoding,
                 too_large: false,
-                unread_body: chunked || content_length > body.len(),
+                bad_reason: None,
+                unread_body: content_length > body.len(),
                 body,
             }));
         }
@@ -347,6 +383,8 @@ async fn route(request: HttpRequest, store: &Arc<Mutex<AudioStore>>) -> HttpResp
                 "Payload Too Large",
                 b"request body exceeds the maximum frame size",
             )
+        } else if let Some(reason) = request.bad_reason {
+            HttpResponse::text(400, "Bad Request", reason.as_bytes())
         } else {
             HttpResponse::text(400, "Bad Request", b"bad request")
         };
@@ -701,21 +739,6 @@ async fn route(request: HttpRequest, store: &Arc<Mutex<AudioStore>>) -> HttpResp
             response
         }
         ("POST", "/audio") => {
-            // Chunked bodies are not decoded. Say so plainly rather than reading zero bytes and
-            // reporting the audio as invalid -- the client can then send a Content-Length.
-            if request.unread_body
-                && request
-                    .transfer_encoding
-                    .as_deref()
-                    .map(|value| value.to_ascii_lowercase().contains("chunked"))
-                    .unwrap_or(false)
-            {
-                return HttpResponse::text(
-                    400,
-                    "Bad Request",
-                    b"chunked transfer encoding is not supported; send Content-Length",
-                );
-            }
             let body_len = request.body.len();
             // Same entry point as every other carrier: accept under the lock, mirror after it.
             match crate::accept_and_mirror(store, request.body, request.content_type).await {

@@ -1208,3 +1208,86 @@ async fn oversized_body() {
         .expect("join")
         .expect("run");
 }
+
+/// Two `Content-Length` headers make the body's extent ambiguous, and a reverse proxy in front may
+/// choose a different one than the daemon -- the request-smuggling setup. RFC 7230 3.3.3 requires
+/// rejecting it, so the ambiguity never reaches the body reader.
+#[tokio::test]
+async fn two_content_length_headers_are_refused() {
+    tokio::time::timeout(BOUND, two_content_lengths())
+        .await
+        .expect("within the bound")
+}
+
+async fn two_content_lengths() {
+    let store = Arc::new(Mutex::new(AudioStore::default()));
+    let (carrier, addr) = HttpCarrier::bind_shared("127.0.0.1:0", Arc::clone(&store))
+        .await
+        .expect("bind http");
+    let shutdown = carrier.shutdown_handle();
+    let run = tokio::spawn(async move { carrier.run().await });
+
+    let wav = wav::generate(6, wav::Sound::Tone);
+    let request = format!(
+        "POST /audio HTTP/1.1\r\nHost: x\r\nContent-Type: audio/wav\r\n\
+         Content-Length: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        wav.len(),
+        wav.len() + 1
+    );
+    let response = http(addr, &request).await;
+    let text = String::from_utf8_lossy(&response);
+    assert!(text.starts_with("HTTP/1.1 400"), "got {text}");
+    assert!(
+        text.to_ascii_lowercase().contains("content-length"),
+        "the refusal must say which rule broke: {text}"
+    );
+    assert!(store.lock().await.is_empty(), "nothing is stored");
+
+    shutdown.shutdown();
+    tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .expect("shutdown bound")
+        .expect("join")
+        .expect("run");
+}
+
+/// Only `chunked` used to be refused, so `Transfer-Encoding: gzip` fell through and its body was
+/// read as if a `Content-Length` framed it. Any transfer encoding is refused now.
+#[tokio::test]
+async fn a_non_chunked_transfer_encoding_is_refused() {
+    tokio::time::timeout(BOUND, non_chunked_transfer_encoding())
+        .await
+        .expect("within the bound")
+}
+
+async fn non_chunked_transfer_encoding() {
+    let store = Arc::new(Mutex::new(AudioStore::default()));
+    let (carrier, addr) = HttpCarrier::bind_shared("127.0.0.1:0", Arc::clone(&store))
+        .await
+        .expect("bind http");
+    let shutdown = carrier.shutdown_handle();
+    let run = tokio::spawn(async move { carrier.run().await });
+
+    let wav = wav::generate(7, wav::Sound::Tone);
+    let request = format!(
+        "POST /audio HTTP/1.1\r\nHost: x\r\nContent-Type: audio/wav\r\n\
+         Content-Length: {}\r\nTransfer-Encoding: gzip\r\nConnection: close\r\n\r\n{}",
+        wav.len(),
+        String::from_utf8_lossy(&wav)
+    );
+    let response = http(addr, &request).await;
+    let text = String::from_utf8_lossy(&response);
+    assert!(text.starts_with("HTTP/1.1 400"), "got {text}");
+    assert!(
+        text.to_ascii_lowercase().contains("transfer encoding"),
+        "the refusal must say what is unsupported: {text}"
+    );
+    assert!(store.lock().await.is_empty(), "nothing is stored");
+
+    shutdown.shutdown();
+    tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .expect("shutdown bound")
+        .expect("join")
+        .expect("run");
+}
