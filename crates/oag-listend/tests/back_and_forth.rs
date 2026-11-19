@@ -564,3 +564,114 @@ async fn pipelined() {
         .expect("join")
         .expect("run");
 }
+
+/// A 16-bit PCM WAV container of an exact total size. The bound under test is about the frame, not
+/// about the sound, so the payload is zeros -- but the header is well formed, because the point is
+/// that a real, sniffable audio item at the bound is servable.
+fn wav_of_exact_size(total: usize) -> Vec<u8> {
+    assert!(total >= 44, "a WAV needs its 44-byte header");
+    let data_len = total - 44;
+    let mut out = Vec::with_capacity(total);
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&((36 + data_len) as u32).to_le_bytes());
+    out.extend_from_slice(b"WAVE");
+    out.extend_from_slice(b"fmt ");
+    out.extend_from_slice(&16u32.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    out.extend_from_slice(&1u16.to_le_bytes()); // mono
+    out.extend_from_slice(&8000u32.to_le_bytes());
+    out.extend_from_slice(&16000u32.to_le_bytes());
+    out.extend_from_slice(&2u16.to_le_bytes());
+    out.extend_from_slice(&16u16.to_le_bytes());
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&(data_len as u32).to_le_bytes());
+    out.resize(total, 0);
+    out
+}
+
+/// `MAX_SERVABLE_BYTES` exists so that no accepted item is unfetchable: a fetch reply also carries
+/// the hash, a length prefix and an optional CID, so an item at the frame cap would make a reply
+/// larger than the cap. This asserts the boundary holds in both directions over the wire.
+#[tokio::test]
+async fn an_item_at_the_frame_bound_is_served_and_one_byte_more_is_refused() {
+    let (server, addr) = ListendServer::bind("127.0.0.1:0", AudioStore::default())
+        .await
+        .expect("bind an ephemeral port");
+    let shutdown = server.shutdown_handle();
+    let run = tokio::spawn(async move { server.run().await });
+
+    let mut stream = TcpStream::connect(addr)
+        .await
+        .expect("connect to the daemon");
+
+    // Exactly at the bound: accepted, and the fetch reply fits a frame.
+    let at_bound = wav_of_exact_size(oag_listend::protocol::MAX_SERVABLE_BYTES);
+    assert_eq!(AudioFormat::sniff(&at_bound), Some(AudioFormat::Wav));
+    send(
+        &mut stream,
+        &Request::Publish {
+            declared_media_type: Some("audio/wav".into()),
+            bytes: at_bound.clone(),
+        },
+    )
+    .await;
+    let hash = match recv(&mut stream).await {
+        Response::Published { content_hash } => content_hash,
+        other => panic!("an item at the bound must be accepted, got {other:?}"),
+    };
+    assert!(
+        AudioItem::verify(&hash, &at_bound),
+        "the hash must name the largest servable item"
+    );
+    send(
+        &mut stream,
+        &Request::Fetch {
+            content_hash: hash.clone(),
+        },
+    )
+    .await;
+    match recv(&mut stream).await {
+        Response::Audio {
+            content_hash,
+            bytes,
+            ..
+        } => {
+            assert_eq!(content_hash, hash);
+            assert_eq!(
+                bytes, at_bound,
+                "the largest servable item must come back whole"
+            );
+            assert!(AudioItem::verify(&content_hash, &bytes));
+        }
+        other => panic!("the item at the bound must be servable, got {other:?}"),
+    }
+
+    // One byte more: refused, and nothing is stored.
+    let over = wav_of_exact_size(oag_listend::protocol::MAX_SERVABLE_BYTES + 1);
+    send(
+        &mut stream,
+        &Request::Publish {
+            declared_media_type: Some("audio/wav".into()),
+            bytes: over,
+        },
+    )
+    .await;
+    match recv(&mut stream).await {
+        Response::Rejected { reason } => assert!(!reason.is_empty()),
+        other => panic!("one byte over the bound must be refused, got {other:?}"),
+    }
+    send(&mut stream, &Request::Hello).await;
+    match recv(&mut stream).await {
+        Response::Hello { item_count, .. } => {
+            assert_eq!(item_count, 1, "only the first item is held")
+        }
+        other => panic!("expected Hello, got {other:?}"),
+    }
+
+    shutdown.shutdown();
+    tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .expect("the accept loop must stop within the bound")
+        .expect("join")
+        .expect("run");
+}
