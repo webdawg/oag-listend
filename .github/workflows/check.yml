@@ -19,11 +19,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust (minimal profile)
+      - name: Install Rust
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
             | sh -s -- -y --profile minimal --default-toolchain stable
           echo "${CARGO_HOME:-$HOME/.cargo}/bin" >> "$GITHUB_PATH"
+
+      # The gate runs `cargo fmt` and `cargo clippy`, and rustup's minimal profile is
+      # rustc + cargo + rust-std + rust-docs -- it does NOT carry rustfmt or clippy. Depending
+      # on the profile's contents is exactly the kind of thing that fails silently, so the two
+      # components the gate needs are named here.
+      - name: Add the components the gate needs
+        run: rustup component add rustfmt clippy
 
       - name: Run the gate
         run: ./scripts/check.sh
@@ -35,11 +42,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust (minimal profile)
+      - name: Install Rust
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
             | sh -s -- -y --profile minimal --default-toolchain stable
           echo "${CARGO_HOME:-$HOME/.cargo}/bin" >> "$GITHUB_PATH"
+
+      # See the debug job: the minimal profile does not carry these two.
+      - name: Add the components the gate needs
+        run: rustup component add rustfmt clippy
 
       - name: Run the gate in release
         run: ./scripts/check.sh --release
