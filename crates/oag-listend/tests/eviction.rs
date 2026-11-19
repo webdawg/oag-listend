@@ -144,3 +144,70 @@ async fn run(dir: &std::path::Path) {
         .expect("join")
         .expect("run");
 }
+
+/// A restart must honour the store bound too. Loading a directory whose contents exceed
+/// `--max-bytes` drops the surplus and unlinks it, exactly as a runtime publish does -- otherwise an
+/// operator who lowers the bound would find the daemon holding more than it advertises, with the
+/// surplus files never leaving the disk.
+#[tokio::test]
+async fn a_restart_over_the_bound_evicts_and_unlinks() {
+    let dir = temp_dir("load-evict");
+    let outcome = tokio::time::timeout(BOUND, load_evict(&dir)).await;
+    let _ = std::fs::remove_dir_all(&dir);
+    outcome.expect("the load exchange must complete within the bound")
+}
+
+async fn load_evict(dir: &std::path::Path) {
+    let mut sizes: Vec<Vec<u8>> = (0..3u64)
+        .map(|seed| wav::generate(seed, wav::Sound::Tone))
+        .collect();
+    sizes.sort_by_key(|bytes| std::cmp::Reverse(bytes.len()));
+    let rest = &sizes[1..];
+    let bound = rest.iter().map(|bytes| bytes.len()).sum::<usize>();
+
+    for bytes in &sizes {
+        let item = AudioItem::new(bytes.clone(), None);
+        std::fs::write(dir.join(&item.content_hash), bytes).expect("write audio");
+    }
+
+    let (store, report) = AudioStore::with_directory(dir, bound).expect("open store");
+
+    // The directory is read in filesystem order, so *which* item is dropped is not deterministic --
+    // but the invariants are, and they are what an operator depends on.
+    assert!(
+        store.bytes_held() <= bound,
+        "after a load the store must not hold more than the bound (held {}, bound {})",
+        store.bytes_held(),
+        bound
+    );
+    assert_eq!(
+        report.loaded,
+        store.len(),
+        "the report counts what is served"
+    );
+    assert_eq!(
+        report.evicted + report.loaded,
+        3,
+        "every audio file is either loaded or counted as evicted"
+    );
+    assert!(report.evicted >= 1, "a load over the bound must evict");
+
+    // The directory and the index must agree: nothing served that is not on disk, and no file
+    // left behind for an item that was dropped.
+    let remaining = std::fs::read_dir(dir)
+        .expect("read the store directory")
+        .filter_map(|entry| entry.ok())
+        .count();
+    assert_eq!(
+        remaining, report.loaded,
+        "the directory must agree with the index after a load eviction"
+    );
+    for bytes in &sizes {
+        let item = AudioItem::new(bytes.clone(), None);
+        assert_eq!(
+            dir.join(&item.content_hash).exists(),
+            store.serve(&item.content_hash).is_ok(),
+            "a file on disk and an item in the index must be the same set"
+        );
+    }
+}
