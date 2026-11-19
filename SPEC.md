@@ -10,7 +10,7 @@ content-addressed, so `--dir` persists every accepted sound under its BLAKE3 and
 back. The daemon publishes a small seeded set of generated sounds, accepts audio, and serves it back
 with the BLAKE3 of the bytes.
 
-`cargo test -p oag-listend` runs 64 unit and 68 end-to-end tests, all green, in debug and
+`cargo test -p oag-listend` runs 64 unit and 69 end-to-end tests, all green, in debug and
 release. End to end they cover:
 
 - the native back-and-forth: publish, fetch, verify, reject non-audio, not-found, and frames written
@@ -277,6 +277,11 @@ daemon handles SIGINT and SIGTERM, so `systemctl stop` is a clean stop: acceptin
 in-flight exchanges are given up to `SHUTDOWN_GRACE` (2 s) to finish rather than being cut off
 mid-transfer, the Unix socket is removed, and the process exits 0. A client that never reads cannot
 hold a stop open past that bound.
+
+The daemon's own logging must not be able to kill it. Every line goes through a writer that ignores
+a failed write, because under systemd stdout *is* the journal: an unavailable journal, a full disk,
+or a pipe whose reader exited would otherwise panic the process and stop the audio. `oag-listend
+--listen 127.0.0.1:7100 > /dev/full` keeps serving; a test asserts exactly that.
 
 ## The IPFS mirror
 

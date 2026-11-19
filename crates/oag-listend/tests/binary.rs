@@ -697,6 +697,94 @@ async fn serve() {
     );
 }
 
+/// A daemon must not die because its log output has nowhere to go. Under systemd stdout is the
+/// journal, so a journal that is unavailable would otherwise panic the process and stop the audio.
+/// `/dev/full` fails every write with ENOSPC -- the same failure, deterministically.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_unwritable_stdout_does_not_stop_the_audio() {
+    let outcome = tokio::time::timeout(BOUND, unwritable_stdout()).await;
+    outcome.expect("the exchange must complete within the bound")
+}
+
+#[cfg(unix)]
+async fn unwritable_stdout() {
+    let port = free_port();
+    let addr = format!("127.0.0.1:{port}");
+    let sink = std::fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/full")
+        .expect("open /dev/full");
+    let mut child = Command::new(binary())
+        .arg("--listen")
+        .arg(&addr)
+        .arg("--no-generate")
+        .stdout(Stdio::from(sink))
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn the daemon");
+
+    // stdout is unreadable by design here, so wait on the listener rather than the announcement.
+    let mut stream = None;
+    let deadline = Instant::now() + BOUND;
+    while stream.is_none() {
+        assert!(
+            Instant::now() < deadline,
+            "the daemon never came up with an unwritable stdout"
+        );
+        assert!(
+            child.try_wait().expect("poll the daemon").is_none(),
+            "the daemon exited because its stdout could not be written"
+        );
+        if let Ok(connected) = TcpStream::connect(&addr).await {
+            stream = Some(connected);
+        } else {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+    let mut stream = stream.expect("connected");
+
+    // The audio must still flow: hello, publish, fetch, verify.
+    let tone = oag_listend::wav::generate(2027, oag_listend::wav::Sound::Tone);
+    for request in [
+        Request::Hello,
+        Request::Publish {
+            declared_media_type: Some("audio/wav".into()),
+            bytes: tone.clone(),
+        },
+    ] {
+        let frame = protocol::encode_frame(&protocol::encode_request(&request));
+        stream.write_all(&frame).await.expect("write request");
+        stream.flush().await.expect("flush");
+        let mut prefix = [0u8; 4];
+        stream.read_exact(&mut prefix).await.expect("prefix");
+        let len = u32::from_be_bytes(prefix) as usize;
+        let mut body = vec![0u8; len];
+        stream.read_exact(&mut body).await.expect("body");
+        let response = protocol::decode_response(&body).expect("decode");
+        match response {
+            Response::Hello { .. } => {}
+            Response::Published { content_hash } => {
+                assert!(oag_listend::AudioItem::verify(&content_hash, &tone));
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+    }
+
+    // And it must still be alive to be stopped cleanly.
+    let pid = child.id().expect("the daemon's pid");
+    std::process::Command::new("kill")
+        .arg("-TERM")
+        .arg(pid.to_string())
+        .status()
+        .expect("send the stop signal");
+    let status = tokio::time::timeout(STOP_WAIT, child.wait())
+        .await
+        .expect("the daemon must exit after the stop signal")
+        .expect("wait");
+    assert_eq!(status.code(), Some(0), "a clean stop exits 0: {status}");
+}
+
 /// SIGTERM is what `systemctl stop` sends, so it must be a clean stop: the process exits 0, says it
 /// is shutting down, and removes the Unix socket rather than leaving a dead file for the next start.
 #[tokio::test]

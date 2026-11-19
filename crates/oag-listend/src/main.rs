@@ -8,6 +8,7 @@
 
 #![forbid(unsafe_code)]
 
+use std::io::Write;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -17,6 +18,22 @@ use oag_listend::udp::UdpCarrier;
 use oag_listend::unix::UnixCarrier;
 use oag_listend::{AudioStore, ListendServer, DEFAULT_MAX_BYTES};
 use tokio::sync::Mutex;
+
+/// Write a line to stdout, ignoring a sink that cannot be written. A daemon must not die because
+/// its log output has nowhere to go: under systemd stdout is the journal, and a journal that is
+/// unavailable or a pipe whose reader exited would otherwise panic the process and stop the audio.
+macro_rules! say {
+    ($($arg:tt)*) => {{
+        let _ = writeln!(std::io::stdout(), $($arg)*);
+    }};
+}
+
+/// The same for stderr, which carries the operator's errors.
+macro_rules! complain {
+    ($($arg:tt)*) => {{
+        let _ = writeln!(std::io::stderr(), $($arg)*);
+    }};
+}
 
 struct Args {
     listen: String,
@@ -55,7 +72,7 @@ fn parse_args() -> Args {
             "--dir" => args.dir = Some(value(&mut it, "--dir")),
             "--check" => args.check = true,
             "--version" | "-V" => {
-                println!(
+                say!(
                     "oag-listend {} (frame protocol {})",
                     env!("CARGO_PKG_VERSION"),
                     oag_listend::protocol::PROTOCOL_VERSION
@@ -67,11 +84,11 @@ fn parse_args() -> Args {
             "--no-generate" => args.no_generate = true,
             "--ipfs-api" => args.ipfs_api = Some(value(&mut it, "--ipfs-api")),
             "--help" | "-h" => {
-                println!("{}", usage());
+                say!("{}", usage());
                 std::process::exit(0);
             }
             other => {
-                eprintln!("unknown argument {other}\n{}", usage());
+                complain!("unknown argument {other}\n{}", usage());
                 std::process::exit(2);
             }
         }
@@ -84,7 +101,7 @@ fn value(it: &mut impl Iterator<Item = String>, flag: &str) -> String {
     match it.next() {
         Some(value) => value,
         None => {
-            eprintln!("{flag} needs a value\n\n{}", usage());
+            complain!("{flag} needs a value\n\n{}", usage());
             std::process::exit(2);
         }
     }
@@ -96,7 +113,7 @@ fn parse_value<T: std::str::FromStr>(it: &mut impl Iterator<Item = String>, flag
     match raw.parse() {
         Ok(parsed) => parsed,
         Err(_) => {
-            eprintln!("{flag} must be a valid value: {raw}\n\n{}", usage());
+            complain!("{flag} must be a valid value: {raw}\n\n{}", usage());
             std::process::exit(2);
         }
     }
@@ -131,7 +148,7 @@ Only audio is accepted. Everything else is rejected before it is stored."
 /// interface; an operator who did not think about that should be told rather than discover it.
 fn note_public_bind(addr: std::net::SocketAddr) {
     if !addr.ip().is_loopback() {
-        println!("  note: {addr} is not a loopback address -- this serves audio to that interface");
+        say!("  note: {addr} is not a loopback address -- this serves audio to that interface");
     }
 }
 
@@ -196,10 +213,10 @@ async fn main() {
         Some(dir) => {
             let (store, report) =
                 AudioStore::with_directory(dir, args.max_bytes).unwrap_or_else(|e| {
-                    eprintln!("oag-listend: cannot open store {dir}: {e}");
+                    complain!("oag-listend: cannot open store {dir}: {e}");
                     std::process::exit(1);
                 });
-            println!(
+            say!(
                 "store {dir}: loaded {} skipped {} evicted {}{}",
                 report.loaded,
                 report.skipped,
@@ -217,7 +234,7 @@ async fn main() {
     if args.check {
         // A check is purely a store verification: it must not contact an IPFS node or spend its
         // mirror budget, because operators and scripts call it expecting a quick answer.
-        println!(
+        say!(
             "store ok: {} items, {} bytes (bound {}, item bound {})",
             store.len(),
             store.bytes_held(),
@@ -229,7 +246,7 @@ async fn main() {
 
     if let Some(addr) = &args.ipfs_api {
         store.set_ipfs(Some(oag_listend::ipfs::IpfsPublisher::new(addr.clone())));
-        println!("offering accepted audio to IPFS at {addr} (best-effort)");
+        say!("offering accepted audio to IPFS at {addr} (best-effort)");
         // Audio already on disk would otherwise never reach IPFS: only publishes made after this
         // daemon started would be mirrored.
         let held = store.len();
@@ -237,7 +254,7 @@ async fn main() {
             let offered = store
                 .mirror_existing(oag_listend::STARTUP_MIRROR_BUDGET)
                 .await;
-            println!("  offered {offered} of {held} stored item(s) to IPFS");
+            say!("  offered {offered} of {held} stored item(s) to IPFS");
         }
     }
     let store = Arc::new(Mutex::new(store));
@@ -245,7 +262,7 @@ async fn main() {
     let (server, native_addr) = ListendServer::bind_shared(&args.listen, Arc::clone(&store))
         .await
         .unwrap_or_else(|e| {
-            eprintln!("oag-listend: cannot bind {}: {e}", args.listen);
+            complain!("oag-listend: cannot bind {}: {e}", args.listen);
             std::process::exit(1);
         });
     let native_shutdown = server.shutdown_handle();
@@ -256,10 +273,10 @@ async fn main() {
             let (carrier, http_addr) = HttpCarrier::bind_shared(addr, Arc::clone(&store))
                 .await
                 .unwrap_or_else(|e| {
-                    eprintln!("oag-listend: cannot bind http {addr}: {e}");
+                    complain!("oag-listend: cannot bind http {addr}: {e}");
                     std::process::exit(1);
                 });
-            println!("oag-listend http on {http_addr}");
+            say!("oag-listend http on {http_addr}");
             note_public_bind(http_addr);
             Some((carrier, http_addr))
         }
@@ -275,10 +292,10 @@ async fn main() {
             let (carrier, udp_addr) = UdpCarrier::bind_shared(addr, Arc::clone(&store))
                 .await
                 .unwrap_or_else(|e| {
-                    eprintln!("oag-listend: cannot bind udp {addr}: {e}");
+                    complain!("oag-listend: cannot bind udp {addr}: {e}");
                     std::process::exit(1);
                 });
-            println!("oag-listend udp on {udp_addr}");
+            say!("oag-listend udp on {udp_addr}");
             note_public_bind(udp_addr);
             Some((carrier, udp_addr))
         }
@@ -291,10 +308,10 @@ async fn main() {
             let (carrier, bound) = UnixCarrier::bind_shared(path, Arc::clone(&store))
                 .await
                 .unwrap_or_else(|e| {
-                    eprintln!("oag-listend: cannot bind unix {path}: {e}");
+                    complain!("oag-listend: cannot bind unix {path}: {e}");
                     std::process::exit(1);
                 });
-            println!("oag-listend unix on {bound:?}");
+            say!("oag-listend unix on {bound:?}");
             Some((carrier, bound))
         }
         None => None,
@@ -309,20 +326,20 @@ async fn main() {
             .publish_generated(args.seed, oag_listend::server::STARTUP_SOUNDS)
             .await;
         for hash in &generated.accepted {
-            println!("  generated {}", &hash[..16]);
+            say!("  generated {}", &hash[..16]);
         }
         for reason in &generated.rejected {
-            eprintln!("  generated sound rejected: {reason}");
+            complain!("  generated sound rejected: {reason}");
         }
         if generated.skipped_non_empty {
-            println!("  store already holds audio; not generating a startup set");
+            say!("  store already holds audio; not generating a startup set");
         }
     }
 
-    println!("oag-listend listening on {native_addr}");
+    say!("oag-listend listening on {native_addr}");
     note_public_bind(native_addr);
     let held = store.lock().await.bytes_held();
-    println!(
+    say!(
         "  seed {}  max-bytes {}  held {held}{}",
         args.seed,
         args.max_bytes,
@@ -331,7 +348,7 @@ async fn main() {
             .map(|d| format!("  store {d}"))
             .unwrap_or_default()
     );
-    println!("  only audio is accepted; everything else is rejected before it is stored");
+    say!("  only audio is accepted; everything else is rejected before it is stored");
 
     let native_run = tokio::spawn(async move { server.run().await });
     let http_run = http.map(|(carrier, _)| tokio::spawn(async move { carrier.run().await }));
@@ -344,20 +361,20 @@ async fn main() {
         _ = sigint => {}
         _ = sigterm => {}
     }
-    println!("oag-listend shutting down");
+    say!("oag-listend shutting down");
     if args.ipfs_api.is_some() {
         let log = store.lock().await.mirror_log().clone();
         let (mirrored, failed) = store.lock().await.mirror_summary();
-        println!("  ipfs mirror: {mirrored} mirrored, {failed} failed");
+        say!("  ipfs mirror: {mirrored} mirrored, {failed} failed");
         for outcome in log {
             match outcome {
                 oag_listend::MirrorOutcome::Mirrored { content_hash, cid } => {
-                    println!("    {} -> {}", &content_hash[..16], cid)
+                    say!("    {} -> {}", &content_hash[..16], cid)
                 }
                 oag_listend::MirrorOutcome::Failed {
                     content_hash,
                     reason,
-                } => println!("    {} failed: {}", &content_hash[..16], reason),
+                } => say!("    {} failed: {}", &content_hash[..16], reason),
             }
         }
     }
@@ -391,7 +408,7 @@ async fn main() {
         .any(|counter| counter.load(Ordering::SeqCst) > 0)
     {
         if Instant::now() >= deadline {
-            println!(
+            say!(
                 "  shutdown grace of {:?} elapsed with session(s) still active",
                 SHUTDOWN_GRACE
             );
