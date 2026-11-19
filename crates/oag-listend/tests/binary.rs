@@ -402,6 +402,24 @@ fn the_client_help_documents_every_option_and_refuses_unknown_flags() {
     assert!(!bad.stderr.is_empty());
 }
 
+/// A client pointed at a dead daemon must fail cleanly: a reason on stderr, exit 1, and bounded
+/// in time. An operator's script depends on that exit code, and a hang would stall it.
+#[tokio::test]
+async fn the_client_fails_cleanly_against_a_dead_daemon() {
+    let output = tokio::time::timeout(
+        Duration::from_secs(15),
+        tokio::process::Command::new(push_pull())
+            .args(["--addr", "127.0.0.1:1", "--seed", "1"])
+            .output(),
+    )
+    .await
+    .expect("the client must be bounded when the daemon is unreachable")
+    .expect("run push_pull against a closed port");
+    assert_eq!(output.status.code(), Some(1), "a runtime failure is exit 1");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.is_empty(), "the failure must say why: {stderr}");
+}
+
 /// A stop must not cut a client off mid-transfer. The daemon binds its own port and
 /// announces it, so this allocates nothing and cannot race another process for one.
 #[tokio::test]
