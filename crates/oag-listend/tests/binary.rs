@@ -20,6 +20,34 @@ const BOUND: Duration = Duration::from_secs(60);
 /// under load is itself the flake.
 const STOP_WAIT: Duration = Duration::from_secs(15);
 
+/// A spawned daemon that is killed when the test ends, including on panic.
+///
+/// `tokio::process::Child` does **not** kill on drop, so a test that panicked would otherwise
+/// leave a daemon bound to its ports and holding its store directory. That is how a run of failing
+/// probes once left eight daemons running on this machine.
+struct Daemon(tokio::process::Child);
+
+impl std::ops::Deref for Daemon {
+    type Target = tokio::process::Child;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for Daemon {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl Drop for Daemon {
+    fn drop(&mut self) {
+        // Already exited -> an error, ignored. Still running -> SIGKILL, so nothing outlives the
+        // test. A test that wanted a clean stop has already sent it and awaited the exit.
+        let _ = self.0.start_kill();
+    }
+}
+
 fn binary() -> &'static str {
     env!("CARGO_BIN_EXE_oag-listend")
 }
@@ -183,18 +211,20 @@ async fn the_client_verifies_audio_over_every_transport() {
     std::fs::create_dir_all(&dir).expect("make the runtime directory");
     let sock = dir.join("audio.sock");
 
-    let mut child = Command::new(binary())
-        .arg("--listen")
-        .arg(format!("127.0.0.1:{native_port}"))
-        .arg("--udp")
-        .arg(format!("127.0.0.1:{udp_port}"))
-        .arg("--unix")
-        .arg(&sock)
-        .arg("--no-generate")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn the daemon");
+    let mut child = Daemon(
+        Command::new(binary())
+            .arg("--listen")
+            .arg(format!("127.0.0.1:{native_port}"))
+            .arg("--udp")
+            .arg(format!("127.0.0.1:{udp_port}"))
+            .arg("--unix")
+            .arg(&sock)
+            .arg("--no-generate")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn the daemon"),
+    );
     let (announced, _stdout) = announce(&mut child).await;
     assert_serving(announced_native_addr(&announced)).await;
     // The announce line is printed once the native carrier is up; the other carriers bind around
@@ -267,16 +297,18 @@ async fn the_udp_client_reaches_an_ipv6_daemon() {
     };
     let native_port = free_port();
 
-    let mut child = Command::new(binary())
-        .arg("--listen")
-        .arg(format!("127.0.0.1:{native_port}"))
-        .arg("--udp")
-        .arg(format!("[::1]:{udp_port}"))
-        .arg("--no-generate")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn the daemon");
+    let mut child = Daemon(
+        Command::new(binary())
+            .arg("--listen")
+            .arg(format!("127.0.0.1:{native_port}"))
+            .arg("--udp")
+            .arg(format!("[::1]:{udp_port}"))
+            .arg("--no-generate")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn the daemon"),
+    );
     let (_announced, _stdout) = announce(&mut child).await;
 
     let output = std::process::Command::new(push_pull())
@@ -384,16 +416,18 @@ async fn in_flight() {
     let dir = temp_dir("in-flight");
     std::fs::create_dir_all(&dir).expect("make the runtime directory");
 
-    let mut child = Command::new(binary())
-        .arg("--listen")
-        .arg("127.0.0.1:0")
-        .arg("--dir")
-        .arg(&dir)
-        .arg("--no-generate")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn the daemon");
+    let mut child = Daemon(
+        Command::new(binary())
+            .arg("--listen")
+            .arg("127.0.0.1:0")
+            .arg("--dir")
+            .arg(&dir)
+            .arg("--no-generate")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn the daemon"),
+    );
     let (announced, _stdout) = announce(&mut child).await;
     let addr = announced_native_addr(&announced);
     assert_serving(addr).await;
@@ -641,13 +675,15 @@ async fn the_binary_serves_audio_until_it_is_stopped() {
 async fn serve() {
     let port = free_port();
     let addr = format!("127.0.0.1:{port}");
-    let mut child = Command::new(binary())
-        .arg("--listen")
-        .arg(&addr)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn the daemon");
+    let mut child = Daemon(
+        Command::new(binary())
+            .arg("--listen")
+            .arg(&addr)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn the daemon"),
+    );
     let (_announced, _stdout) = announce(&mut child).await;
 
     let mut stream = TcpStream::connect(&addr)
@@ -715,14 +751,16 @@ async fn unwritable_stdout() {
         .write(true)
         .open("/dev/full")
         .expect("open /dev/full");
-    let mut child = Command::new(binary())
-        .arg("--listen")
-        .arg(&addr)
-        .arg("--no-generate")
-        .stdout(Stdio::from(sink))
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn the daemon");
+    let mut child = Daemon(
+        Command::new(binary())
+            .arg("--listen")
+            .arg(&addr)
+            .arg("--no-generate")
+            .stdout(Stdio::from(sink))
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn the daemon"),
+    );
 
     // stdout is unreadable by design here, so wait on the listener rather than the announcement.
     let mut stream = None;
@@ -801,15 +839,17 @@ async fn stop_once(signal: &str) -> Result<(), ()> {
     std::fs::create_dir_all(&dir).expect("make the runtime directory");
     let sock = dir.join("audio.sock");
 
-    let mut child = Command::new(binary())
-        .arg("--listen")
-        .arg("127.0.0.1:0")
-        .arg("--unix")
-        .arg(&sock)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn the daemon");
+    let mut child = Daemon(
+        Command::new(binary())
+            .arg("--listen")
+            .arg("127.0.0.1:0")
+            .arg("--unix")
+            .arg(&sock)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn the daemon"),
+    );
     let (announced, mut stdout) = announce(&mut child).await;
     assert_serving(announced_native_addr(&announced)).await;
     assert!(sock.exists(), "the daemon must create its Unix socket");
@@ -907,16 +947,18 @@ async fn ipfs_wiring() {
 
     let port = free_port();
     let addr = format!("127.0.0.1:{port}");
-    let mut child = Command::new(binary())
-        .arg("--listen")
-        .arg(&addr)
-        .arg("--no-generate")
-        .arg("--ipfs-api")
-        .arg(format!("127.0.0.1:{api_port}"))
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn the daemon");
+    let mut child = Daemon(
+        Command::new(binary())
+            .arg("--listen")
+            .arg(&addr)
+            .arg("--no-generate")
+            .arg("--ipfs-api")
+            .arg(format!("127.0.0.1:{api_port}"))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn the daemon"),
+    );
     // Kept: `read_to_end` below resumes where this handle was left, so the startup lines are
     // needed separately to assert on them.
     let (announced, mut stdout) = announce(&mut child).await;
