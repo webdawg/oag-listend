@@ -675,3 +675,105 @@ async fn an_item_at_the_frame_bound_is_served_and_one_byte_more_is_refused() {
         .expect("join")
         .expect("run");
 }
+
+/// IPv6 is "any way that anyone connects". The UDP carrier had a test for it; the stream and
+/// request/response carriers did not, and an address hardcoded to IPv4 would break both silently.
+/// Skips cleanly where the host has no IPv6 loopback.
+#[tokio::test]
+async fn the_stream_and_http_carriers_serve_over_ipv6_loopback() {
+    if tokio::net::TcpListener::bind("[::1]:0").await.is_err() {
+        eprintln!("skipped: no IPv6 loopback on this host");
+        return;
+    }
+
+    let store = Arc::new(Mutex::new(AudioStore::default()));
+    let (native, native_addr) = ListendServer::bind_shared("[::1]:0", Arc::clone(&store))
+        .await
+        .expect("bind native over IPv6");
+    let (http, http_addr) =
+        oag_listend::http::HttpCarrier::bind_shared("[::1]:0", Arc::clone(&store))
+            .await
+            .expect("bind http over IPv6");
+    let native_shutdown = native.shutdown_handle();
+    let http_shutdown = http.shutdown_handle();
+    let native_run = tokio::spawn(async move { native.run().await });
+    let http_run = tokio::spawn(async move { http.run().await });
+
+    // Connect to the literal IPv6 address rather than the one the carrier reported: the point is
+    // that the daemon is reachable at `[::1]`, not merely at whatever it bound.
+    let native_v6 = format!("[::1]:{}", native_addr.port());
+    let http_v6 = format!("[::1]:{}", http_addr.port());
+
+    // A full round trip over the native carrier on IPv6.
+    let mut stream = TcpStream::connect(&native_v6)
+        .await
+        .expect("connect over IPv6");
+    let tone = wav::generate(2030, wav::Sound::Tone);
+    send(
+        &mut stream,
+        &Request::Publish {
+            declared_media_type: Some("audio/wav".into()),
+            bytes: tone.clone(),
+        },
+    )
+    .await;
+    let hash = match recv(&mut stream).await {
+        Response::Published { content_hash } => content_hash,
+        other => panic!("expected Published, got {other:?}"),
+    };
+    send(
+        &mut stream,
+        &Request::Fetch {
+            content_hash: hash.clone(),
+        },
+    )
+    .await;
+    match recv(&mut stream).await {
+        Response::Audio {
+            content_hash,
+            bytes,
+            cid: _,
+        } => {
+            assert_eq!(content_hash, hash);
+            assert_eq!(bytes, tone, "the audio must survive an IPv6 round trip");
+            assert!(AudioItem::verify(&content_hash, &bytes));
+        }
+        other => panic!("expected Audio, got {other:?}"),
+    }
+
+    // And the HTTP carrier, which has its own bind and request path.
+    let mut http_stream = TcpStream::connect(&http_v6)
+        .await
+        .expect("connect to the http carrier over IPv6");
+    http_stream
+        .write_all(
+            format!("GET /audio/{hash} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        )
+        .await
+        .expect("write request");
+    http_stream.flush().await.expect("flush");
+    let mut sink = Vec::new();
+    tokio::time::timeout(BOUND, http_stream.read_to_end(&mut sink))
+        .await
+        .expect("bound")
+        .expect("read response");
+    let head = String::from_utf8_lossy(&sink);
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+    assert!(
+        head.to_ascii_lowercase()
+            .contains("content-type: audio/wav"),
+        "{head}"
+    );
+    assert!(sink.ends_with(&tone), "the body must be the audio bytes");
+
+    native_shutdown.shutdown();
+    http_shutdown.shutdown();
+    for run in [native_run, http_run] {
+        tokio::time::timeout(Duration::from_secs(5), run)
+            .await
+            .expect("bound")
+            .expect("join")
+            .expect("run");
+    }
+}
