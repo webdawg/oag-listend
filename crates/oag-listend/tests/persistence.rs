@@ -266,7 +266,7 @@ async fn skips(dir: &std::path::Path) {
 
     // 5. A directory named like a content hash. `std::fs::read` on it would fail, and on a FIFO it
     // would block forever -- the regular-file guard is what keeps startup finite.
-    std::fs::create_dir(dir.join(&"cd".repeat(32))).expect("create a directory in the store");
+    std::fs::create_dir(dir.join("cd".repeat(32))).expect("create a directory in the store");
 
     // 6. Valid audio, correctly named, but larger than the bound: skipped without being read.
     //    Making it valid is what lets the test detect the guard -- a merely misnamed file would be

@@ -1,7 +1,7 @@
 #!/bin/sh
 # Run every quality gate on oag-listend and fail if any one of them does.
 #
-#   scripts/check.sh           fmt, clippy, rustdoc, tests (debug)
+#   scripts/check.sh           fmt, clippy, rustdoc, examples, tests, systemd unit (debug)
 #   scripts/check.sh --release  the same, plus the suite in release
 #
 # These are the gates the repository is held to. Run them before pushing.
@@ -21,7 +21,8 @@ echo "== cargo fmt --check"
 cargo fmt --check
 
 echo "== cargo clippy --all-targets"
-cargo clippy -p oag-listend --all-targets
+# `-D warnings` is the point: without it a new lint is printed and the gate still passes.
+cargo clippy -p oag-listend --all-targets -- -D warnings
 
 echo "== rustdoc (-D warnings)"
 RUSTDOCFLAGS="-D warnings" cargo doc -p oag-listend --no-deps
