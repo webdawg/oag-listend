@@ -230,3 +230,60 @@ async fn sidecars(dir: &std::path::Path) {
         "an oversized CID sidecar is ignored"
     );
 }
+
+/// Every guard on the load path, in one directory. A store directory is operator-controlled, so a
+/// restart must skip what it cannot honestly serve -- a name that is not a content hash, bytes that
+/// do not hash to their name, a non-audio payload, a non-regular file, and a file larger than the
+/// bound -- without reading what it would block on or allocate for.
+#[tokio::test]
+async fn a_restart_skips_what_it_cannot_honestly_serve() {
+    let dir = temp_dir("skips");
+    let outcome = tokio::time::timeout(BOUND, skips(&dir)).await;
+    let _ = std::fs::remove_dir_all(&dir);
+    outcome.expect("the skip exchange must complete within the bound")
+}
+
+async fn skips(dir: &std::path::Path) {
+    let bound = 2048usize;
+    let good = wav::generate(0, wav::Sound::Tone); // 844 bytes, well under the bound
+    assert!(good.len() <= bound);
+    let good_item = AudioItem::new(good.clone(), None);
+
+    // 1. The one item that should load.
+    std::fs::write(dir.join(&good_item.content_hash), &good).expect("write good audio");
+
+    // 2. A file whose name is not a content hash at all.
+    std::fs::write(dir.join("notahash"), &good).expect("write a badly named file");
+
+    // 3. A 64-hex name whose bytes do not hash to it.
+    let lying_name = "ab".repeat(32);
+    std::fs::write(dir.join(&lying_name), &good).expect("write a misnamed file");
+
+    // 4. Audio bytes under a hash-shaped name, but not audio.
+    let not_audio = AudioItem::new(b"<html>not audio</html>".to_vec(), None);
+    std::fs::write(dir.join(&not_audio.content_hash), b"<html>not audio</html>")
+        .expect("write a non-audio file");
+
+    // 5. A directory named like a content hash. `std::fs::read` on it would fail, and on a FIFO it
+    // would block forever -- the regular-file guard is what keeps startup finite.
+    std::fs::create_dir(dir.join(&"cd".repeat(32))).expect("create a directory in the store");
+
+    // 6. Valid audio, correctly named, but larger than the bound: skipped without being read.
+    //    Making it valid is what lets the test detect the guard -- a merely misnamed file would be
+    //    skipped by the hash check anyway.
+    let oversized = wav::generate_n(1, wav::Sound::Tone, 2_000);
+    assert!(oversized.len() > bound);
+    let oversized_item = AudioItem::new(oversized.clone(), None);
+    std::fs::write(dir.join(&oversized_item.content_hash), &oversized)
+        .expect("write an oversized file");
+
+    let (store, report) = AudioStore::with_directory(dir, bound).expect("open store");
+    assert_eq!(report.loaded, 1, "only the honest item loads");
+    assert_eq!(
+        report.skipped, 5,
+        "every other entry is skipped and counted"
+    );
+    assert_eq!(report.evicted, 0, "nothing fits poorly enough to evict");
+    assert!(store.serve(&good_item.content_hash).is_ok());
+    assert_eq!(store.len(), 1);
+}
