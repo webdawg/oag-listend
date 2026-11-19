@@ -346,14 +346,29 @@ async fn the_udp_client_reaches_an_ipv6_daemon() {
     assert_eq!(status.code(), Some(0));
 }
 
-/// The operator client is a shipped artefact too, and its `--help` has drifted before. Locate the
-/// built example relative to this test binary (`target/debug/deps/.. /examples/push_pull`).
+/// The operator client is a shipped artefact too, and its `--help` has drifted before.
+///
+/// Located from the manifest directory rather than from `std::env::current_exe()`. The test binary
+/// reports its own path, and that path is not always two levels below the target directory -- a
+/// relocated or sandboxed binary reports something else entirely (`target/debug/build/.../out/`),
+/// which failed four tests while the same suite passed elsewhere. The manifest directory is fixed at
+/// compile time and always names the workspace.
 fn push_pull() -> std::path::PathBuf {
-    let mut path = std::env::current_exe().expect("the test binary's path");
-    path.pop(); // deps/
-    path.pop(); // debug/
-    path.push("examples");
-    path.push("push_pull");
+    let target = match std::env::var("CARGO_TARGET_DIR") {
+        Ok(dir) => std::path::PathBuf::from(dir),
+        Err(_) => {
+            let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR")); // <root>/crates/oag-listend
+            let root = manifest.ancestors().nth(2).expect("the workspace root");
+            root.join("target")
+        }
+    };
+    let mut path = target.join("debug").join("examples").join("push_pull");
+    if !path.exists() {
+        let release = target.join("release").join("examples").join("push_pull");
+        if release.exists() {
+            path = release;
+        }
+    }
     if !path.exists() {
         // `cargo test` does not build examples, and these tests execute the shipped client. Building
         // it here keeps `cargo test -p oag-listend` self-sufficient on a clean tree.
