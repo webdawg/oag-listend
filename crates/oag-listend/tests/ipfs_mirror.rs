@@ -971,3 +971,40 @@ async fn by_cid_errors() {
         .expect("join")
         .expect("run");
 }
+
+/// The mirror log is a memory bound: it keeps the most recent outcomes and drops the oldest, so a
+/// long run cannot grow it without limit. The cap itself (64) is a private constant, so the test
+/// pins the behaviour -- capped, newest last -- rather than the number.
+#[test]
+fn the_mirror_log_is_capped_and_keeps_the_newest() {
+    let mut store = AudioStore::default();
+    for i in 0..70u64 {
+        store.record_mirror_outcome(MirrorOutcome::Failed {
+            content_hash: format!("{i:064x}"),
+            reason: "unreachable".into(),
+        });
+    }
+    let log = store.mirror_log();
+    assert_eq!(log.len(), 64, "the log must be capped");
+    assert_eq!(
+        store.mirror_summary(),
+        (0, 64),
+        "the summary counts the retained log"
+    );
+    match log.front() {
+        Some(MirrorOutcome::Failed { content_hash, .. }) => {
+            assert_eq!(
+                content_hash,
+                &format!("{:064x}", 70 - 64),
+                "the oldest is dropped"
+            )
+        }
+        other => panic!("expected a failure, got {other:?}"),
+    }
+    match log.back() {
+        Some(MirrorOutcome::Failed { content_hash, .. }) => {
+            assert_eq!(content_hash, &format!("{:064x}", 69), "newest last")
+        }
+        other => panic!("expected a failure, got {other:?}"),
+    }
+}
