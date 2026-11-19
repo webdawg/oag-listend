@@ -171,7 +171,7 @@ cargo test -p oag-listend
 Run every gate in one command before pushing:
 
 ```
-scripts/check.sh             # fmt, clippy, rustdoc, tests
+scripts/check.sh             # fmt, clippy, rustdoc, examples, tests, systemd unit
 scripts/check.sh --release   # the same, plus the suite in release
 ```
 
