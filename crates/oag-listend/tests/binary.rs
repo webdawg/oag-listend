@@ -503,7 +503,12 @@ fn announced_native_addr(announced: &[u8]) -> std::net::SocketAddr {
 /// reproducible only under load.
 async fn assert_serving(addr: std::net::SocketAddr) {
     let hello = protocol::encode_frame(&protocol::encode_request(&Request::Hello));
-    for _ in 0..200 {
+    // Bounded in itself, not just by the caller's wall clock: a dead daemon must fail fast.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if Instant::now() >= deadline {
+            panic!("the daemon never answered Hello");
+        }
         if let Ok(mut stream) = TcpStream::connect(addr).await {
             if stream.write_all(&hello).await.is_err() || stream.flush().await.is_err() {
                 continue;
@@ -518,7 +523,6 @@ async fn assert_serving(addr: std::net::SocketAddr) {
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    panic!("the daemon never answered Hello");
 }
 
 /// A check must stay a store verification. Passing `--ipfs-api` must not make it contact a node or
