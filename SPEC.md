@@ -45,9 +45,9 @@ afterwards;
 - the operator surface: the daemon binary (`--version`, `--help`, usage exit codes, start/serve/stop,
 `--check`, refused startup generation, non-loopback warnings) and the `push_pull` client's CLI.
 
-`./scripts/check.sh [--release]` holds the whole bar in one command: fmt, clippy, rustdoc with
-warnings denied, the test suite, and `systemd-analyze verify` on the shipped unit. The audio rules
-have not moved.
+`./scripts/check.sh [--release]` holds the whole bar in one command: fmt, clippy with warnings
+denied, rustdoc with warnings denied, examples built, the test suite, and `systemd-analyze verify`
+on the shipped unit. The audio rules have not moved.
 
 ## The idea, recorded verbatim
 
