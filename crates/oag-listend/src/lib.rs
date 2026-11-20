@@ -329,7 +329,20 @@ pub async fn accept_and_mirror(
         // Read the bytes under a short lock, then send them without it.
         let item = match store.lock().await.serve(&hash) {
             Ok(item) => item,
-            Err(_) => return Ok(hash),
+            Err(_) => {
+                // The item was evicted between the accept and the mirror (a concurrent publish
+                // pushed it out). Record that rather than skipping silently: every mirror outcome
+                // is reported, and an operator reading the shutdown report would otherwise have no
+                // way to tell this mirror never happened.
+                store
+                    .lock()
+                    .await
+                    .record_mirror_outcome(MirrorOutcome::Failed {
+                        content_hash: hash.clone(),
+                        reason: "evicted before it could be mirrored".into(),
+                    });
+                return Ok(hash);
+            }
         };
         let outcome = match publisher.add(&item.bytes).await {
             Ok(cid) => MirrorOutcome::Mirrored {
