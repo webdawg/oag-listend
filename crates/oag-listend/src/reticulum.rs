@@ -43,6 +43,67 @@ const ANNOUNCE_INTERVAL: Duration = Duration::from_secs(5);
 /// Comfortably under a Reticulum packet's plaintext capacity once link encryption is accounted
 /// for. Matches the imagination layer's own Reticulum transport.
 const CHUNK_SIZE: usize = 1400;
+/// Concurrent links whose frames are being reassembled. A link that is not in the table is
+/// ignored, so a peer cannot make the daemon hold an unbounded number of buffers -- the same
+/// session cap every other carrier applies.
+const MAX_LINKS: usize = 64;
+
+/// The per-link reassembly buffers, capped at [`MAX_LINKS`].
+#[derive(Default)]
+struct LinkBuffers {
+    buffers: HashMap<AddressHash, Vec<u8>>,
+}
+
+impl LinkBuffers {
+    fn activated(&mut self, id: AddressHash) {
+        if self.buffers.len() < MAX_LINKS {
+            self.buffers.insert(id, Vec::new());
+        }
+    }
+
+    fn closed(&mut self, id: &AddressHash) {
+        self.buffers.remove(id);
+    }
+
+    /// Append `payload` to the link's buffer and return every complete frame, in order, leaving
+    /// the remainder buffered.
+    ///
+    /// `None` means the link is not being tracked -- either it was never admitted or its buffer
+    /// was dropped for exceeding the bound. A frame larger than the frame cap is refused outright
+    /// rather than treated as "not all here yet".
+    fn push(&mut self, id: &AddressHash, payload: &[u8]) -> Option<Vec<Vec<u8>>> {
+        let buffer = self.buffers.get_mut(id)?;
+        buffer.extend_from_slice(payload);
+        if buffer.len() > protocol::MAX_FRAME_BYTES + CHUNK_SIZE {
+            // A peer declaring more than a frame can be, or dribbling without ever completing
+            // one: drop the buffer rather than grow it without bound.
+            self.buffers.remove(id);
+            return None;
+        }
+        let mut frames = Vec::new();
+        loop {
+            if buffer.len() < 4 {
+                break;
+            }
+            let len = u32::from_be_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]) as usize;
+            if len > protocol::MAX_FRAME_BYTES {
+                self.buffers.remove(id);
+                return None;
+            }
+            if buffer.len() < 4 + len {
+                break;
+            }
+            frames.push(buffer[4..4 + len].to_vec());
+            buffer.drain(..4 + len);
+        }
+        Some(frames)
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.buffers.len()
+    }
+}
 
 /// Serves the audio surface over a Reticulum TCP interface at `addr`.
 pub struct ReticulumCarrier {
@@ -119,10 +180,9 @@ impl ReticulumCarrier {
             });
         }
 
-        // One reassembly buffer per link. A Reticulum packet carries ~2 KiB once encrypted, so a
-        // frame larger than that arrives in pieces; a frame that declares more than the frame cap
-        // is dropped rather than accumulated.
-        let mut buffers: HashMap<AddressHash, Vec<u8>> = HashMap::new();
+        // One reassembly buffer per link, capped. A Reticulum packet carries ~2 KiB once
+        // encrypted, so a frame larger than that arrives in pieces.
+        let mut buffers = LinkBuffers::default();
         let mut events = self.transport.in_link_events();
         let mut shutdown_rx = self.shutdown_tx.subscribe();
         loop {
@@ -140,48 +200,20 @@ impl ReticulumCarrier {
         }
     }
 
-    /// One link event: maintain the per-link buffer, answer a complete frame.
-    async fn on_link_event(
-        &self,
-        id: AddressHash,
-        event: LinkEvent,
-        buffers: &mut HashMap<AddressHash, Vec<u8>>,
-    ) {
+    /// One link event: maintain the per-link buffer, answer every complete frame in it.
+    async fn on_link_event(&self, id: AddressHash, event: LinkEvent, buffers: &mut LinkBuffers) {
         match event {
             LinkEvent::Activated => {
-                buffers.insert(id, Vec::new());
+                buffers.activated(id);
             }
             LinkEvent::Closed => {
-                buffers.remove(&id);
+                buffers.closed(&id);
             }
             LinkEvent::Data(payload) => {
-                let buffer = buffers.entry(id).or_default();
-                buffer.extend_from_slice(payload.as_slice());
-                if buffer.len() > protocol::MAX_FRAME_BYTES + CHUNK_SIZE {
-                    // A peer declaring more than a frame can be, or dribbling without ever
-                    // completing one: drop the buffer rather than grow it without bound.
-                    buffers.remove(&id);
+                let Some(bodies) = buffers.push(&id, payload.as_slice()) else {
                     return;
-                }
-                // Answer every complete frame in the buffer, in order, and keep the remainder:
-                // a peer may pack several frames into one packet, exactly as it may pipeline them
-                // on a stream carrier.
-                loop {
-                    if buffer.len() < 4 {
-                        return;
-                    }
-                    let len =
-                        u32::from_be_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]) as usize;
-                    if len > protocol::MAX_FRAME_BYTES || buffer.len() < 4 + len {
-                        // Too long for the cap, or not all here yet.
-                        if len > protocol::MAX_FRAME_BYTES {
-                            buffers.remove(&id);
-                        }
-                        return;
-                    }
-                    let body = buffer[4..4 + len].to_vec();
-                    buffer.drain(..4 + len);
-
+                };
+                for body in bodies {
                     let request = match protocol::decode_request(&body) {
                         Ok(request) => request,
                         Err(e) => {
@@ -221,5 +253,84 @@ impl ReticulumCarrier {
                 Err(_) => break,
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn id(byte: u8) -> AddressHash {
+        AddressHash::new_from_hex_string(&format!("{byte:02x}").repeat(16)).expect("a hash")
+    }
+
+    fn frame(body: &[u8]) -> Vec<u8> {
+        let mut out = (body.len() as u32).to_be_bytes().to_vec();
+        out.extend_from_slice(body);
+        out
+    }
+
+    /// The concurrent-link cap: a peer must not be able to make the daemon hold an unbounded
+    /// number of reassembly buffers.
+    #[test]
+    fn concurrent_links_are_capped() {
+        let mut buffers = LinkBuffers::default();
+        for byte in 0..(MAX_LINKS as u8 + 6) {
+            buffers.activated(id(byte));
+        }
+        assert_eq!(buffers.len(), MAX_LINKS);
+    }
+
+    /// Data for a link that was never admitted -- or whose buffer was dropped -- is ignored.
+    #[test]
+    fn data_for_an_untracked_link_is_ignored() {
+        let mut buffers = LinkBuffers::default();
+        assert!(buffers.push(&id(1), &[0, 0, 0, 1]).is_none());
+        buffers.activated(id(1));
+        assert!(buffers.push(&id(1), &[0, 0, 0, 1]).is_some());
+    }
+
+    /// Two frames packed into one payload are both returned, in order, and the buffer is drained.
+    #[test]
+    fn several_frames_in_one_payload_are_all_returned() {
+        let mut buffers = LinkBuffers::default();
+        buffers.activated(id(7));
+        let mut payload = frame(b"\x01");
+        payload.extend_from_slice(&frame(b"\x05"));
+        let frames = buffers.push(&id(7), &payload).expect("the link is tracked");
+        assert_eq!(frames, vec![b"\x01".to_vec(), b"\x05".to_vec()]);
+        assert_eq!(
+            buffers.push(&id(7), &[]).unwrap().len(),
+            0,
+            "nothing is left over"
+        );
+    }
+
+    /// A frame split across payloads stays buffered until it is complete.
+    #[test]
+    fn a_partial_frame_stays_buffered() {
+        let mut buffers = LinkBuffers::default();
+        buffers.activated(id(3));
+        let whole = frame(b"hello");
+        let split = whole.len() / 2;
+        assert_eq!(
+            buffers.push(&id(3), &whole[..split]).unwrap().len(),
+            0,
+            "nothing complete yet"
+        );
+        let frames = buffers.push(&id(3), &whole[split..]).unwrap();
+        assert_eq!(frames, vec![b"hello".to_vec()]);
+    }
+
+    /// A length above the frame cap is refused outright, and the link is dropped.
+    #[test]
+    fn a_length_above_the_frame_cap_is_refused() {
+        let mut buffers = LinkBuffers::default();
+        buffers.activated(id(9));
+        let payload = ((protocol::MAX_FRAME_BYTES + 1) as u32)
+            .to_be_bytes()
+            .to_vec();
+        assert!(buffers.push(&id(9), &payload).is_none());
+        assert_eq!(buffers.len(), 0, "the link is dropped");
     }
 }
