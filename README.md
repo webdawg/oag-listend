@@ -165,6 +165,11 @@ mid-transfer, the Unix socket is removed, and the process exits 0.
 The default bind is `0.0.0.0`, which serves every interface; when a carrier binds a non-loopback
 address the daemon prints a note saying so. Use `--listen 127.0.0.1:...` to keep it local.
 
+This exact unit file is installed and started by CI on every push (the `check-service` job), which
+fetches the musical ping and the index from the running service — so the unit is run-verified, not
+just linted. One trap found while doing that: `PrivateTmp=true` masks `/tmp` and `/var/tmp`, so
+do not point `ExecStart` at a build in either.
+
 ## Status
 
 **Serves, and survives a restart.** Six ways to reach the audio are live and tested: the native
