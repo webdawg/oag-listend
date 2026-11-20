@@ -47,6 +47,10 @@ const CHUNK_SIZE: usize = 1400;
 /// ignored, so a peer cannot make the daemon hold an unbounded number of buffers -- the same
 /// session cap every other carrier applies.
 const MAX_LINKS: usize = 64;
+/// A single packet send is bounded, like every other write this daemon makes. The Reticulum event
+/// loop serves every link, so an unbounded send would let one stalled link stall all of them -- the
+/// same defect the other carriers' per-syscall timeouts exist to prevent.
+const IO_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The per-link reassembly buffers, capped at [`MAX_LINKS`].
 #[derive(Default)]
@@ -249,11 +253,23 @@ impl ReticulumCarrier {
         };
         for chunk in frame.chunks(CHUNK_SIZE) {
             match link.lock().await.data_packet(chunk) {
-                Ok(packet) => self.transport.send_packet(packet).await,
+                Ok(packet) => {
+                    if !bounded_send(self.transport.send_packet(packet), IO_TIMEOUT).await {
+                        // The bound elapsed: abandon the rest of this frame rather than queue
+                        // behind a stalled link and hold up every other link.
+                        break;
+                    }
+                }
                 Err(_) => break,
             }
         }
     }
+}
+
+/// Await one packet send under `timeout`. `false` means the bound elapsed. The carrier
+/// passes [`IO_TIMEOUT`]; a test passes less so it does not spend the bound finding out.
+async fn bounded_send<F: std::future::Future>(send: F, timeout: Duration) -> bool {
+    tokio::time::timeout(timeout, send).await.is_ok()
 }
 
 #[cfg(test)]
@@ -332,5 +348,19 @@ mod tests {
             .to_vec();
         assert!(buffers.push(&id(9), &payload).is_none());
         assert_eq!(buffers.len(), 0, "the link is dropped");
+    }
+
+    /// A stalled link must not hold the carrier's event loop: a send that never completes returns
+    /// `false` at the bound rather than waiting forever.
+    #[tokio::test]
+    async fn a_send_that_never_completes_is_abandoned_at_the_bound() {
+        assert!(
+            !bounded_send(std::future::pending::<()>(), Duration::from_millis(10)).await,
+            "a stalled send must not wait forever"
+        );
+        assert!(
+            bounded_send(async {}, Duration::from_millis(10)).await,
+            "a send that completes is not abandoned"
+        );
     }
 }
