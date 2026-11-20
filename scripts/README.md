@@ -16,7 +16,7 @@ Not part of the pruning machinery, so not copied to the other four repositories:
 
 | File | Role |
 |---|---|
-| `check.sh` | Runs every quality gate on `oag-listend`: fmt, clippy, rustdoc with warnings denied, the test suite, and `systemd-analyze verify` on the unit. `--release` adds the release suite. |
+| `check.sh` | Runs every quality gate on `oag-listend`: fmt, clippy with warnings denied, rustdoc with warnings denied, the examples built, the test suite, and `systemd-analyze verify` on the unit. `--release` runs the suite in release; `--features reticulum` adds the opt-in Reticulum carrier. |
 | `oag-listend.service` | systemd unit for the daemon. See "Run it as a service" in the repository README. |
 
 ## Files

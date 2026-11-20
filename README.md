@@ -190,10 +190,11 @@ Run every gate in one command before pushing:
 ```
 scripts/check.sh             # fmt, clippy, rustdoc, examples, tests, systemd unit
 scripts/check.sh --release   # the same, plus the suite in release
+scripts/check.sh --features reticulum   # the same, with the opt-in Reticulum carrier
 ```
 
-The same gate runs on every push and pull request (`.github/workflows/check.yml`), so a merge
-cannot land without it passing.
+The same gates run on every push and pull request (`.github/workflows/check.yml`), so a merge
+cannot land without them passing.
 
 `scripts/` also holds the same build-generation pruner as every other OAG repository; see
 `scripts/README.md`.
