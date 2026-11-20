@@ -370,6 +370,10 @@ async fn main() {
     };
     #[cfg(feature = "reticulum")]
     let reticulum_shutdown = reticulum.as_ref().map(|carrier| carrier.shutdown_handle());
+    #[cfg(feature = "reticulum")]
+    if let Some(carrier) = &reticulum {
+        active_counters.push(carrier.active_handle());
+    }
     if let Some((carrier, _)) = &unix {
         active_counters.push(carrier.active_handle());
     }

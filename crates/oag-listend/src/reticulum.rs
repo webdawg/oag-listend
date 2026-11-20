@@ -20,6 +20,7 @@
 #![forbid(unsafe_code)]
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -126,6 +127,8 @@ pub struct ReticulumCarrier {
     /// This destination's Reticulum address, for logs. Computed before the identity is moved.
     address: AddressHash,
     shutdown_tx: watch::Sender<bool>,
+    /// Workers in flight, so a stop can give them the same grace period as every other carrier.
+    active: Arc<AtomicUsize>,
 }
 
 impl ReticulumCarrier {
@@ -156,6 +159,7 @@ impl ReticulumCarrier {
             .await;
         let (shutdown_tx, _) = watch::channel(false);
         Ok(Self {
+            active: Arc::new(AtomicUsize::new(0)),
             store,
             transport: Arc::new(transport),
             destination,
@@ -172,6 +176,16 @@ impl ReticulumCarrier {
     /// This destination's Reticulum address, as a hex string.
     pub fn address(&self) -> String {
         self.address.to_hex_string()
+    }
+
+    /// The live worker counter, so a caller can wait for in-flight exchanges to drain.
+    pub fn active_handle(&self) -> Arc<AtomicUsize> {
+        Arc::clone(&self.active)
+    }
+
+    /// Workers in flight right now.
+    pub fn active_sessions(&self) -> usize {
+        self.active.load(Ordering::SeqCst)
     }
 
     pub fn shutdown_handle(&self) -> crate::server::ShutdownHandle {
@@ -209,7 +223,7 @@ impl ReticulumCarrier {
                     match event {
                         LinkEvent::Activated => {
                             buffers.activated(id);
-                            Self::ensure_worker(&mut workers, id, &self.store, &self.transport);
+                            self.ensure_worker(&mut workers, id);
                         }
                         LinkEvent::Closed => {
                             buffers.closed(&id);
@@ -220,7 +234,7 @@ impl ReticulumCarrier {
                                 continue;
                             };
                             // A link may carry data before its activation event is seen.
-                            Self::ensure_worker(&mut workers, id, &self.store, &self.transport);
+                            self.ensure_worker(&mut workers, id);
                             let Some(sender) = workers.get(&id) else {
                                 continue;
                             };
@@ -243,19 +257,20 @@ impl ReticulumCarrier {
     /// Start the worker for `id` once. It owns the link's frames in order, so a slow accept delays
     /// only that link.
     fn ensure_worker(
+        &self,
         workers: &mut HashMap<AddressHash, mpsc::Sender<Vec<u8>>>,
         id: AddressHash,
-        store: &Arc<Mutex<AudioStore>>,
-        transport: &Arc<RnTransport>,
     ) {
         if workers.len() >= MAX_LINKS || workers.contains_key(&id) {
             return;
         }
         let (sender, mut receiver) = mpsc::channel::<Vec<u8>>(MAX_QUEUED_FRAMES);
         workers.insert(id, sender);
-        let store = Arc::clone(store);
-        let transport = Arc::clone(transport);
+        let store = Arc::clone(&self.store);
+        let transport = Arc::clone(&self.transport);
+        let active = Arc::clone(&self.active);
         tokio::spawn(async move {
+            active.fetch_add(1, Ordering::SeqCst);
             while let Some(body) = receiver.recv().await {
                 let response = match protocol::decode_request(&body) {
                     Ok(request) => handle(request, &store).await,
@@ -265,6 +280,7 @@ impl ReticulumCarrier {
                 };
                 send_frame(&transport, &id, &response).await;
             }
+            active.fetch_sub(1, Ordering::SeqCst);
         });
     }
 }

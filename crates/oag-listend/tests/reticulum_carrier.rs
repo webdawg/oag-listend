@@ -410,3 +410,69 @@ async fn a_hung_mirror_on_one_link_does_not_stall_another() {
         .expect("join")
         .expect("run");
 }
+
+/// The carrier reports its in-flight workers, so a stop can give them the same grace period as
+/// every other carrier rather than cutting an exchange off mid-transfer.
+#[tokio::test]
+async fn an_in_flight_exchange_is_counted_and_drains() {
+    let stub = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind the hung stub");
+    let stub_addr = stub.local_addr().expect("the stub's address").to_string();
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((stream, _)) = stub.accept().await {
+            held.push(stream);
+        }
+    });
+
+    let mut store = AudioStore::default();
+    store.set_ipfs(Some(oag_listend::ipfs::IpfsPublisher::new(stub_addr)));
+
+    let addr = format!("127.0.0.1:{}", free_port());
+    let carrier = ReticulumCarrier::bind(
+        addr.clone(),
+        Arc::new(Mutex::new(store)),
+        DEFAULT_IDENTITY_SEED,
+    )
+    .await
+    .expect("bind the reticulum carrier");
+    let shutdown = carrier.shutdown_handle();
+    // Keep the counter: the carrier itself moves into the serve task.
+    let active = carrier.active_handle();
+    let run = tokio::spawn(async move { carrier.run().await });
+
+    let client = Client::connect(
+        &addr,
+        "oag-listend-test-count",
+        server_address(DEFAULT_IDENTITY_SEED),
+    )
+    .await;
+
+    // The publish's mirror hangs, so its worker stays in flight for the add timeout.
+    client
+        .send_batch(&protocol::encode_frame(&protocol::encode_request(
+            &Request::Publish {
+                declared_media_type: Some("audio/wav".into()),
+                bytes: wav::generate(41, wav::Sound::Tone),
+            },
+        )))
+        .await;
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while active.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the in-flight exchange must be counted"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    shutdown.shutdown();
+    let _ = tokio::time::timeout(Duration::from_secs(15), run).await;
+    assert_eq!(
+        active.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "the workers must drain once the channel closes"
+    );
+}
