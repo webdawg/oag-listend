@@ -319,6 +319,17 @@ a failed write, because under systemd stdout *is* the journal: an unavailable jo
 or a pipe whose reader exited would otherwise panic the process and stop the audio. `oag-listend
 --listen 127.0.0.1:7100 > /dev/full` keeps serving; a test asserts exactly that.
 
+**The unit has been run, not just linted.** With a user-level systemd manager and a derivative unit
+(same `ExecStart` flags, `RuntimeDirectory`, `StateDirectory`, `ReadWritePaths` and all four sandbox
+directives), `systemctl start` reaches `active/running` and serves audio, systemd creates both
+directories, and `systemctl stop` leaves the unit inactive with the Unix socket removed and
+`oag-listend shutting down` in the journal.
+
+**One gotcha found while doing that.** `PrivateTmp=true` masks **`/tmp` and `/var/tmp`** for the
+service. The unit installs the binary to `/usr/local/bin`, which is unaffected -- but an operator who
+repoints `ExecStart` at a build in either directory will get `Unable to locate executable ...: No such
+file or directory`, which reads like a missing binary rather than a masked path.
+
 ## The IPFS mirror
 
 `--ipfs-api ADDR` also offers every accepted item to a Kubo node, so the audio reaches a network
