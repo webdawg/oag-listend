@@ -11,7 +11,7 @@ back. The daemon publishes a small seeded set of generated sounds, accepts audio
 with the BLAKE3 of the bytes.
 
 `cargo test -p oag-listend` runs 65 unit and 77 end-to-end tests, all green, in debug and
-release (`70 unit and 79 end-to-end` with `--features reticulum`). End to end they cover:
+release (`71 unit and 79 end-to-end` with `--features reticulum`). End to end they cover:
 
 - the native back-and-forth: publish, fetch, verify, reject non-audio, not-found, and frames written
   together in one write answered in order;
@@ -295,9 +295,10 @@ Bounds: at most 64 concurrent links, the same session cap as every other carrier
 cannot make the daemon hold an unbounded number of buffers; one reassembly buffer per link,
 capped at a frame plus one packet, so a peer that dribbles without ever completing a frame is
 dropped rather than accumulated; a frame larger than `MAX_FRAME_BYTES` is refused outright; and
-the reply is chunked to a packet's capacity, never sent as one oversized packet. Every complete
-frame in a payload is answered, in order -- a packet may carry several, exactly as a client may
-pipeline them on a stream carrier.
+the reply is chunked to a packet's capacity and each send is bounded (10 s), so a stalled link
+abandons the rest of its frame rather than holding up every other link. Every complete frame in
+a payload is answered, in order -- a packet may carry several, exactly as a client may pipeline
+them on a stream carrier.
 
 ## Saying what it hears
 
