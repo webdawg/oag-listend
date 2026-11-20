@@ -337,3 +337,76 @@ async fn reticulum_answers_pipelined_frames_in_one_packet() {
         .expect("join")
         .expect("run");
 }
+
+/// The property the per-link workers exist for: handling a frame can wait on an IPFS mirror, and
+/// the event loop is shared, so a hung node must not stall a different link.
+#[tokio::test]
+async fn a_hung_mirror_on_one_link_does_not_stall_another() {
+    // A stub that accepts the mirror connection and never answers: `add` waits out its timeout.
+    let stub = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind the hung stub");
+    let stub_addr = stub.local_addr().expect("the stub's address").to_string();
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((stream, _)) = stub.accept().await {
+            held.push(stream);
+        }
+    });
+
+    // One item already held, so the second link can fetch without touching the mirror.
+    let held_tone = wav::generate(31, wav::Sound::Tone);
+    let mut store = AudioStore::default();
+    store
+        .accept(held_tone.clone(), None)
+        .await
+        .expect("seed the store");
+    store.set_ipfs(Some(oag_listend::ipfs::IpfsPublisher::new(stub_addr)));
+
+    let addr = format!("127.0.0.1:{}", free_port());
+    let shared = Arc::new(Mutex::new(store));
+    let carrier = ReticulumCarrier::bind(addr.clone(), Arc::clone(&shared), DEFAULT_IDENTITY_SEED)
+        .await
+        .expect("bind the reticulum carrier");
+    let shutdown = carrier.shutdown_handle();
+    let run = tokio::spawn(async move { carrier.run().await });
+
+    let target = server_address(DEFAULT_IDENTITY_SEED);
+    let slow = Client::connect(&addr, "oag-listend-test-slow", target).await;
+    let other = Client::connect(&addr, "oag-listend-test-other", target).await;
+
+    // This publish's mirror hangs, so its reply is delayed by the add timeout.
+    let tone = wav::generate(32, wav::Sound::Tone);
+    slow.send_batch(&protocol::encode_frame(&protocol::encode_request(
+        &Request::Publish {
+            declared_media_type: Some("audio/wav".into()),
+            bytes: tone,
+        },
+    )))
+    .await;
+
+    // A different link must still be served promptly.
+    let started = std::time::Instant::now();
+    let request = protocol::encode_frame(&protocol::encode_request(&Request::Fetch {
+        content_hash: AudioItem::new(held_tone.clone(), None).content_hash,
+    }));
+    let reply = other.exchange(&request).await;
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "another link must not wait on a hung mirror (took {:?})",
+        started.elapsed()
+    );
+    match protocol::decode_response(protocol::decode_frame(&reply).expect("a frame"))
+        .expect("a response")
+    {
+        Response::Audio { bytes, .. } => assert_eq!(bytes, held_tone),
+        other => panic!("expected Audio, got {other:?}"),
+    }
+
+    shutdown.shutdown();
+    tokio::time::timeout(Duration::from_secs(15), run)
+        .await
+        .expect("the carrier must stop within the bound")
+        .expect("join")
+        .expect("run");
+}

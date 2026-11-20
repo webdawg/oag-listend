@@ -10,6 +10,11 @@
 //! on one machine. The audio rules are not touched: an incoming frame goes through the same
 //! `crate::server::handle` every other carrier uses, so `AudioStore::accept` is the inbound rule
 //! here too, and a fetch returns the same bytes and BLAKE3.
+//!
+//! One link is served by one worker task. Handling a frame can wait on the store (a durable write)
+//! or on an IPFS mirror, and the event loop is shared by every link -- handling inline would let
+//! one slow accept, or a hung node, stall all of them. Per-link workers keep the loop free while
+//! preserving the order of a link's frames.
 
 #![cfg(feature = "reticulum")]
 #![forbid(unsafe_code)]
@@ -24,7 +29,7 @@ use reticulum::hash::AddressHash;
 use reticulum::identity::PrivateIdentity;
 use reticulum::iface::tcp_server::TcpServer;
 use reticulum::transport::{Transport as RnTransport, TransportConfig};
-use tokio::sync::{broadcast, watch, Mutex};
+use tokio::sync::{broadcast, mpsc, watch, Mutex};
 
 use crate::protocol;
 use crate::server::handle;
@@ -47,9 +52,11 @@ const CHUNK_SIZE: usize = 1400;
 /// ignored, so a peer cannot make the daemon hold an unbounded number of buffers -- the same
 /// session cap every other carrier applies.
 const MAX_LINKS: usize = 64;
-/// A single packet send is bounded, like every other write this daemon makes. The Reticulum event
-/// loop serves every link, so an unbounded send would let one stalled link stall all of them -- the
-/// same defect the other carriers' per-syscall timeouts exist to prevent.
+/// Frames queued for one link's worker. Full means the peer is outpacing a slow handler; the
+/// link's buffer is dropped rather than the event loop being held up.
+const MAX_QUEUED_FRAMES: usize = 64;
+/// A single packet send is bounded, like every other write this daemon makes. A slow link must not
+/// stall the worker -- or, through it, anything else.
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The per-link reassembly buffers, capped at [`MAX_LINKS`].
@@ -171,7 +178,7 @@ impl ReticulumCarrier {
         crate::server::ShutdownHandle::new(self.shutdown_tx.clone())
     }
 
-    /// Serve until the transport closes. Announces periodically, then answers every link.
+    /// Serve until the transport closes. Announces periodically, then feeds every link's worker.
     pub async fn run(&self) -> Result<(), String> {
         {
             let transport = Arc::clone(&self.transport);
@@ -187,6 +194,7 @@ impl ReticulumCarrier {
         // One reassembly buffer per link, capped. A Reticulum packet carries ~2 KiB once
         // encrypted, so a frame larger than that arrives in pieces.
         let mut buffers = LinkBuffers::default();
+        let mut workers: HashMap<AddressHash, mpsc::Sender<Vec<u8>>> = HashMap::new();
         let mut events = self.transport.in_link_events();
         let mut shutdown_rx = self.shutdown_tx.subscribe();
         loop {
@@ -198,76 +206,91 @@ impl ReticulumCarrier {
                         Err(broadcast::error::RecvError::Lagged(_)) => continue,
                         Err(broadcast::error::RecvError::Closed) => return Ok(()),
                     };
-                    self.on_link_event(id, event, &mut buffers).await;
-                }
-            }
-        }
-    }
-
-    /// One link event: maintain the per-link buffer, answer every complete frame in it.
-    async fn on_link_event(&self, id: AddressHash, event: LinkEvent, buffers: &mut LinkBuffers) {
-        match event {
-            LinkEvent::Activated => {
-                buffers.activated(id);
-            }
-            LinkEvent::Closed => {
-                buffers.closed(&id);
-            }
-            LinkEvent::Data(payload) => {
-                let Some(bodies) = buffers.push(&id, payload.as_slice()) else {
-                    return;
-                };
-                for body in bodies {
-                    let request = match protocol::decode_request(&body) {
-                        Ok(request) => request,
-                        Err(e) => {
-                            // A peer that is not speaking the audio protocol gets a typed
-                            // rejection rather than silence, exactly as on the stream carriers.
-                            self.reply(
-                                &id,
-                                &protocol::encode_frame(&protocol::encode_response(
-                                    &protocol::Response::Rejected {
-                                        reason: e.to_string(),
-                                    },
-                                )),
-                            )
-                            .await;
-                            continue;
+                    match event {
+                        LinkEvent::Activated => {
+                            buffers.activated(id);
+                            Self::ensure_worker(&mut workers, id, &self.store, &self.transport);
                         }
-                    };
-                    let response = handle(request, &self.store).await;
-                    self.reply(
-                        &id,
-                        &protocol::encode_frame(&protocol::encode_response(&response)),
-                    )
-                    .await;
-                }
-            }
-        }
-    }
-
-    /// Send one frame back over the link that asked, chunked to a packet's capacity.
-    async fn reply(&self, link_id: &AddressHash, frame: &[u8]) {
-        let Some(link) = self.transport.find_in_link(link_id).await else {
-            return;
-        };
-        for chunk in frame.chunks(CHUNK_SIZE) {
-            match link.lock().await.data_packet(chunk) {
-                Ok(packet) => {
-                    if !bounded_send(self.transport.send_packet(packet), IO_TIMEOUT).await {
-                        // The bound elapsed: abandon the rest of this frame rather than queue
-                        // behind a stalled link and hold up every other link.
-                        break;
+                        LinkEvent::Closed => {
+                            buffers.closed(&id);
+                            workers.remove(&id);
+                        }
+                        LinkEvent::Data(payload) => {
+                            let Some(bodies) = buffers.push(&id, payload.as_slice()) else {
+                                continue;
+                            };
+                            // A link may carry data before its activation event is seen.
+                            Self::ensure_worker(&mut workers, id, &self.store, &self.transport);
+                            let Some(sender) = workers.get(&id) else {
+                                continue;
+                            };
+                            for body in bodies {
+                                if sender.try_send(body).is_err() {
+                                    // Full or closed: the peer is outpacing a slow handler. Drop
+                                    // the buffer rather than hold up every other link.
+                                    buffers.closed(&id);
+                                    workers.remove(&id);
+                                    break;
+                                }
+                            }
+                        }
                     }
                 }
-                Err(_) => break,
             }
+        }
+    }
+
+    /// Start the worker for `id` once. It owns the link's frames in order, so a slow accept delays
+    /// only that link.
+    fn ensure_worker(
+        workers: &mut HashMap<AddressHash, mpsc::Sender<Vec<u8>>>,
+        id: AddressHash,
+        store: &Arc<Mutex<AudioStore>>,
+        transport: &Arc<RnTransport>,
+    ) {
+        if workers.len() >= MAX_LINKS || workers.contains_key(&id) {
+            return;
+        }
+        let (sender, mut receiver) = mpsc::channel::<Vec<u8>>(MAX_QUEUED_FRAMES);
+        workers.insert(id, sender);
+        let store = Arc::clone(store);
+        let transport = Arc::clone(transport);
+        tokio::spawn(async move {
+            while let Some(body) = receiver.recv().await {
+                let response = match protocol::decode_request(&body) {
+                    Ok(request) => handle(request, &store).await,
+                    Err(e) => protocol::Response::Rejected {
+                        reason: e.to_string(),
+                    },
+                };
+                send_frame(&transport, &id, &response).await;
+            }
+        });
+    }
+}
+
+/// Send one frame back over the link that asked, chunked to a packet's capacity.
+async fn send_frame(transport: &RnTransport, link_id: &AddressHash, response: &protocol::Response) {
+    let frame = protocol::encode_frame(&protocol::encode_response(response));
+    let Some(link) = transport.find_in_link(link_id).await else {
+        return;
+    };
+    for chunk in frame.chunks(CHUNK_SIZE) {
+        match link.lock().await.data_packet(chunk) {
+            Ok(packet) => {
+                if !bounded_send(transport.send_packet(packet), IO_TIMEOUT).await {
+                    // The bound elapsed: abandon the rest of this frame rather than queue behind
+                    // a stalled link.
+                    break;
+                }
+            }
+            Err(_) => break,
         }
     }
 }
 
-/// Await one packet send under `timeout`. `false` means the bound elapsed. The carrier
-/// passes [`IO_TIMEOUT`]; a test passes less so it does not spend the bound finding out.
+/// Await one packet send under `timeout`. `false` means the bound elapsed. The carrier passes
+/// [`IO_TIMEOUT`]; a test passes less so it does not spend the bound finding out.
 async fn bounded_send<F: std::future::Future>(send: F, timeout: Duration) -> bool {
     tokio::time::timeout(timeout, send).await.is_ok()
 }
@@ -287,7 +310,7 @@ mod tests {
     }
 
     /// The concurrent-link cap: a peer must not be able to make the daemon hold an unbounded
-    /// number of reassembly buffers.
+    /// number of reassembly buffers or workers.
     #[test]
     fn concurrent_links_are_capped() {
         let mut buffers = LinkBuffers::default();
@@ -350,8 +373,8 @@ mod tests {
         assert_eq!(buffers.len(), 0, "the link is dropped");
     }
 
-    /// A stalled link must not hold the carrier's event loop: a send that never completes returns
-    /// `false` at the bound rather than waiting forever.
+    /// A stalled link must not hold the carrier: a send that never completes returns `false` at the
+    /// bound rather than waiting forever.
     #[tokio::test]
     async fn a_send_that_never_completes_is_abandoned_at_the_bound() {
         assert!(
