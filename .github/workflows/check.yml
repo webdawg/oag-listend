@@ -1,9 +1,11 @@
 # Enforce the repository's whole bar on every push and pull request:
 # fmt, clippy, rustdoc with warnings denied, examples built, the test suite,
-# and systemd-analyze verify on the shipped unit.
+# and systemd-analyze verify on the shipped unit -- plus one job that installs
+# and starts that unit as it actually ships and fetches audio from it.
 #
-# It deliberately runs scripts/check.sh rather than listing the steps, so the
-# command an operator runs and the gate CI enforces cannot drift apart.
+# The three check.sh jobs deliberately run the script rather than listing the
+# steps, so the command an operator runs and the gate CI enforces cannot drift
+# apart. The service job is the exception: it verifies the unit file itself.
 
 name: check
 
@@ -78,3 +80,47 @@ jobs:
 
       - name: Run the gate with the Reticulum carrier
         run: ./scripts/check.sh --features reticulum
+
+  # The shipped unit, installed and started as it actually ships. The other jobs only lint it
+  # (`systemd-analyze verify`); the sandbox directives -- ProtectSystem=strict, ProtectHome,
+  # PrivateTmp, NoNewPrivileges -- cannot be exercised without root, and the runners have
+  # passwordless sudo. So this is where the unit file itself is proven to turn the daemon on.
+  check-service:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain stable
+          echo "${CARGO_HOME:-$HOME/.cargo}/bin" >> "$GITHUB_PATH"
+
+      - name: Add the components the gate needs
+        run: rustup component add rustfmt clippy
+
+      - name: Build the release binary
+        run: cargo build --release -p oag-listend
+
+      - name: Install and start the shipped unit
+        run: |
+          sudo install -m 0755 target/release/oag-listend /usr/local/bin/oag-listend
+          sudo install -m 0644 scripts/oag-listend.service /etc/systemd/system/oag-listend.service
+          sudo systemctl daemon-reload
+          id oag >/dev/null 2>&1 || \
+            sudo useradd --system --no-create-home --shell /usr/sbin/nologin oag
+          sudo systemctl enable --now oag-listend
+
+      # The unit's whole purpose: the daemon is on, and it serves audio over HTTP.
+      - name: The daemon serves as a service
+        run: |
+          for _ in $(seq 1 60); do
+            curl -fsS -o /tmp/oag-ping.wav http://127.0.0.1:7101/ping && break
+            sleep 1
+          done
+          test -s /tmp/oag-ping.wav
+          curl -fsS -o /dev/null http://127.0.0.1:7101/
+
+      - name: Stop the unit
+        if: always()
+        run: sudo systemctl disable --now oag-listend
