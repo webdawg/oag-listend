@@ -127,17 +127,20 @@ impl Client {
 
     /// Send one frame and return the reply frame, prefix included, exactly as a TCP peer would
     /// receive it.
-    async fn exchange(&self, frame: &[u8]) -> Vec<u8> {
-        for chunk in frame.chunks(CHUNK_SIZE) {
-            let packet = self
-                .link
-                .lock()
-                .await
-                .data_packet(chunk)
-                .expect("a chunk must fit a packet");
-            self.transport.send_packet(packet).await;
-        }
+    /// Send raw bytes as a single packet. A test uses this to pack several frames into one
+    /// packet, which a stream carrier would express by writing them together.
+    async fn send_batch(&self, bytes: &[u8]) {
+        let packet = self
+            .link
+            .lock()
+            .await
+            .data_packet(bytes)
+            .expect("a batch must fit a packet");
+        self.transport.send_packet(packet).await;
+    }
 
+    /// Read one complete frame from the link, prefix included.
+    async fn read_frame(&self) -> Vec<u8> {
         let mut events = self.events.lock().await;
         tokio::time::timeout(REPLY_WAIT, async {
             let mut buffer = Vec::new();
@@ -163,6 +166,15 @@ impl Client {
         })
         .await
         .expect("a reply must arrive within the bound")
+    }
+
+    /// Send one frame and return the reply frame, prefix included, exactly as a TCP peer would
+    /// receive it.
+    async fn exchange(&self, frame: &[u8]) -> Vec<u8> {
+        for chunk in frame.chunks(CHUNK_SIZE) {
+            self.send_batch(chunk).await;
+        }
+        self.read_frame().await
     }
 }
 
@@ -258,6 +270,65 @@ async fn reticulum_serves_the_same_audio_surface() {
         }
         other => panic!("expected Rejected, got {other:?}"),
     }
+
+    shutdown.shutdown();
+    tokio::time::timeout(Duration::from_secs(10), run)
+        .await
+        .expect("the carrier must stop within the bound")
+        .expect("join")
+        .expect("run");
+}
+
+/// Two frames packed into one packet must both be answered, in order -- the pipelining the stream
+/// carriers support, expressed the way a datagram carrier can express it.
+#[tokio::test]
+async fn reticulum_answers_pipelined_frames_in_one_packet() {
+    let addr = format!("127.0.0.1:{}", free_port());
+    let store = Arc::new(Mutex::new(AudioStore::default()));
+    let carrier = ReticulumCarrier::bind(addr.clone(), Arc::clone(&store), DEFAULT_IDENTITY_SEED)
+        .await
+        .expect("bind the reticulum carrier");
+    let shutdown = carrier.shutdown_handle();
+    let run = tokio::spawn(async move { carrier.run().await });
+
+    let client = Client::connect(
+        &addr,
+        "oag-listend-test-client",
+        server_address(DEFAULT_IDENTITY_SEED),
+    )
+    .await;
+
+    // Small on purpose: two frames must fit in one packet for the test to mean anything.
+    let first = wav::generate_n(21, wav::Sound::Tone, 10);
+    let second = wav::generate_n(22, wav::Sound::Tone, 10);
+    let mut batch = protocol::encode_frame(&protocol::encode_request(&Request::Publish {
+        declared_media_type: Some("audio/wav".into()),
+        bytes: first.clone(),
+    }));
+    batch.extend_from_slice(&protocol::encode_frame(&protocol::encode_request(
+        &Request::Publish {
+            declared_media_type: Some("audio/wav".into()),
+            bytes: second.clone(),
+        },
+    )));
+    assert!(
+        batch.len() <= CHUNK_SIZE,
+        "the two frames must fit one packet for this test to mean anything"
+    );
+    client.send_batch(&batch).await;
+
+    for bytes in [&first, &second] {
+        let reply = client.read_frame().await;
+        match protocol::decode_response(protocol::decode_frame(&reply).expect("a frame"))
+            .expect("a response")
+        {
+            Response::Published { content_hash } => {
+                assert!(AudioItem::verify(&content_hash, bytes));
+            }
+            other => panic!("expected Published, got {other:?}"),
+        }
+    }
+    assert_eq!(store.lock().await.len(), 2, "both frames must be stored");
 
     shutdown.shutdown();
     tokio::time::timeout(Duration::from_secs(10), run)

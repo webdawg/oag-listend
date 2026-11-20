@@ -163,34 +163,49 @@ impl ReticulumCarrier {
                     buffers.remove(&id);
                     return;
                 }
-                let body = match protocol::decode_frame(buffer) {
-                    Ok(body) => body.to_vec(),
-                    Err(_) => return, // truncated, or not a frame yet
-                };
-                buffers.remove(&id);
-                let request = match protocol::decode_request(&body) {
-                    Ok(request) => request,
-                    Err(e) => {
-                        // A peer that is not speaking the audio protocol gets a typed
-                        // rejection rather than silence, exactly as on the stream carriers.
-                        self.reply(
-                            &id,
-                            &protocol::encode_frame(&protocol::encode_response(
-                                &protocol::Response::Rejected {
-                                    reason: e.to_string(),
-                                },
-                            )),
-                        )
-                        .await;
+                // Answer every complete frame in the buffer, in order, and keep the remainder:
+                // a peer may pack several frames into one packet, exactly as it may pipeline them
+                // on a stream carrier.
+                loop {
+                    if buffer.len() < 4 {
                         return;
                     }
-                };
-                let response = handle(request, &self.store).await;
-                self.reply(
-                    &id,
-                    &protocol::encode_frame(&protocol::encode_response(&response)),
-                )
-                .await;
+                    let len =
+                        u32::from_be_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]) as usize;
+                    if len > protocol::MAX_FRAME_BYTES || buffer.len() < 4 + len {
+                        // Too long for the cap, or not all here yet.
+                        if len > protocol::MAX_FRAME_BYTES {
+                            buffers.remove(&id);
+                        }
+                        return;
+                    }
+                    let body = buffer[4..4 + len].to_vec();
+                    buffer.drain(..4 + len);
+
+                    let request = match protocol::decode_request(&body) {
+                        Ok(request) => request,
+                        Err(e) => {
+                            // A peer that is not speaking the audio protocol gets a typed
+                            // rejection rather than silence, exactly as on the stream carriers.
+                            self.reply(
+                                &id,
+                                &protocol::encode_frame(&protocol::encode_response(
+                                    &protocol::Response::Rejected {
+                                        reason: e.to_string(),
+                                    },
+                                )),
+                            )
+                            .await;
+                            continue;
+                        }
+                    };
+                    let response = handle(request, &self.store).await;
+                    self.reply(
+                        &id,
+                        &protocol::encode_frame(&protocol::encode_response(&response)),
+                    )
+                    .await;
+                }
             }
         }
     }
