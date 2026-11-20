@@ -11,7 +11,7 @@ back. The daemon publishes a small seeded set of generated sounds, accepts audio
 with the BLAKE3 of the bytes.
 
 `cargo test -p oag-listend` runs 65 unit and 77 end-to-end tests, all green, in debug and
-release (`71 unit and 80 end-to-end` with `--features reticulum`). End to end they cover:
+release (`71 unit and 81 end-to-end` with `--features reticulum`). End to end they cover:
 
 - the native back-and-forth: publish, fetch, verify, reject non-audio, not-found, and frames written
   together in one write answered in order;
