@@ -337,10 +337,7 @@ pub async fn accept_and_mirror(
                 store
                     .lock()
                     .await
-                    .record_mirror_outcome(MirrorOutcome::Failed {
-                        content_hash: hash.clone(),
-                        reason: "evicted before it could be mirrored".into(),
-                    });
+                    .record_mirror_outcome(mirror_skipped(&hash));
                 return Ok(hash);
             }
         };
@@ -362,6 +359,16 @@ pub async fn accept_and_mirror(
         store.lock().await.record_mirror_outcome(outcome);
     }
     Ok(hash)
+}
+
+/// The outcome for a mirror that never ran because the item was gone by the time the mirror was
+/// ready. Extracted so the policy is pinned by a test even though the interleaving that reaches it
+/// (an eviction landing between the accept and the mirror) cannot be constructed deterministically.
+fn mirror_skipped(content_hash: &str) -> MirrorOutcome {
+    MirrorOutcome::Failed {
+        content_hash: content_hash.to_string(),
+        reason: "evicted before it could be mirrored".into(),
+    }
 }
 
 /// What happened when an accepted item was offered to IPFS.
@@ -1281,6 +1288,20 @@ mod tests {
         assert_eq!(report.loaded, 1);
         assert!(reopened.serve(&hash).is_ok());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The policy for a mirror that never ran because the item was evicted first. The interleaving
+    /// that reaches the branch cannot be built deterministically, so the policy itself is pinned.
+    #[test]
+    fn a_skipped_mirror_is_a_recorded_failure() {
+        let outcome = mirror_skipped("ab".repeat(32).as_str());
+        assert_eq!(
+            outcome,
+            MirrorOutcome::Failed {
+                content_hash: "ab".repeat(32),
+                reason: "evicted before it could be mirrored".into(),
+            }
+        );
     }
 
     #[tokio::test]
