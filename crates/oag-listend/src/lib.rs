@@ -30,6 +30,8 @@
 pub mod http;
 pub mod ipfs;
 pub mod protocol;
+#[cfg(feature = "reticulum")]
+pub mod reticulum;
 pub mod server;
 pub mod udp;
 pub mod unix;

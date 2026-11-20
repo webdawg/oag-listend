@@ -2,10 +2,10 @@
 
 **License: GNU Affero General Public License v3.0 or later (AGPL-3.0-or-later).**
 
-**Status: serves, and survives a restart.** Four carriers are live and share one store -- the
-native length-prefixed protocol over TCP, HTTP, UDP, and a Unix domain socket -- plus an HTTP CONNECT
-tunnel that reaches that same surface through a proxy, and `--ipfs-api`, which additionally mirrors
-accepted audio to IPFS. The store is
+**Status: serves, and survives a restart.** Five carriers are live and share one store -- the
+native length-prefixed protocol over TCP, HTTP, UDP, a Unix domain socket, and (opt-in, see
+"The Reticulum carrier") Reticulum -- plus an HTTP CONNECT tunnel that reaches that same surface
+through a proxy, and `--ipfs-api`, which additionally mirrors accepted audio to IPFS. The store is
 content-addressed, so `--dir` persists every accepted sound under its BLAKE3 and a restart loads it
 back. The daemon publishes a small seeded set of generated sounds, accepts audio, and serves it back
 with the BLAKE3 of the bytes.
@@ -33,6 +33,8 @@ idempotence within a run and across a restart, refused cleartext downgrades, ref
 replies, a refused non-plausible CID from the node, and refusals that never echo or store what
 came back;
 - the musical ping on every carrier, answering with audio rather than an empty control pong;
+- the Reticulum carrier over its own TCP interface, when built with `--features reticulum`: a
+  client publishes, fetches and verifies, answers a ping with audio, and is refused non-audio;
 - hostile input: deterministic fuzzing of the codec and of all four carriers, with liveness asserted
 afterwards;
 - bounds that are only real if observed: an item at the servable bound is fetched back whole and one
@@ -272,6 +274,28 @@ decide who may connect. It shares the TCP session loop, so the protocol, the bou
 inbound rule are identical by construction. A stale socket file from a killed daemon is removed on
 bind and on shutdown.
 
+## The Reticulum carrier
+
+`--reticulum ADDR` (with `--features reticulum`) serves the same frame protocol over a Reticulum
+TCP interface, so a Reticulum client reaches the same audio. `--reticulum-seed SEED` sets the
+identity seed; it must be stable across restarts because it derives the destination's address.
+
+No radio is involved: the carrier speaks Reticulum over its own `TcpServer` interface, exactly as
+the imagination layer's loopback test does. What that proves is the audio surface end to end -- a
+client publishes, fetches, verifies, and is refused -- and what it does not prove is interop with
+another Reticulum implementation. That limitation is recorded here rather than discovered later.
+
+The carrier is **opt-in** because the `reticulum` crate brings a gRPC/protobuf build and a crypto
+stack -- about 160 transitive packages, against the three dependencies the rest of the daemon uses.
+The default build and the default gate do not compile it, and the audio rules are untouched: an
+incoming frame goes through the same `crate::server::handle`, so `AudioStore::accept` is the
+inbound rule here too.
+
+Bounds: one reassembly buffer per link, capped at a frame plus one packet, so a peer that dribbles
+without ever completing a frame is dropped rather than accumulated; a frame larger than
+`MAX_FRAME_BYTES` is refused by the codec; and the reply is chunked to a packet's capacity, never
+sent as one oversized packet.
+
 ## Saying what it hears
 
 The default bind is `0.0.0.0`, which serves every interface. When a carrier binds a non-loopback
@@ -345,18 +369,13 @@ rather than discovered later.
 
 ## Next
 
-Of the imagination `Transport` seam, four are implemented in oag-listend (TCP, UDP, HTTP,
-IPFS) and one needs hardware:
+Of the imagination `Transport` seam, every carrier is now implemented in oag-listend: TCP, UDP,
+HTTP, IPFS, the HTTP CONNECT tunnel (a client-side wrapper, so nothing to build), and Reticulum
+(opt-in). The only remaining work is the one that needs infrastructure this repository does not
+have:
 
-- **Reticulum.** Deliberately not implemented: it needs a physical interface and `oag-storage`, so
-  no code can be written or run here.
-- **HTTP CONNECT tunnel -- nothing to build.** `ProxiedTransport` is a *client* wrapper: it connects
-  to a proxy, asks for a tunnel, then runs another carrier's exchange through it. A client tunnelling
-  to this daemon's TCP listener needs no code on our side; TCP is TCP. Recording this so the carrier is
-  not re-investigated as missing.
-
-Worth doing next, in order:
-
-- Test both halves against a real Kubo node (`/api/v0/add` and `/api/v0/cat`), which needs
-  infrastructure this repository does not have. Add chunked-reply decoding only if it proves
-  necessary.
+- **Test both halves of the IPFS mirror against a real Kubo node** (`/api/v0/add` and
+  `/api/v0/cat`). Add chunked-reply decoding only if it proves necessary.
+- **Test the Reticulum carrier against a real Reticulum transport instance.** It is exercised over
+  its own `TcpServer` interface on loopback, which proves the audio surface but not interop with
+  another Reticulum implementation.

@@ -54,3 +54,27 @@ jobs:
 
       - name: Run the gate in release
         run: ./scripts/check.sh --release
+
+  # The Reticulum carrier is opt-in: the `reticulum` crate brings a gRPC/protobuf build and a
+  # crypto stack, far heavier than this daemon's other dependencies, so the default artifact and
+  # the two jobs above do not pay for it. This job does, and it is the only one that runs the
+  # carrier's end-to-end test.
+  check-reticulum:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install protobuf compiler
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain stable
+          echo "${CARGO_HOME:-$HOME/.cargo}/bin" >> "$GITHUB_PATH"
+
+      - name: Add the components the gate needs
+        run: rustup component add rustfmt clippy
+
+      - name: Run the gate with the Reticulum carrier
+        run: ./scripts/check.sh --features reticulum

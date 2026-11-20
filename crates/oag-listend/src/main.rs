@@ -47,6 +47,12 @@ struct Args {
     no_generate: bool,
     /// Offer every accepted item to this Kubo node's HTTP API as well. Best-effort.
     ipfs_api: Option<String>,
+    /// Also serve over a Reticulum TCP interface (feature `reticulum`).
+    #[cfg(feature = "reticulum")]
+    reticulum: Option<String>,
+    /// Identity seed for the Reticulum destination; stable across restarts.
+    #[cfg(feature = "reticulum")]
+    reticulum_seed: String,
 }
 
 fn parse_args() -> Args {
@@ -61,6 +67,10 @@ fn parse_args() -> Args {
         max_bytes: DEFAULT_MAX_BYTES,
         no_generate: false,
         ipfs_api: None,
+        #[cfg(feature = "reticulum")]
+        reticulum: None,
+        #[cfg(feature = "reticulum")]
+        reticulum_seed: oag_listend::reticulum::DEFAULT_IDENTITY_SEED.to_string(),
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -83,6 +93,10 @@ fn parse_args() -> Args {
             "--max-bytes" => args.max_bytes = parse_value(&mut it, "--max-bytes"),
             "--no-generate" => args.no_generate = true,
             "--ipfs-api" => args.ipfs_api = Some(value(&mut it, "--ipfs-api")),
+            #[cfg(feature = "reticulum")]
+            "--reticulum" => args.reticulum = Some(value(&mut it, "--reticulum")),
+            #[cfg(feature = "reticulum")]
+            "--reticulum-seed" => args.reticulum_seed = value(&mut it, "--reticulum-seed"),
             "--help" | "-h" => {
                 say!("{}", usage());
                 std::process::exit(0);
@@ -121,7 +135,7 @@ fn parse_value<T: std::str::FromStr>(it: &mut impl Iterator<Item = String>, flag
 
 fn usage() -> String {
     // One literal, so the spacing an operator reads is the spacing written here.
-    format!(
+    let mut text = format!(
         "oag-listend -- the global daemon that serves audio
 
 Usage: oag-listend [--listen ADDR] [--http ADDR] [--udp ADDR] [--unix PATH]
@@ -141,7 +155,22 @@ Usage: oag-listend [--listen ADDR] [--http ADDR] [--udp ADDR] [--unix PATH]
   --ipfs-api ADDR  also offer every accepted item to a Kubo node at ADDR (best-effort)
 
 Only audio is accepted. Everything else is rejected before it is stored."
-    )
+    );
+    text.push_str(reticulum_usage_lines());
+    text
+}
+
+/// The usage lines for the Reticulum flags, which exist only in a build carrying that feature.
+fn reticulum_usage_lines() -> &'static str {
+    #[cfg(feature = "reticulum")]
+    {
+        "\n  --reticulum ADDR    also serve over a Reticulum TCP interface (feature 'reticulum')\n\
+         --reticulum-seed SEED  identity seed for that destination (default oag-listend)\n"
+    }
+    #[cfg(not(feature = "reticulum"))]
+    {
+        ""
+    }
 }
 
 /// Say plainly when a bind address is not loopback. The default is `0.0.0.0`, which serves every
@@ -317,6 +346,30 @@ async fn main() {
         None => None,
     };
     let unix_shutdown = unix.as_ref().map(|(carrier, _)| carrier.shutdown_handle());
+    #[cfg(feature = "reticulum")]
+    let reticulum = match &args.reticulum {
+        Some(addr) => {
+            let carrier = oag_listend::reticulum::ReticulumCarrier::bind(
+                addr.clone(),
+                Arc::clone(&store),
+                &args.reticulum_seed,
+            )
+            .await
+            .unwrap_or_else(|e| {
+                complain!("oag-listend: cannot bind reticulum {addr}: {e}");
+                std::process::exit(1);
+            });
+            say!(
+                "oag-listend reticulum on {} at {}",
+                carrier.local_addr(),
+                carrier.address()
+            );
+            Some(carrier)
+        }
+        None => None,
+    };
+    #[cfg(feature = "reticulum")]
+    let reticulum_shutdown = reticulum.as_ref().map(|carrier| carrier.shutdown_handle());
     if let Some((carrier, _)) = &unix {
         active_counters.push(carrier.active_handle());
     }
@@ -354,6 +407,8 @@ async fn main() {
     let http_run = http.map(|(carrier, _)| tokio::spawn(async move { carrier.run().await }));
     let udp_run = udp.map(|(carrier, _)| tokio::spawn(async move { carrier.run().await }));
     let unix_run = unix.map(|(carrier, _)| tokio::spawn(async move { carrier.run().await }));
+    #[cfg(feature = "reticulum")]
+    let reticulum_run = reticulum.map(|carrier| tokio::spawn(async move { carrier.run().await }));
 
     // SIGINT (Ctrl+C) and SIGTERM (`systemctl stop`, `kill`) both shut down cleanly, so the
     // Unix socket is removed and the operator's stop command is not a crash.
@@ -388,6 +443,10 @@ async fn main() {
     if let Some(handle) = unix_shutdown {
         handle.shutdown();
     }
+    #[cfg(feature = "reticulum")]
+    if let Some(handle) = reticulum_shutdown {
+        handle.shutdown();
+    }
     let _ = tokio::time::timeout(Duration::from_secs(5), native_run).await;
     if let Some(run) = http_run {
         let _ = tokio::time::timeout(Duration::from_secs(5), run).await;
@@ -396,6 +455,10 @@ async fn main() {
         let _ = tokio::time::timeout(Duration::from_secs(5), run).await;
     }
     if let Some(run) = unix_run {
+        let _ = tokio::time::timeout(Duration::from_secs(5), run).await;
+    }
+    #[cfg(feature = "reticulum")]
+    if let Some(run) = reticulum_run {
         let _ = tokio::time::timeout(Duration::from_secs(5), run).await;
     }
 

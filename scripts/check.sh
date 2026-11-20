@@ -1,8 +1,9 @@
 #!/bin/sh
 # Run every quality gate on oag-listend and fail if any one of them does.
 #
-#   scripts/check.sh           fmt, clippy, rustdoc, examples, tests, systemd unit (debug)
-#   scripts/check.sh --release  the same, plus the suite in release
+#   scripts/check.sh                          fmt, clippy, rustdoc, examples, tests, systemd unit
+#   scripts/check.sh --release                the same, with the suite in release
+#   scripts/check.sh --features reticulum     the same, with the opt-in Reticulum carrier
 #
 # These are the gates the repository is held to. Run them before pushing.
 set -eu
@@ -10,31 +11,47 @@ set -eu
 cd "$(dirname "$0")/.."
 
 RELEASE=""
-if [ "${1:-}" = "--release" ]; then
-    RELEASE=--release
-elif [ $# -gt 0 ]; then
-    echo "usage: $0 [--release]" >&2
-    exit 2
-fi
+FEATURES=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --release)
+            RELEASE=--release
+            ;;
+        --features)
+            shift
+            FEATURES="--features ${1:-}"
+            ;;
+        --features=*)
+            FEATURES="--features ${1#--features=}"
+            ;;
+        *)
+            echo "usage: $0 [--release] [--features FEATURES]" >&2
+            exit 2
+            ;;
+    esac
+    shift
+done
 
 echo "== cargo fmt --check"
 cargo fmt --check
 
 echo "== cargo clippy --all-targets"
 # `-D warnings` is the point: without it a new lint is printed and the gate still passes.
-cargo clippy -p oag-listend --all-targets -- -D warnings
+# shellcheck disable=SC2086
+cargo clippy -p oag-listend --all-targets $FEATURES -- -D warnings
 
 echo "== rustdoc (-D warnings)"
-RUSTDOCFLAGS="-D warnings" cargo doc -p oag-listend --no-deps
+# shellcheck disable=SC2086
+RUSTDOCFLAGS="-D warnings" cargo doc -p oag-listend --no-deps $FEATURES
 
 # Examples are not built by `cargo test`; the shipped-client tests execute push_pull.
 echo "== examples"
 # shellcheck disable=SC2086
-cargo build -p oag-listend --examples $RELEASE
+cargo build -p oag-listend --examples $RELEASE $FEATURES
 
-echo "== tests${RELEASE:+ (release)}"
+echo "== tests${RELEASE:+ (release)}${FEATURES:+ (features: $FEATURES)}"
 # shellcheck disable=SC2086
-cargo test -p oag-listend $RELEASE
+cargo test -p oag-listend $RELEASE $FEATURES
 
 echo "== systemd unit"
 if ! command -v systemd-analyze >/dev/null 2>&1; then

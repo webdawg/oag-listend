@@ -126,6 +126,22 @@ The HTTP content type comes from the bytes, not from what the publisher claimed;
 client can discover what exists. CORS is allowed (`Access-Control-Allow-Origin: *`) and `OPTIONS`
 is answered, so a page on another origin can `fetch()` the audio. Verified by hand with `curl`.
 
+## Reticulum (opt-in)
+
+`--reticulum ADDR` serves the same audio over a Reticulum TCP interface, so a Reticulum client
+reaches the daemon. It is behind a cargo feature because the `reticulum` crate brings a
+gRPC/protobuf build and a crypto stack -- about 160 transitive packages against the three
+dependencies the rest of the daemon uses:
+
+    cargo build -p oag-listend --features reticulum
+    ./target/debug/oag-listend --listen 127.0.0.1:7100 --reticulum 127.0.0.1:4242
+
+`--reticulum-seed SEED` sets the identity seed, which must be stable across restarts because it
+derives the destination's address (the default is `oag-listend`). No radio is involved -- the
+carrier speaks Reticulum over its own `TcpServer` interface, which is what makes it testable on
+one machine. That proves the audio surface end to end; it does not prove interop with another
+Reticulum implementation. `scripts/check.sh --features reticulum` runs the whole bar with it.
+
 ## Run it as a service
 
 `scripts/oag-listend.service` is a systemd unit for all four carriers with a persistent store.
@@ -151,9 +167,10 @@ address the daemon prints a note saying so. Use `--listen 127.0.0.1:...` to keep
 
 ## Status
 
-**Serves, and survives a restart.** Five ways to reach the audio are live and tested: the native
-protocol over TCP, HTTP, UDP, a Unix socket, and an IPFS mirror -- 64 unit tests plus 78 end-to-end
-tests (`cargo test -p oag-listend`). The store mutex covers lookup and insert, not byte
+**Serves, and survives a restart.** Six ways to reach the audio are live and tested: the native
+protocol over TCP, HTTP, UDP, a Unix socket, an IPFS mirror, and -- opt-in -- Reticulum
+(`--features reticulum`). `cargo test -p oag-listend` runs 64 unit tests plus 78 end-to-end;
+`cargo test -p oag-listend --features reticulum` adds the carrier's own end-to-end test. The store mutex covers lookup and insert, not byte
 copies or disk writes, so one slow client does not stall the others. Runs as a systemd service
 (`scripts/oag-listend.service`) and shuts down cleanly on SIGINT and SIGTERM. The native protocol, HTTP, UDP, and the Unix socket share one store,
 and all were verified by hand: audio posted to HTTP came back byte-identical, `push_pull` verified
