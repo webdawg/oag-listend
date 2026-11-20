@@ -169,8 +169,8 @@ address the daemon prints a note saying so. Use `--listen 127.0.0.1:...` to keep
 
 **Serves, and survives a restart.** Six ways to reach the audio are live and tested: the native
 protocol over TCP, HTTP, UDP, a Unix socket, an IPFS mirror, and -- opt-in -- Reticulum
-(`--features reticulum`). `cargo test -p oag-listend` runs 64 unit tests plus 78 end-to-end;
-`cargo test -p oag-listend --features reticulum` adds the carrier's own end-to-end test. The store mutex covers lookup and insert, not byte
+(`--features reticulum`). `cargo test -p oag-listend` runs 65 unit tests plus 77 end-to-end;
+`--features reticulum` adds the carrier's own unit and end-to-end tests (149 in total). The store mutex covers lookup and insert, not byte
 copies or disk writes, so one slow client does not stall the others. Runs as a systemd service
 (`scripts/oag-listend.service`) and shuts down cleanly on SIGINT and SIGTERM. The native protocol, HTTP, UDP, and the Unix socket share one store,
 and all were verified by hand: audio posted to HTTP came back byte-identical, `push_pull` verified

@@ -10,8 +10,8 @@ content-addressed, so `--dir` persists every accepted sound under its BLAKE3 and
 back. The daemon publishes a small seeded set of generated sounds, accepts audio, and serves it back
 with the BLAKE3 of the bytes.
 
-`cargo test -p oag-listend` runs 64 unit and 78 end-to-end tests, all green, in debug and
-release. End to end they cover:
+`cargo test -p oag-listend` runs 65 unit and 77 end-to-end tests, all green, in debug and
+release (`70 unit and 79 end-to-end` with `--features reticulum`). End to end they cover:
 
 - the native back-and-forth: publish, fetch, verify, reject non-audio, not-found, and frames written
   together in one write answered in order;
@@ -291,10 +291,13 @@ The default build and the default gate do not compile it, and the audio rules ar
 incoming frame goes through the same `crate::server::handle`, so `AudioStore::accept` is the
 inbound rule here too.
 
-Bounds: one reassembly buffer per link, capped at a frame plus one packet, so a peer that dribbles
-without ever completing a frame is dropped rather than accumulated; a frame larger than
-`MAX_FRAME_BYTES` is refused by the codec; and the reply is chunked to a packet's capacity, never
-sent as one oversized packet.
+Bounds: at most 64 concurrent links, the same session cap as every other carrier, so a peer
+cannot make the daemon hold an unbounded number of buffers; one reassembly buffer per link,
+capped at a frame plus one packet, so a peer that dribbles without ever completing a frame is
+dropped rather than accumulated; a frame larger than `MAX_FRAME_BYTES` is refused outright; and
+the reply is chunked to a packet's capacity, never sent as one oversized packet. Every complete
+frame in a payload is answered, in order -- a packet may carry several, exactly as a client may
+pipeline them on a stream carrier.
 
 ## Saying what it hears
 
