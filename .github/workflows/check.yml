@@ -118,7 +118,12 @@ jobs:
             curl -fsS -o /tmp/oag-ping.wav http://127.0.0.1:7101/ping && break
             sleep 1
           done
-          test -s /tmp/oag-ping.wav
+          if ! test -s /tmp/oag-ping.wav; then
+            # A bare timeout is not actionable; show why the unit is not serving.
+            systemctl status oag-listend --no-pager -l || true
+            journalctl -u oag-listend --no-pager -n 40 || true
+            exit 1
+          fi
           curl -fsS -o /dev/null http://127.0.0.1:7101/
 
       - name: Stop the unit
