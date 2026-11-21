@@ -375,13 +375,12 @@ that reply comes from the network, and a `Hash` that is not a CID would otherwis
 persisted, and written into `X-IPFS-CID` and `ETag` on every later fetch -- a header-injection path.
 Refusing it records a mirror failure, which costs nothing: the audio is already durable locally. A
 `https://` address is refused: speaking plain HTTP to a TLS port would look configured while sending
-audio in clear. A chunked
-reply is refused by **both** halves rather than decoded as content, because reading the framing as
-audio would silently corrupt what is served. It has been tested against a
-stub that mimics Kubo's add and cat endpoints, end to end through `--ipfs-api`; it has **not**
-been tested
-against a real Kubo node, and it does not decode chunked replies. That limitation is stated here
-rather than discovered later.
+audio in clear. Chunked replies are decoded by both halves, because Kubo answers `POST /api/v0/add`
+with `Transfer-Encoding: chunked` and refusing it made the whole write half fail. **Validated against
+a real Kubo node** (0.43.1): a published item is added and pinned, `POST /api/v0/cat` returns exactly
+the bytes, `GET /ipfs/{cid}` serves them byte-identically with `X-IPFS-CID` and an ETag of the content
+hash, a non-audio object fetched by CID is refused, and a restart reports `offered 0 of N` with the
+node's object count unchanged.
 
 ## Next
 

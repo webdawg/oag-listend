@@ -13,7 +13,7 @@
 //!
 //! Honest limitation: this client speaks just enough HTTP/1.1 to post one multipart form and read
 //! one small JSON reply. It has been tested against a stub that mimics Kubo's `/api/v0/add`; it has
-//! **not** been tested against a real Kubo node, and it does not decode chunked transfer encoding.
+//! Chunked replies are decoded, so both halves work against a real Kubo node.
 
 #![forbid(unsafe_code)]
 
@@ -43,17 +43,63 @@ pub enum IpfsError {
     TooLarge,
     #[error("{0:?} is not a plausible content identifier")]
     BadCid(String),
-    #[error("the IPFS API sent a chunked reply, which this client does not decode")]
-    Chunked,
+    #[error("the chunked reply was malformed")]
+    ChunkedFraming,
 }
 
-/// Whether the reply head asks for chunked transfer encoding. Kubo does this for larger cat
-/// responses; treating the chunk framing as audio would silently corrupt it, so it is refused.
+/// Whether the reply head asks for chunked transfer encoding. Kubo answers `POST /api/v0/add`
+/// this way, so a client that reads to EOF has to decode the chunk framing rather than treat it
+/// as content.
 fn is_chunked(head: &str) -> bool {
     head.lines().any(|line| {
         let lower = line.to_ascii_lowercase();
         lower.starts_with("transfer-encoding:") && lower.contains("chunked")
     })
+}
+
+/// Split a reply read to EOF into its head and body, decoding the body if the head asked for
+/// chunked transfer encoding. `max` bounds the decoded body.
+fn split_reply(reply: &[u8], max: usize) -> Result<(String, Vec<u8>), IpfsError> {
+    let head_end = find_subslice(reply, b"\r\n\r\n").ok_or(IpfsError::NotAdd)?;
+    let head = String::from_utf8_lossy(&reply[..head_end]).into_owned();
+    let body = &reply[head_end + 4..];
+    if is_chunked(&head) {
+        Ok((head, decode_chunked(body, max)?))
+    } else {
+        if body.len() > max {
+            return Err(IpfsError::TooLarge);
+        }
+        Ok((head, body.to_vec()))
+    }
+}
+
+/// Decode a chunked body: `<hex size>[;ext]\r\n<data>\r\n` repeated, then a zero-size chunk
+/// and optional trailers. Every step is bounds-checked, and the decoded size is capped at
+/// `max`, so a lying chunk cannot make the daemon allocate without limit.
+fn decode_chunked(body: &[u8], max: usize) -> Result<Vec<u8>, IpfsError> {
+    let mut out = Vec::new();
+    let mut pos = 0usize;
+    loop {
+        let line_end = find_subslice(&body[pos..], b"\r\n").ok_or(IpfsError::ChunkedFraming)? + pos;
+        let line =
+            std::str::from_utf8(&body[pos..line_end]).map_err(|_| IpfsError::ChunkedFraming)?;
+        let size_field = line.split(';').next().unwrap_or("").trim();
+        let size = usize::from_str_radix(size_field, 16).map_err(|_| IpfsError::ChunkedFraming)?;
+        pos = line_end + 2;
+        if size == 0 {
+            break;
+        }
+        if pos + size > body.len() || out.len() + size > max {
+            return Err(IpfsError::ChunkedFraming);
+        }
+        out.extend_from_slice(&body[pos..pos + size]);
+        pos += size;
+        if !body[pos..].starts_with(b"\r\n") {
+            return Err(IpfsError::ChunkedFraming);
+        }
+        pos += 2;
+    }
+    Ok(out)
 }
 
 /// Posts bytes to a Kubo node's `/api/v0/add` and returns the resulting CID.
@@ -136,7 +182,19 @@ impl IpfsPublisher {
         // otherwise put a second header line into every `X-IPFS-CID` and `ETag` we send. Refusing
         // it makes the mirror outcome a recorded failure, which is all a failed mirror means: the
         // audio is still stored and served locally.
-        let cid = parse_add_response(&reply)?;
+        let (head, body) = split_reply(&reply, MAX_RESPONSE_BYTES)?;
+        let status = head.lines().next().unwrap_or("");
+        let ok = status
+            .split_whitespace()
+            .nth(1)
+            .map(|code| code.starts_with('2'))
+            .unwrap_or(false);
+        if !ok {
+            return Err(IpfsError::Status {
+                status: status.to_string(),
+            });
+        }
+        let cid = parse_add_response(&body)?;
         validate_cid(&cid)?;
         Ok(cid)
     }
@@ -180,11 +238,7 @@ impl IpfsPublisher {
             reply.extend_from_slice(&chunk[..n]);
         }
 
-        let head_end = find_subslice(&reply, b"\r\n\r\n").ok_or(IpfsError::NotAdd)?;
-        let head = String::from_utf8_lossy(&reply[..head_end]);
-        if is_chunked(&head) {
-            return Err(IpfsError::Chunked);
-        }
+        let (head, body) = split_reply(&reply, MAX_CAT_BYTES)?;
         let status = head.lines().next().unwrap_or("");
         let ok = status
             .split_whitespace()
@@ -195,10 +249,6 @@ impl IpfsPublisher {
             return Err(IpfsError::Status {
                 status: status.to_string(),
             });
-        }
-        let body = reply[head_end + 4..].to_vec();
-        if body.len() > MAX_CAT_BYTES {
-            return Err(IpfsError::TooLarge);
         }
         Ok(body)
     }
@@ -262,25 +312,7 @@ fn split_api(api: &str) -> Result<(String, String), IpfsError> {
 }
 
 /// Pull `"Hash"` out of a Kubo add reply without a JSON dependency.
-fn parse_add_response(reply: &[u8]) -> Result<String, IpfsError> {
-    let head_end = find_subslice(reply, b"\r\n\r\n").ok_or(IpfsError::NotAdd)?;
-    let head = String::from_utf8_lossy(&reply[..head_end]);
-    if is_chunked(&head) {
-        return Err(IpfsError::Chunked);
-    }
-    let mut lines = head.lines();
-    let status = lines.next().ok_or(IpfsError::NotAdd)?;
-    let ok = status
-        .split_whitespace()
-        .nth(1)
-        .map(|code| code.starts_with('2'))
-        .unwrap_or(false);
-    if !ok {
-        return Err(IpfsError::Status {
-            status: status.to_string(),
-        });
-    }
-    let body = &reply[head_end + 4..];
+fn parse_add_response(body: &[u8]) -> Result<String, IpfsError> {
     let text = String::from_utf8_lossy(body);
     let key = text.find("\"Hash\"").ok_or(IpfsError::NotAdd)? + "\"Hash\"".len();
     let rest = text[key..].trim_start();
@@ -399,9 +431,11 @@ mod tests {
         server.await.expect("join");
     }
 
-    /// A chunked reply is refused rather than decoded as bytes, which would corrupt the audio.
+    /// A chunked reply is decoded, not treated as bytes. Kubo answers
+    /// `POST /api/v0/add` with `Transfer-Encoding: chunked`, so refusing it made the whole
+    /// write half fail against a real node.
     #[tokio::test]
-    async fn a_chunked_reply_is_refused_not_misread() {
+    async fn a_chunked_reply_is_decoded() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind");
@@ -414,21 +448,57 @@ mod tests {
             };
             let mut buf = [0u8; 4096];
             let _ = stream.read(&mut buf).await;
+            // The JSON reply split across two chunks, as Kubo sends it.
+            let json = b"{\"Hash\":\"bafytestcid\",\"Name\":\"audio\",\"Size\":\"8\"}";
+            let split = 18usize;
+            let chunked = format!(
+                "{:x}\r\n{}\r\n{:x}\r\n{}\r\n0\r\n\r\n",
+                split,
+                std::str::from_utf8(&json[..split]).unwrap(),
+                json.len() - split,
+                std::str::from_utf8(&json[split..]).unwrap()
+            );
             let _ = stream
-                .write_all(
-                    b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n",
-                )
+                .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
                 .await;
+            let _ = stream.write_all(chunked.as_bytes()).await;
             let _ = stream.flush().await;
             let _ = stream.shutdown().await;
         });
         match IpfsPublisher::new(format!("127.0.0.1:{addr}"))
-            .cat("bafyabc")
+            .add(b"RIFF....WAVE")
             .await
         {
-            Err(IpfsError::Chunked) => {}
-            other => panic!("expected a chunked refusal, got {other:?}"),
+            Ok(cid) => assert_eq!(cid, "bafytestcid"),
+            other => panic!("expected the chunked reply to decode, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_chunked_body_is_decoded_in_pieces() {
+        let body = b"5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
+        assert_eq!(decode_chunked(body, 1024).unwrap(), b"hello world");
+    }
+
+    #[test]
+    fn a_chunk_size_over_the_bound_is_refused() {
+        let body = b"5\r\nhello\r\n0\r\n\r\n";
+        assert!(matches!(
+            decode_chunked(body, 4),
+            Err(IpfsError::ChunkedFraming)
+        ));
+    }
+
+    #[test]
+    fn a_chunked_body_that_stops_early_is_refused() {
+        assert!(matches!(
+            decode_chunked(b"5\r\nhel", 1024),
+            Err(IpfsError::ChunkedFraming)
+        ));
+        assert!(matches!(
+            decode_chunked(b"zz\r\nhello\r\n0\r\n\r\n", 1024),
+            Err(IpfsError::ChunkedFraming)
+        ));
     }
 
     /// An implausible identifier is refused before it can reach a request line, so a crafted path
