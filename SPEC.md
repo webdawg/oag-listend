@@ -379,8 +379,9 @@ audio in clear. Chunked replies are decoded by both halves, because Kubo answers
 with `Transfer-Encoding: chunked` and refusing it made the whole write half fail. **Validated against
 a real Kubo node** (0.43.1): a published item is added and pinned, `POST /api/v0/cat` returns exactly
 the bytes, `GET /ipfs/{cid}` serves them byte-identically with `X-IPFS-CID` and an ETag of the content
-hash, a non-audio object fetched by CID is refused, and a restart reports `offered 0 of N` with the
-node's object count unchanged.
+hash, a non-audio object fetched by CID is refused, a CID the daemon does **not** hold is fetched
+from the node and served byte-identically, and a restart reports `offered 0 of N` with the node's
+object count unchanged.
 
 ## Next
 
