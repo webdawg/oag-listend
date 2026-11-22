@@ -85,6 +85,17 @@ impl AudioItem {
     pub fn verify(content_hash: &str, bytes: &[u8]) -> bool {
         blake3::hash(bytes).to_hex().to_string() == content_hash
     }
+
+    /// The bytes this item occupies in the store: the audio, plus the declared media type that is
+    /// persisted beside it.
+    ///
+    /// The bound is a bound on disk, so the metadata has to count. Without this a publisher could
+    /// send a 12-byte WAV carrying a 4 KiB declared type: the audio is small, so it is accepted,
+    /// but `--max-bytes` then bounds almost none of what is stored. A store that reports itself
+    /// within its bound while the directory grows far past it is not bounded.
+    pub fn footprint(&self) -> usize {
+        self.bytes.len() + self.media_type.as_ref().map_or(0, String::len)
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -103,7 +114,9 @@ pub enum ListendError {
     Persist(String),
     /// The bytes are audio, but they are larger than the store can hold. Refused rather than
     /// written and immediately evicted: a bound that is not checked on the way in is not a bound.
-    #[error("audio is {len} bytes, larger than the {max} byte store bound")]
+    #[error(
+        "item is {len} bytes (audio plus its declared media type), larger than the {max} byte store bound"
+    )]
     TooLarge { len: usize, max: usize },
 }
 
@@ -565,17 +578,31 @@ impl AudioStore {
         bytes: Vec<u8>,
         declared_media_type: Option<String>,
     ) -> Result<String, ListendError> {
+        // The inbound rule, on the bytes and before anything is stored. Unmoved.
         if AudioFormat::sniff(&bytes).is_none() {
             return Err(ListendError::NotAudio);
         }
-        let bound = servable_bound(self.max_bytes);
-        if bytes.len() > bound {
+        let item = AudioItem::new(bytes, declared_media_type);
+        // Two bounds, both enforced on the way in, and they are not the same one.
+        //
+        // The *audio* must fit a fetch reply: the reply also carries the hash, a length prefix
+        // and an optional CID, so an item at the frame cap would make a reply larger than the cap.
+        // The declared media type is not in the reply, so it must not shrink this bound.
+        let servable = servable_bound(self.max_bytes);
+        if item.bytes.len() > servable {
             return Err(ListendError::TooLarge {
-                len: bytes.len(),
-                max: bound,
+                len: item.bytes.len(),
+                max: servable,
             });
         }
-        let item = AudioItem::new(bytes, declared_media_type);
+        // The whole *footprint* -- audio plus the media type persisted beside it -- must fit the
+        // store, or `--max-bytes` bounds almost none of what is actually written to disk.
+        if item.footprint() > self.max_bytes {
+            return Err(ListendError::TooLarge {
+                len: item.footprint(),
+                max: self.max_bytes,
+            });
+        }
         if let Some(existing) = self.items.get(&item.content_hash).cloned() {
             // The durable copy is the source of truth. If the file went missing out of band (an
             // operator deleted it, or the disk dropped it), a republish restores it, so the item
@@ -782,7 +809,7 @@ impl AudioStore {
         if self.items.contains_key(&hash) {
             return hash;
         }
-        self.bytes_held += item.bytes.len();
+        self.bytes_held += item.footprint();
         self.items.insert(hash.clone(), Arc::new(item));
         self.order.push_back(hash.clone());
         while self.bytes_held > self.max_bytes {
@@ -790,7 +817,7 @@ impl AudioStore {
                 break;
             };
             if let Some(evicted) = self.items.remove(&oldest) {
-                self.bytes_held -= evicted.bytes.len();
+                self.bytes_held -= evicted.footprint();
                 self.forget(&oldest);
             }
         }
@@ -1601,6 +1628,63 @@ mod tests {
             "an item larger than the bound must be refused, got {result:?}"
         );
         assert!(store.is_empty(), "a refused item must not be stored");
+    }
+
+    /// The bound is a bound on disk, and the declared media type is persisted beside the audio, so
+    /// it has to count. A publisher could otherwise send a 12-byte WAV with a 4 KiB type: the audio
+    /// is small, so it is accepted, and the store would hold far more than `--max-bytes` while
+    /// reporting itself within it.
+    #[tokio::test]
+    async fn the_store_bound_counts_the_declared_media_type() {
+        let mut store = AudioStore::with_capacity(20);
+        // The smallest bytes the inbound rule recognises as WAV.
+        let header = b"RIFF\x00\x00\x00\x00WAVE".to_vec();
+        assert_eq!(header.len(), 12);
+        match store.accept(header.clone(), Some("x".repeat(32))).await {
+            Err(ListendError::TooLarge { len, max }) => {
+                assert_eq!(len, 12 + 32, "the footprint is what is measured");
+                assert_eq!(max, 20);
+            }
+            other => panic!("the metadata must count toward the bound, got {other:?}"),
+        }
+        assert!(store.is_empty(), "a refused item must not be stored");
+        assert_eq!(store.bytes_held(), 0);
+
+        // The same audio with a type that fits is accepted, and the footprint is what is held.
+        let mut store = AudioStore::with_capacity(44);
+        let hash = store
+            .accept(header, Some("x".repeat(32)))
+            .await
+            .expect("12 + 32 is exactly the bound");
+        assert_eq!(store.bytes_held(), 44);
+        assert!(store.serve(&hash).is_ok());
+    }
+
+    /// A sidecar already on disk counts too, so loading a store cannot walk the directory past the
+    /// bound while `bytes_held` says otherwise.
+    #[tokio::test]
+    async fn a_loaded_sidecar_counts_toward_the_bound() {
+        let dir = temp_dir("sidecar-footprint");
+        let wav = wav::generate_n(3, wav::Sound::Tone, 4); // 52 bytes
+        let hash = blake3::hash(&wav).to_hex().to_string();
+        std::fs::write(dir.join(&hash), &wav).unwrap();
+        // A maximal media type: the largest the loader will read.
+        std::fs::write(
+            dir.join(format!("{hash}.json")),
+            "y".repeat(MAX_SIDECAR_BYTES),
+        )
+        .unwrap();
+
+        let (store, report) = AudioStore::with_directory(&dir, 100).unwrap();
+        assert_eq!(report.loaded, 0, "the footprint is over the bound");
+        assert_eq!(report.evicted, 1, "and it is reported, not silently held");
+        assert_eq!(store.len(), 0);
+        assert_eq!(store.bytes_held(), 0);
+        assert!(
+            !dir.join(&hash).exists(),
+            "eviction must remove the file from disk"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

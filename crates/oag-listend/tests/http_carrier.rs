@@ -751,7 +751,10 @@ async fn usage() {
     .await;
     let text = String::from_utf8_lossy(&root).into_owned();
     assert!(text.contains("items: 0"), "{text}");
-    assert!(text.contains("bytes: 0 / 10000"), "{text}");
+    assert!(
+        text.contains("bytes: 0 / 10000 (audio + declared types)"),
+        "{text}"
+    );
 
     let wav = wav::generate(31, wav::Sound::Tone);
     let len = wav.len();
@@ -765,7 +768,12 @@ async fn usage() {
     .await;
     let text = String::from_utf8_lossy(&root).into_owned();
     assert!(text.contains("items: 1"), "{text}");
-    assert!(text.contains(&format!("bytes: {len} / 10000")), "{text}");
+    // The usage counts the whole footprint: the audio plus the declared type persisted beside it.
+    let held = len + "audio/wav".len();
+    assert!(
+        text.contains(&format!("bytes: {held} / 10000 (audio + declared types)")),
+        "{text}"
+    );
 
     shutdown.shutdown();
     tokio::time::timeout(Duration::from_secs(5), run)

@@ -10,8 +10,8 @@ content-addressed, so `--dir` persists every accepted sound under its BLAKE3 and
 back. The daemon publishes a small seeded set of generated sounds, accepts audio, and serves it back
 with the BLAKE3 of the bytes.
 
-`cargo test -p oag-listend` runs 75 unit and 77 end-to-end tests, all green, in debug and
-release (`81 unit and 81 end-to-end` with `--features reticulum`). End to end they cover:
+`cargo test -p oag-listend` runs 77 unit and 77 end-to-end tests, all green, in debug and
+release (`83 unit and 81 end-to-end` with `--features reticulum`). End to end they cover:
 
 - the native back-and-forth: publish, fetch, verify, reject non-audio, not-found, and frames written
   together in one write answered in order;
@@ -243,6 +243,14 @@ frame -- megabytes -- which would be written to disk and then ignored by every l
 `--max-bytes` would bound the audio but not the bytes actually stored. Equal bounds on the way
 out and the way in are what make the store bound a bound on disk. The audio is never refused
 because of its metadata.
+
+A kept media type therefore counts toward the store bound: an item's **footprint** is its audio
+plus its declared type, and `bytes_held` sums footprints. Otherwise a publisher could send a
+12-byte WAV carrying a 4 KiB type -- accepted, because the audio is small -- and the directory
+would grow far past `--max-bytes` while the daemon reported itself within it. Two checks are
+enforced on the way in, and they are not the same one: the *audio* must fit a fetch reply (the
+media type is not in the reply, so it does not shrink that bound), and the *footprint* must fit
+the store bound.
 Neither sidecar counts toward the entry cap, and eviction removes both with the audio.
 
 Eviction unlinks the file, so the directory and the store agree on what is held and the

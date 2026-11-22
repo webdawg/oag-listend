@@ -42,11 +42,15 @@ async fn exchange(addr: std::net::SocketAddr, request: &Request) -> Response {
     protocol::decode_response(&body).expect("decode")
 }
 
+/// The type `publish` declares. The store bound counts it, because it is persisted beside the
+/// audio, so a test that sizes a bound has to size it for the whole footprint.
+const DECLARED: &str = "audio/wav";
+
 async fn publish(addr: std::net::SocketAddr, bytes: Vec<u8>) -> String {
     match exchange(
         addr,
         &Request::Publish {
-            declared_media_type: Some("audio/wav".into()),
+            declared_media_type: Some(DECLARED.into()),
             bytes,
         },
     )
@@ -89,8 +93,11 @@ async fn run(dir: &std::path::Path) {
         "the two tones must differ in size for this test to be meaningful"
     );
 
-    let (store, _) = AudioStore::with_directory(dir, larger.len()).expect("open store");
-    assert_eq!(store.max_bytes(), larger.len());
+    // The bound is exactly the larger item's footprint -- its audio plus the declared type that
+    // is persisted beside it. Sizing it for the audio alone would now refuse the publish.
+    let bound = larger.len() + DECLARED.len();
+    let (store, _) = AudioStore::with_directory(dir, bound).expect("open store");
+    assert_eq!(store.max_bytes(), bound);
     let (server, addr) = ListendServer::bind_shared("127.0.0.1:0", Arc::new(Mutex::new(store)))
         .await
         .expect("bind");
