@@ -1348,6 +1348,24 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// `truncated` must be reported rather than silently ignored when the directory holds more
+    /// audio entries than the load considers. The cap counts audio entries, so sidecars don't count.
+    #[test]
+    fn a_directory_over_the_entry_cap_is_reported_as_truncated() {
+        let dir = temp_dir("truncated");
+        for i in 0..(MAX_LOAD_ENTRIES + 1) {
+            std::fs::write(dir.join(format!("{i:064x}")), b"RIFF0000WAVE").unwrap();
+        }
+        let (_store, report) =
+            AudioStore::load_dir(&dir, 1024 * 1024 * 1024, MAX_LOAD_ENTRIES).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(report.truncated, "the cap must be reported, not ignored");
+        assert_eq!(
+            report.skipped, MAX_LOAD_ENTRIES,
+            "the report counts the entries it considered"
+        );
+    }
+
     #[tokio::test]
     async fn an_oversized_sidecar_is_ignored() {
         let dir = temp_dir("sidecar");
