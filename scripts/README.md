@@ -25,7 +25,7 @@ Not part of the pruning machinery, so not copied to the other four repositories:
 |---|---|
 | `prune-target.py` | The pruner. Python 3 stdlib only, no dependencies. |
 | `rustc-wrapper.sh` | Cargo `rustc-wrapper` hook. Prunes once per cargo process, then `exec`s the real rustc. |
-| `test_prune_target.py` | Standalone test suite. 14 tests, < 1 s. |
+| `test_prune_target.py` | Standalone test suite. 19 tests, < 1 s. |
 
 Wired up via `.cargo/config.toml` in the repo root:
 
