@@ -60,6 +60,19 @@ pub struct AudioItem {
 
 impl AudioItem {
     pub fn new(bytes: Vec<u8>, media_type: Option<String>) -> Self {
+        // A declared type is metadata, so it carries the same bound the loader applies on the way
+        // back in. Without it a publisher could hand the daemon a media type almost as large as a
+        // frame -- megabytes -- which would be written to disk and then ignored by the loader,
+        // so `--max-bytes` would bound the audio but not the bytes actually stored. Equal bounds
+        // on the way out and the way in are what make the store bound a bound on disk.
+        let media_type = media_type.and_then(|stated| {
+            let stated = stated.trim();
+            if stated.is_empty() || stated.len() > MAX_SIDECAR_BYTES {
+                None
+            } else {
+                Some(stated.to_string())
+            }
+        });
         let content_hash = blake3::hash(&bytes).to_hex().to_string();
         Self {
             content_hash,
@@ -1173,6 +1186,71 @@ mod tests {
         assert!(
             store.accept(isom_m4a, None).await.is_ok(),
             "an audio compatible brand must be accepted"
+        );
+    }
+
+    #[test]
+    fn a_declared_media_type_is_bounded_and_trimmed_like_the_loader_reads_it() {
+        // The write bound is the read bound: MAX_SIDECAR_BYTES. A type the loader would ignore
+        // must not be written in the first place, or the disk bound counts audio but not the
+        // bytes actually stored.
+        let item = AudioItem::new(b"x".to_vec(), Some("  audio/wav  ".into()));
+        assert_eq!(item.media_type.as_deref(), Some("audio/wav"));
+
+        let item = AudioItem::new(b"x".to_vec(), Some("   ".into()));
+        assert_eq!(item.media_type, None, "a blank type is not a type");
+
+        let oversized = "x".repeat(MAX_SIDECAR_BYTES + 1);
+        let item = AudioItem::new(b"x".to_vec(), Some(oversized));
+        assert_eq!(item.media_type, None, "an oversized type is not kept");
+
+        assert_eq!(
+            AudioItem::new(b"x".to_vec(), None).media_type,
+            None,
+            "no declared type stays none"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_publish_with_an_absurd_media_type_keeps_the_audio_and_writes_no_sidecar() {
+        let dir = temp_dir("media-type-bound");
+        let (mut store, _report) = AudioStore::with_directory(&dir, 1024 * 1024).expect("store");
+        let tone = crate::wav::generate(7, crate::wav::Sound::Tone);
+        // Almost a frame's worth of declared type: it fits the frame, so only the media-type
+        // bound can stop it from being written and then ignored on every later load.
+        let hash = store
+            .accept(tone.clone(), Some("x".repeat(16 * 1024 * 1024)))
+            .await
+            .expect("the audio is accepted");
+        let served = store.serve(&hash).expect("served");
+        assert_eq!(
+            served.bytes, tone,
+            "the audio is never lost to its metadata"
+        );
+        assert_eq!(served.media_type, None);
+        assert!(
+            !dir.join(format!("{hash}.json")).exists(),
+            "no sidecar the loader would ignore is written"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_normal_declared_media_type_survives_a_reopen() {
+        let dir = temp_dir("media-type-round-trip");
+        let (mut store, _report) = AudioStore::with_directory(&dir, 1024 * 1024).expect("store");
+        let tone = crate::wav::generate(8, crate::wav::Sound::Tone);
+        let hash = store
+            .accept(tone, Some("audio/wav".into()))
+            .await
+            .expect("accepted");
+        drop(store);
+
+        let (reopened, report) = AudioStore::with_directory(&dir, 1024 * 1024).expect("reopened");
+        assert_eq!(report.loaded, 1);
+        assert_eq!(
+            reopened.serve(&hash).expect("served").media_type.as_deref(),
+            Some("audio/wav"),
+            "the bound must not cost a legitimate media type"
         );
     }
 
