@@ -10,8 +10,8 @@ content-addressed, so `--dir` persists every accepted sound under its BLAKE3 and
 back. The daemon publishes a small seeded set of generated sounds, accepts audio, and serves it back
 with the BLAKE3 of the bytes.
 
-`cargo test -p oag-listend` runs 80 unit and 79 end-to-end tests, all green, in debug and
-release (`86 unit and 83 end-to-end` with `--features reticulum`). End to end they cover:
+`cargo test -p oag-listend` runs 80 unit and 80 end-to-end tests, all green, in debug and
+release (`86 unit and 84 end-to-end` with `--features reticulum`). End to end they cover:
 
 - the native back-and-forth: publish, fetch, verify, reject non-audio, not-found, and frames written
   together in one write answered in order;
@@ -117,7 +117,15 @@ arrives is rejected before it is stored -- not parsed, not forwarded, not logged
 This is enforced at the audio surface, not per carrier, so a new carrier cannot forget it: every
 inbound path goes through `AudioStore::accept`, which admits bytes only if they carry a
 recognised audio signature. The check is on the bytes, never on a declared content type, because a
-declared type is a claim and the bytes are the evidence. For ISO BMFF the whole `ftyp` brand list
+declared type is a claim and the bytes are the evidence.
+
+**Known edge, recorded rather than discovered later.** The sniff reads signatures, not completeness:
+a file carrying only a container header -- `RIFF....WAVE` and nothing else -- is accepted, because
+that is what "carries the signature" means and a structural parse is deliberately not this daemon's
+job ("a full parse is a decoder's job"). Rejecting truncated containers would be a real
+improvement, but it risks refusing a file a real player accepts, and refusing audio violates the
+first requirement, so it is not done here. The enumerated refusals -- HTML, JSON, an empty body,
+an MP4 video brand -- are all enforced. For ISO BMFF the whole `ftyp` brand list
 is read, so a generic `isom`/`mp42` video is rejected while an M4A that carries `isom` as its major
 brand and `M4A ` as a compatible brand is accepted. For Ogg, the beginning-of-stream page's codec
 header is read, so Vorbis/Opus/FLAC pass and Theora (video) does not. A carrier may *additionally* reject

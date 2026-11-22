@@ -757,6 +757,48 @@ fn check_loads_the_store_and_reports_what_it_holds() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `--check` must not change the directory. It is the operator's safe command -- scripts call it
+/// precisely because they expect it to leave the store alone -- so a bound that would evict is
+/// reported, not applied. This pins `main`'s choice of `check_directory`, which the library-level
+/// test cannot see.
+#[test]
+fn check_reports_what_the_bound_would_evict_without_unlinking_it() {
+    let dir = temp_dir("check-readonly");
+    std::fs::create_dir_all(&dir).expect("make the store directory");
+    // Three 52-byte tones, bound 100: each new one pushes the oldest out.
+    let mut hashes = Vec::new();
+    for seed in 0..3u64 {
+        let tone = oag_listend::wav::generate_n(seed, oag_listend::wav::Sound::Tone, 4);
+        hashes.push(oag_listend::AudioItem::new(tone.clone(), None).content_hash);
+        std::fs::write(dir.join(hashes.last().expect("a hash")), &tone).expect("write audio");
+    }
+
+    let output = std::process::Command::new(binary())
+        .arg("--check")
+        .arg("--dir")
+        .arg(&dir)
+        .arg("--max-bytes")
+        .arg("100")
+        .output()
+        .expect("run --check");
+    assert!(
+        output.status.success(),
+        "--check must succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("loaded 1"), "one fits: {stdout}");
+    assert!(
+        stdout.contains("evicted 2"),
+        "the rest are reported, not silently held: {stdout}"
+    );
+    for hash in &hashes {
+        assert!(dir.join(hash).exists(), "a check must not unlink {hash}");
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Turn the real binary on, exchange audio with it over TCP, then stop it. The daemon announces its
 /// bound address on stdout, and the test waits for that line instead of sleeping.
 #[tokio::test]

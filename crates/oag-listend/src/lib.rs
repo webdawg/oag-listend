@@ -133,9 +133,9 @@ pub struct LoadReport {
     /// Entries not read, or read and rejected: a name that is not the BLAKE3 of the bytes, bytes
     /// that do not sniff as audio, or a file larger than the store bound.
     pub skipped: usize,
-    /// Entries read and accepted but pushed out by the byte bound while later entries loaded.
-    /// A read-only check ([`AudioStore::check_directory`]) reports them the same way but leaves
-    /// their files alone.
+    /// Entries read and accepted but pushed out by a bound -- the byte bound or the entry cap --
+    /// while later entries loaded. A read-only check ([`AudioStore::check_directory`]) reports them
+    /// the same way but leaves their files alone.
     pub evicted: usize,
     /// The directory held more entries than the load will consider. Nothing is deleted or changed
     /// by this; the operator is told instead of the load silently ignoring the rest.
@@ -855,21 +855,24 @@ impl AudioStore {
         // items cost 4 MB. The entry cap is the same one a directory load honours, so a start and a
         // lifetime of publishes agree.
         while self.bytes_held > self.max_bytes || self.items.len() > MAX_STORE_ENTRIES {
-            self.evict_oldest();
+            if !self.evict_oldest() {
+                break;
+            }
         }
         hash
     }
 
-    /// Drop the oldest item, if there is one. Both bounds call this, so the accounting lives in one
-    /// place.
-    fn evict_oldest(&mut self) {
+    /// Drop the oldest item. Both bounds call this, so the accounting lives in one place. Returns
+    /// whether there was one, so the eviction loop above cannot spin on an inconsistent store.
+    fn evict_oldest(&mut self) -> bool {
         let Some(oldest) = self.order.pop_front() else {
-            return;
+            return false;
         };
         if let Some(evicted) = self.items.remove(&oldest) {
             self.bytes_held -= evicted.footprint();
             self.forget(&oldest);
         }
+        true
     }
 
     /// Serves an item by content hash. This is the one operation every carrier wraps.
