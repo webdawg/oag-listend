@@ -10,8 +10,8 @@ content-addressed, so `--dir` persists every accepted sound under its BLAKE3 and
 back. The daemon publishes a small seeded set of generated sounds, accepts audio, and serves it back
 with the BLAKE3 of the bytes.
 
-`cargo test -p oag-listend` runs 80 unit and 80 end-to-end tests, all green, in debug and
-release (`86 unit and 84 end-to-end` with `--features reticulum`). End to end they cover:
+`cargo test -p oag-listend` runs 81 unit and 81 end-to-end tests, all green, in debug and
+release (`87 unit and 85 end-to-end` with `--features reticulum`). End to end they cover:
 
 - the native back-and-forth: publish, fetch, verify, reject non-audio, not-found, and frames written
   together in one write answered in order;
@@ -425,7 +425,10 @@ persisted, and written into `X-IPFS-CID` and `ETag` on every later fetch -- a he
 Refusing it records a mirror failure, which costs nothing: the audio is already durable locally. A
 `https://` address is refused: speaking plain HTTP to a TLS port would look configured while sending
 audio in clear. Chunked replies are decoded by both halves, because Kubo answers `POST /api/v0/add`
-with `Transfer-Encoding: chunked` and refusing it made the whole write half fail. **Validated against
+with `Transfer-Encoding: chunked` and refusing it made the whole write half fail. Every step of that
+decode is bounds-checked and uses checked arithmetic: a chunk size near `usize::MAX` would otherwise
+wrap `pos + size` and `out.len() + size` to small numbers, satisfy both bounds checks, and panic on
+the slice -- and the mirror is cleartext HTTP, so that reply comes from the network. **Validated against
 a real Kubo node** (0.43.1): a published item is added and pinned, `POST /api/v0/cat` returns exactly
 the bytes, `GET /ipfs/{cid}` serves them byte-identically with `X-IPFS-CID` and an ETag of the content
 hash, a non-audio object fetched by CID is refused, a CID the daemon does **not** hold is fetched

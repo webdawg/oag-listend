@@ -154,6 +154,38 @@ async fn mirror_fails() {
     }
 }
 
+/// A chunk size near `usize::MAX` must be refused as bad framing, not panic the process. The
+/// pre-fix parser wrapped both sums, passed both bounds checks, and panicked on the slice; the
+/// mirror is cleartext HTTP, so that reply comes from the network.
+#[tokio::test]
+async fn a_hostile_chunk_size_is_a_recorded_failure_not_a_crash() {
+    tokio::time::timeout(BOUND, hostile_chunk_size())
+        .await
+        .expect("the hostile reply exchange must complete within the bound")
+}
+
+async fn hostile_chunk_size() {
+    // A chunked 200 whose second chunk declares usize::MAX - 5, after ten real bytes: both
+    // `pos + size` and `out.len() + size` wrap, so both bounds checks would pass.
+    let mut reply = String::from("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n");
+    reply.push_str("a\r\naaaaaaaaaa\r\n");
+    reply.push_str(&format!("{:x}\r\n", usize::MAX - 5));
+    reply.push_str("xx\r\n0\r\n\r\n");
+    let (addr, _seen) = stub(reply, 1).await;
+
+    let store = Arc::new(TokioMutex::new(AudioStore::default()));
+    store.lock().await.set_ipfs(Some(IpfsPublisher::new(addr)));
+    let tone = wav::generate(8, wav::Sound::Tone);
+    let hash = accept(&store, tone, None).await;
+    assert_eq!(store.lock().await.len(), 1, "the audio is still stored");
+    assert!(store.lock().await.serve(&hash).is_ok(), "and still served");
+    assert_eq!(
+        store.lock().await.mirror_summary(),
+        (0, 1),
+        "the hostile reply is a recorded mirror failure, not a crash"
+    );
+}
+
 /// An unreachable API behaves the same way: reported, never fatal.
 #[tokio::test]
 async fn an_unreachable_api_is_reported_not_fatal() {

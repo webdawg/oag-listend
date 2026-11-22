@@ -89,11 +89,15 @@ fn decode_chunked(body: &[u8], max: usize) -> Result<Vec<u8>, IpfsError> {
         if size == 0 {
             break;
         }
-        if pos + size > body.len() || out.len() + size > max {
+        // Checked arithmetic, not `+`. A chunk size near `usize::MAX` makes both sums wrap: they
+        // then satisfy both bounds checks, and `&body[pos..pos + size]` panics because its end is
+        // below its start. The mirror is cleartext HTTP, so this reply comes from the network.
+        let end = pos.checked_add(size).ok_or(IpfsError::ChunkedFraming)?;
+        if end > body.len() || out.len().saturating_add(size) > max {
             return Err(IpfsError::ChunkedFraming);
         }
-        out.extend_from_slice(&body[pos..pos + size]);
-        pos += size;
+        out.extend_from_slice(&body[pos..end]);
+        pos = end;
         if !body[pos..].starts_with(b"\r\n") {
             return Err(IpfsError::ChunkedFraming);
         }
@@ -499,6 +503,21 @@ mod tests {
             decode_chunked(b"zz\r\nhello\r\n0\r\n\r\n", 1024),
             Err(IpfsError::ChunkedFraming)
         ));
+    }
+
+    /// A chunk size near the width of a `usize` must be refused, not wrapped. With ten bytes
+    /// already decoded and a size of `usize::MAX - 5`, both `pos + size` and `out.len() + size`
+    /// wrap to small numbers, so both bounds checks pass and the slice below would panic. A
+    /// hostile or compromised node (the mirror is cleartext HTTP) sends exactly this shape.
+    #[test]
+    fn a_chunk_size_that_would_overflow_usize_is_refused() {
+        let mut body = b"a\r\naaaaaaaaaa\r\n".to_vec();
+        body.extend_from_slice(format!("{:x}\r\n", usize::MAX - 5).as_bytes());
+        body.extend_from_slice(b"xx\r\n0\r\n\r\n");
+        assert!(
+            matches!(decode_chunked(&body, 1024), Err(IpfsError::ChunkedFraming)),
+            "a size that overflows usize must be refused, not wrapped"
+        );
     }
 
     /// An implausible identifier is refused before it can reach a request line, so a crafted path
