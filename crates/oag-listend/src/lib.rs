@@ -132,6 +132,8 @@ pub struct LoadReport {
     /// that do not sniff as audio, or a file larger than the store bound.
     pub skipped: usize,
     /// Entries read and accepted but pushed out by the byte bound while later entries loaded.
+    /// A read-only check ([`AudioStore::check_directory`]) reports them the same way but leaves
+    /// their files alone.
     pub evicted: usize,
     /// The directory held more entries than the load will consider. Nothing is deleted or changed
     /// by this; the operator is told instead of the load silently ignoring the rest.
@@ -455,17 +457,45 @@ impl AudioStore {
         dir: impl Into<PathBuf>,
         max_bytes: usize,
     ) -> std::io::Result<(Self, LoadReport)> {
-        Self::load_dir(dir, max_bytes, MAX_LOAD_ENTRIES)
+        Self::load_dir_impl(dir, max_bytes, MAX_LOAD_ENTRIES, false)
     }
 
-    /// See [`Self::with_directory`].
+    /// Open a store directory and report on it **without changing it**. `--check` uses this.
+    ///
+    /// A verification that unlinks an operator's audio because it happens to exceed
+    /// `--max-bytes` is not a verification: `with_directory` prunes on load, which is right for a
+    /// daemon starting up and destructive for a command whose whole purpose is to look. In this
+    /// mode entries over the bound are reported as `evicted` but their files are left alone, and a
+    /// missing directory is an error rather than something to create.
+    pub fn check_directory(
+        dir: impl Into<PathBuf>,
+        max_bytes: usize,
+    ) -> std::io::Result<(Self, LoadReport)> {
+        Self::load_dir_impl(dir, max_bytes, MAX_LOAD_ENTRIES, true)
+    }
+
+    /// See [`Self::with_directory`]. Only the tests use this directly, to vary the entry cap.
+    #[cfg(test)]
     fn load_dir(
         dir: impl Into<PathBuf>,
         max_bytes: usize,
         max_entries: usize,
     ) -> std::io::Result<(Self, LoadReport)> {
+        Self::load_dir_impl(dir, max_bytes, max_entries, false)
+    }
+
+    fn load_dir_impl(
+        dir: impl Into<PathBuf>,
+        max_bytes: usize,
+        max_entries: usize,
+        read_only: bool,
+    ) -> std::io::Result<(Self, LoadReport)> {
         let dir = dir.into();
-        std::fs::create_dir_all(&dir)?;
+        // A check must not create the directory it is checking: creating it would hide a typo in
+        // the operator's `--dir` and leave an empty directory behind as a side effect.
+        if !read_only {
+            std::fs::create_dir_all(&dir)?;
+        }
         let mut store = Self {
             items: HashMap::new(),
             order: Default::default(),
@@ -556,9 +586,13 @@ impl AudioStore {
             inserted += 1;
         }
 
-        // Startup has no lock to protect, so the evicted files are unlinked inline.
-        for path in std::mem::take(&mut store.evicted) {
-            let _ = std::fs::remove_file(path);
+        // Startup has no lock to protect, so the evicted files are unlinked inline. A read-only
+        // check reports them instead: it must leave the operator's directory exactly as it found
+        // it.
+        if !read_only {
+            for path in std::mem::take(&mut store.evicted) {
+                let _ = std::fs::remove_file(path);
+            }
         }
 
         report.evicted = inserted - store.len();
@@ -1567,6 +1601,69 @@ mod tests {
             "an oversized CID sidecar is ignored"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn write_named(dir: &Path, bytes: &[u8]) -> String {
+        let hash = blake3::hash(bytes).to_hex().to_string();
+        std::fs::write(dir.join(&hash), bytes).unwrap();
+        hash
+    }
+
+    /// A check is a look, not a pruning. `with_directory` unlinks what the bound pushes out (right
+    /// for a daemon starting up); `--check` must leave the operator's directory exactly as it found
+    /// it, and report what it would have pushed out instead.
+    #[test]
+    fn a_check_does_not_delete_what_the_bound_would_evict() {
+        let dir = temp_dir("check-readonly");
+        let wavs: Vec<Vec<u8>> = (0..3)
+            .map(|seed| wav::generate_n(seed, wav::Sound::Tone, 4))
+            .collect();
+        let hashes: Vec<String> = wavs.iter().map(|w| write_named(&dir, w)).collect();
+        // Three 52-byte items, bound 100: each new one pushes the oldest out.
+        let bound = 100;
+
+        let (checked, report) = AudioStore::check_directory(&dir, bound).unwrap();
+        assert_eq!(checked.len(), 1);
+        assert_eq!(report.loaded, 1);
+        assert_eq!(
+            report.evicted, 2,
+            "what the bound would push out is reported"
+        );
+        for hash in &hashes {
+            assert!(dir.join(hash).exists(), "a check must not unlink {hash}");
+        }
+
+        // The same directory opened for a real start does prune, which is the behaviour the
+        // check must not have.
+        let (opened, _) = AudioStore::with_directory(&dir, bound).unwrap();
+        assert_eq!(opened.len(), 1);
+        let survivors = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_none())
+            .count();
+        assert_eq!(survivors, 1, "a start prunes, a check does not");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A check must not create the directory it is checking: creating it would hide a typo in the
+    /// operator's `--dir` and leave an empty directory behind as a side effect.
+    #[test]
+    fn a_check_does_not_create_a_missing_directory() {
+        let dir = std::env::temp_dir().join(format!(
+            "oag-listend-missing-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let result = AudioStore::check_directory(&dir, 1024);
+        assert!(
+            result.is_err(),
+            "checking a directory that does not exist must say so, not report an empty store"
+        );
+        assert!(!dir.exists(), "a check must not create the directory");
     }
 
     #[test]

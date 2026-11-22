@@ -10,8 +10,8 @@ content-addressed, so `--dir` persists every accepted sound under its BLAKE3 and
 back. The daemon publishes a small seeded set of generated sounds, accepts audio, and serves it back
 with the BLAKE3 of the bytes.
 
-`cargo test -p oag-listend` runs 77 unit and 77 end-to-end tests, all green, in debug and
-release (`83 unit and 81 end-to-end` with `--features reticulum`). End to end they cover:
+`cargo test -p oag-listend` runs 79 unit and 77 end-to-end tests, all green, in debug and
+release (`85 unit and 81 end-to-end` with `--features reticulum`). End to end they cover:
 
 - the native back-and-forth: publish, fetch, verify, reject non-audio, not-found, and frames written
   together in one write answered in order;
@@ -215,8 +215,11 @@ job; a long recording belongs on TCP or HTTP.
 
 ## Persistence
 
-`--check` is purely a store verification: it does not serve and does not contact IPFS, so operators
-and scripts can call it for a quick answer even when a mirror is configured.
+`--check` is purely a store verification: it does not serve, does not contact IPFS, and **does not
+change the directory**. Entries over `--max-bytes` are reported as `evicted`, but their files are
+left alone -- a verification that unlinked an operator's audio because it exceeded the bound is not
+a verification. A missing directory is an error rather than something to create. (A real start
+does prune on load, which is the behaviour `--check` deliberately does not have.)
 
 `--dir PATH` makes the store content-addressed: `<PATH>/<hash>` is the audio, `<PATH>/<hash>.json`
 is the declared media type, and `<PATH>/<hash>.cid` is the IPFS CID once the item has been

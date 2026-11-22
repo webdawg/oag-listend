@@ -240,11 +240,17 @@ async fn main() {
     };
     let mut store = match &args.dir {
         Some(dir) => {
-            let (store, report) =
-                AudioStore::with_directory(dir, args.max_bytes).unwrap_or_else(|e| {
-                    complain!("oag-listend: cannot open store {dir}: {e}");
-                    std::process::exit(1);
-                });
+            // `--check` opens the store without changing it. A verification that unlinks an
+            // operator's audio because it exceeds `--max-bytes` is not a verification.
+            let opened = if args.check {
+                AudioStore::check_directory(dir, args.max_bytes)
+            } else {
+                AudioStore::with_directory(dir, args.max_bytes)
+            };
+            let (store, report) = opened.unwrap_or_else(|e| {
+                complain!("oag-listend: cannot open store {dir}: {e}");
+                std::process::exit(1);
+            });
             say!(
                 "store {dir}: loaded {} skipped {} evicted {}{}",
                 report.loaded,
