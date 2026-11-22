@@ -51,6 +51,13 @@ afterwards;
 denied, rustdoc with warnings denied, examples built, the test suite, and `systemd-analyze verify`
 on the shipped unit. The audio rules have not moved.
 
+CI's `check-service` job installs that unit and starts it, then fetches the musical ping and the
+index over HTTP **and** runs the shipped `push_pull` client against the running service over both
+the TCP and UDP carriers, so the acceptance test -- a second process pushes audio in and pulls it
+back, and both sides prove the bytes -- is exercised against the installed binary under systemd,
+not only against a test harness. The Unix socket is not probed there: the unit runs as `oag` and
+the socket is mode 0755, so a non-root client cannot connect; `unix_carrier.rs` covers it.
+
 ## The idea, recorded verbatim
 
 > this is the global daemon that serves all audio information to all networks

@@ -99,8 +99,10 @@ jobs:
       - name: Add the components the gate needs
         run: rustup component add rustfmt clippy
 
-      - name: Build the release binary
-        run: cargo build --release -p oag-listend
+      - name: Build the release binary and the operator client
+        run: |
+          cargo build --release -p oag-listend
+          cargo build --release -p oag-listend --example push_pull
 
       - name: Install and start the shipped unit
         run: |
@@ -125,6 +127,26 @@ jobs:
             exit 1
           fi
           curl -fsS -o /dev/null http://127.0.0.1:7101/
+
+      # The acceptance test, run by a second process against the unit as it ships: push audio
+      # in, pull it back, and prove the bytes are the bytes. The step above proves HTTP serves;
+      # this proves the frame protocol the daemon exists for, over both a stream and a datagram,
+      # on the installed binary under systemd rather than on a test harness. `push_pull` exits
+      # non-zero when a fetch does not verify, so a silent mismatch fails the job.
+      # The Unix socket is deliberately not probed here: it is owned by the unit's `oag` user
+      # with mode 0755, so a non-root client cannot connect, and the carrier is covered by
+      # `unix_carrier.rs` instead.
+      - name: A second process pushes and pulls audio through the service
+        run: |
+          client="$PWD/target/release/examples/push_pull"
+          for args in "--addr 127.0.0.1:7100" "--udp --addr 127.0.0.1:7120"; do
+            echo "== push_pull $args"
+            if ! $client $args; then
+              systemctl status oag-listend --no-pager -l || true
+              journalctl -u oag-listend --no-pager -n 40 || true
+              exit 1
+            fi
+          done
 
       - name: Stop the unit
         if: always()
