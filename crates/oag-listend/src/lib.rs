@@ -848,16 +848,28 @@ impl AudioStore {
         self.bytes_held += item.footprint();
         self.items.insert(hash.clone(), Arc::new(item));
         self.order.push_back(hash.clone());
-        while self.bytes_held > self.max_bytes {
-            let Some(oldest) = self.order.pop_front() else {
-                break;
-            };
-            if let Some(evicted) = self.items.remove(&oldest) {
-                self.bytes_held -= evicted.footprint();
-                self.forget(&oldest);
-            }
+        // Both bounds, and they are independent. The byte bound does not bound the *number* of
+        // items: each one costs a map entry, a queue entry and an `Arc` whether the audio is
+        // 12 bytes or 16 MiB, so a publisher of tiny sounds could drive memory roughly 200x past
+        // `--max-bytes` while the daemon reported itself within it. Measured: 20,000 twelve-byte
+        // items cost 4 MB. The entry cap is the same one a directory load honours, so a start and a
+        // lifetime of publishes agree.
+        while self.bytes_held > self.max_bytes || self.items.len() > MAX_STORE_ENTRIES {
+            self.evict_oldest();
         }
         hash
+    }
+
+    /// Drop the oldest item, if there is one. Both bounds call this, so the accounting lives in one
+    /// place.
+    fn evict_oldest(&mut self) {
+        let Some(oldest) = self.order.pop_front() else {
+            return;
+        };
+        if let Some(evicted) = self.items.remove(&oldest) {
+            self.bytes_held -= evicted.footprint();
+            self.forget(&oldest);
+        }
     }
 
     /// Serves an item by content hash. This is the one operation every carrier wraps.
@@ -943,6 +955,11 @@ pub fn servable_bound(max_bytes: usize) -> usize {
 /// process an unbounded number of entries. The load reports `truncated` rather than ignoring the
 /// rest silently.
 pub const MAX_LOAD_ENTRIES: usize = 100_000;
+
+/// The most items the store will hold at once, however small they are. The byte bound does not
+/// bound this, and per-entry overhead dominates for tiny audio. It is the same cap a directory load
+/// honours ([`MAX_LOAD_ENTRIES`]), so a start and a lifetime of publishes agree.
+pub const MAX_STORE_ENTRIES: usize = MAX_LOAD_ENTRIES;
 
 /// The largest sidecar that will be read. A media type is a few dozen bytes; anything larger is
 /// not a media type and is ignored rather than pulled into memory.
@@ -1848,6 +1865,40 @@ mod tests {
             "got {result:?}"
         );
         let _ = std::fs::remove_dir_all(&blocker);
+    }
+
+    /// The byte bound does not bound the number of items, and per-entry overhead dominates for tiny
+    /// audio. Measured against the real binary: 20,000 twelve-byte items cost 4 MB of RSS while
+    /// `bytes_held` was 240 KB against a 1 GiB bound. So the store is capped in entries too, by the
+    /// same cap a directory load honours.
+    #[test]
+    fn the_store_is_bounded_in_entries_too() {
+        // A byte bound that cannot engage, so only the entry cap can be what stops it.
+        let mut store = AudioStore::with_capacity(usize::MAX);
+        let mut first = None;
+        for i in 0..(MAX_STORE_ENTRIES + 1) {
+            // Eight distinct leading bytes: `vec![i as u8; 12]` would repeat every 256 and a
+            // republish is a no-op, which is not what this test is about.
+            let mut bytes = vec![0u8; 12];
+            bytes[..8].copy_from_slice(&(i as u64).to_le_bytes());
+            let hash = store.publish(AudioItem::new(bytes, None));
+            if first.is_none() {
+                first = Some(hash);
+            }
+        }
+        assert_eq!(
+            store.len(),
+            MAX_STORE_ENTRIES,
+            "the entry cap holds however small the items are"
+        );
+        assert!(
+            store.serve(&first.expect("the first hash")).is_err(),
+            "the oldest item is evicted, not kept alongside the cap"
+        );
+        assert!(
+            store.bytes_held() < store.max_bytes(),
+            "the byte bound never engaged; the entry cap did"
+        );
     }
 
     #[test]

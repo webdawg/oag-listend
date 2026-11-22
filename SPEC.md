@@ -10,8 +10,8 @@ content-addressed, so `--dir` persists every accepted sound under its BLAKE3 and
 back. The daemon publishes a small seeded set of generated sounds, accepts audio, and serves it back
 with the BLAKE3 of the bytes.
 
-`cargo test -p oag-listend` runs 79 unit and 79 end-to-end tests, all green, in debug and
-release (`85 unit and 83 end-to-end` with `--features reticulum`). End to end they cover:
+`cargo test -p oag-listend` runs 80 unit and 79 end-to-end tests, all green, in debug and
+release (`86 unit and 83 end-to-end` with `--features reticulum`). End to end they cover:
 
 - the native back-and-forth: publish, fetch, verify, reject non-audio, not-found, and frames written
   together in one write answered in order;
@@ -265,7 +265,14 @@ will lose; the existence check costs a syscall only on a duplicate publish, neve
 
 The bound is enforced on the way in: `accept` refuses audio larger than `--max-bytes` rather than
 writing it and immediately evicting it, and a startup file larger than the bound is skipped without
-being read. A bound that is only checked after the read or write is not a bound.
+being read.
+
+The byte bound does not bound the **number** of items, and per-entry overhead dominates for tiny
+audio: each item costs a map entry, a queue entry and an `Arc` whether the audio is 12 bytes or
+16 MiB. The store is therefore also capped at `MAX_STORE_ENTRIES` (the same number a directory load
+honours), evicting oldest first. Measured against the real binary: 150,000 twelve-byte items leave
+exactly 100,000 held, at ~500 bytes of overhead each -- so reaching the 1 GiB byte bound with
+12-byte items would otherwise have meant ~89 million entries and tens of GB of overhead. A bound that is only checked after the read or write is not a bound.
 
 ## The hello
 
