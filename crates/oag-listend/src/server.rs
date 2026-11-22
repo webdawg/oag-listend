@@ -29,6 +29,26 @@ pub const MAX_CONNECTIONS: usize = 64;
 /// session cap. A session idle or slow past this is closed. Generous, because a legitimate client
 /// may keep a connection for occasional fetches; still finite.
 pub const SESSION_TIMEOUT: Duration = Duration::from_secs(1800);
+/// Raises an active-session counter when created and lowers it when dropped -- including during a
+/// panic's unwind. Every carrier counts its sessions this way so a stop can wait for them, and a
+/// hand-written `fetch_sub` after the await is skipped by a panic: the counter stays permanently
+/// raised and every later shutdown waits the whole grace period for a session that no longer
+/// exists. A reachable panic makes that more than theoretical.
+pub(crate) struct ActiveGuard(Arc<AtomicUsize>);
+
+impl ActiveGuard {
+    pub(crate) fn raise(counter: &Arc<AtomicUsize>) -> Self {
+        counter.fetch_add(1, Ordering::SeqCst);
+        Self(Arc::clone(counter))
+    }
+}
+
+impl Drop for ActiveGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 /// How many seeded sounds a fresh daemon publishes at startup: one of each kind -- silence, tone,
 /// noise. The canonical ping is appended separately.
 pub const STARTUP_SOUNDS: usize = 3;
@@ -186,9 +206,8 @@ impl ListendServer {
                     let max_frame = self.max_frame;
                     tokio::spawn(async move {
                         let _permit = permit;
-                        active.fetch_add(1, Ordering::SeqCst);
+                        let _active = ActiveGuard::raise(&active);
                         let _ = serve_session(stream, store, read_timeout, write_timeout, max_frame).await;
-                        active.fetch_sub(1, Ordering::SeqCst);
                     });
                 }
             }
@@ -451,6 +470,25 @@ fn timeout_error(kind: &str) -> std::io::Error {
 mod tests {
     use super::*;
     use crate::AudioItem;
+
+    /// A session that panics must still release its slot. Every carrier counts sessions so a stop
+    /// can wait for them; a hand-written decrement after the await is skipped by a panic's unwind,
+    /// which leaves the counter raised forever and makes every later shutdown wait the whole grace
+    /// period for a session that no longer exists.
+    #[test]
+    fn a_panicking_session_still_releases_its_slot() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = ActiveGuard::raise(&counter);
+            panic!("a session that dies badly");
+        }));
+        assert!(result.is_err(), "the panic must propagate");
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            0,
+            "the slot is released during the unwind, not only on a clean return"
+        );
+    }
 
     /// The read bound is per syscall, not per transfer: 100 one-byte reads at 10 ms each take
     /// about a second, far longer than the 50 ms bound, and must still succeed.

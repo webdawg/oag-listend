@@ -270,7 +270,7 @@ impl ReticulumCarrier {
         let transport = Arc::clone(&self.transport);
         let active = Arc::clone(&self.active);
         tokio::spawn(async move {
-            active.fetch_add(1, Ordering::SeqCst);
+            let _active = crate::server::ActiveGuard::raise(&active);
             while let Some(body) = receiver.recv().await {
                 let response = match protocol::decode_request(&body) {
                     Ok(request) => handle(request, &store).await,
@@ -280,7 +280,6 @@ impl ReticulumCarrier {
                 };
                 send_frame(&transport, &id, &response).await;
             }
-            active.fetch_sub(1, Ordering::SeqCst);
         });
     }
 }

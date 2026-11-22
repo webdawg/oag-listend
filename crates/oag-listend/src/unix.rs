@@ -108,7 +108,7 @@ impl UnixCarrier {
                     let store = Arc::clone(&self.store);
                     tokio::spawn(async move {
                         let _permit = permit;
-                        active.fetch_add(1, Ordering::SeqCst);
+                        let _active = crate::server::ActiveGuard::raise(&active);
                         // The same session loop as TCP: same protocol, bounds, and inbound rule.
                         let _ = serve_session(
                             stream,
@@ -118,7 +118,6 @@ impl UnixCarrier {
                             crate::protocol::MAX_FRAME_BYTES,
                         )
                         .await;
-                        active.fetch_sub(1, Ordering::SeqCst);
                     });
                 }
             }

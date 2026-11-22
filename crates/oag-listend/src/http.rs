@@ -105,9 +105,8 @@ impl HttpCarrier {
                     let store = Arc::clone(&self.store);
                     tokio::spawn(async move {
                         let _permit = permit;
-                        active.fetch_add(1, Ordering::SeqCst);
+                        let _active = crate::server::ActiveGuard::raise(&active);
                         let _ = serve_connection(stream, store).await;
-                        active.fetch_sub(1, Ordering::SeqCst);
                     });
                 }
             }

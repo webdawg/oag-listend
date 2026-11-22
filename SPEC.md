@@ -10,8 +10,8 @@ content-addressed, so `--dir` persists every accepted sound under its BLAKE3 and
 back. The daemon publishes a small seeded set of generated sounds, accepts audio, and serves it back
 with the BLAKE3 of the bytes.
 
-`cargo test -p oag-listend` runs 81 unit and 82 end-to-end tests, all green, in debug and
-release (`87 unit and 86 end-to-end` with `--features reticulum`). End to end they cover:
+`cargo test -p oag-listend` runs 82 unit and 82 end-to-end tests, all green, in debug and
+release (`88 unit and 86 end-to-end` with `--features reticulum`). End to end they cover:
 
 - the native back-and-forth: publish, fetch, verify, reject non-audio, not-found, and frames written
   together in one write answered in order;
@@ -361,7 +361,10 @@ address the daemon says so, rather than letting an operator discover it later.
 daemon handles SIGINT and SIGTERM, so `systemctl stop` is a clean stop: accepting stops at once, then
 in-flight exchanges are given up to `SHUTDOWN_GRACE` (2 s) to finish rather than being cut off
 mid-transfer, the Unix socket is removed, and the process exits 0. A client that never reads cannot
-hold a stop open past that bound.
+hold a stop open past that bound. Each carrier's session count is a drop guard, so a session that
+panics releases its slot during the unwind; a hand-written decrement after the await is skipped by a
+panic, which would leave every later shutdown waiting the whole grace period for a session that no
+longer exists -- measured at 2.02 s against 0.003 s with the guard.
 
 The daemon's own logging must not be able to kill it. Every line goes through a writer that ignores
 a failed write, because under systemd stdout *is* the journal: an unavailable journal, a full disk,
