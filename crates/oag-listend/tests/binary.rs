@@ -476,6 +476,72 @@ async fn oversized_frame() {
     stand_in.await.expect("join the stand-in daemon");
 }
 
+/// A hostile node at startup must not be able to kill the daemon. The startup mirror pass runs on
+/// the main task, so a panic there exits the process -- measured at exit 101 with the pre-fix
+/// chunked decoder -- while a publish-triggered mirror runs in a session task and only kills that
+/// connection. This pins the severe path: `--ipfs-api` pointing at a node that answers with a chunk
+/// size near `usize::MAX`, against a store that already holds audio.
+#[tokio::test]
+async fn a_hostile_node_at_startup_does_not_kill_the_daemon() {
+    tokio::time::timeout(BOUND, hostile_startup())
+        .await
+        .expect("the startup exchange must complete within the bound")
+}
+
+async fn hostile_startup() {
+    use oag_listend::{wav, AudioStore};
+    // A stand-in node whose every add reply is a chunked 200 with a chunk size near usize::MAX.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind the stand-in node");
+    let api = listener.local_addr().expect("stand-in addr");
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let mut buf = [0u8; 4096];
+            let _ = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut buf)).await;
+            let mut reply = String::from("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n");
+            reply.push_str("a\r\naaaaaaaaaa\r\n");
+            reply.push_str(&format!("{:x}\r\n", usize::MAX - 5));
+            reply.push_str("0\r\n\r\n");
+            let _ = stream.write_all(reply.as_bytes()).await;
+            let _ = stream.shutdown().await;
+        }
+    });
+
+    // A store that already holds audio, so the startup mirror pass has something to offer.
+    let dir = temp_dir("hostile-startup");
+    std::fs::create_dir_all(&dir).expect("make the store directory");
+    {
+        let (mut store, _) = AudioStore::with_directory(&dir, 1024 * 1024).expect("open the store");
+        store
+            .accept(wav::generate(1, wav::Sound::Tone), None)
+            .await
+            .expect("seed one item");
+    }
+
+    let mut child = Daemon(
+        Command::new(binary())
+            .arg("--listen")
+            .arg("127.0.0.1:0")
+            .arg("--dir")
+            .arg(&dir)
+            .arg("--no-generate")
+            .arg("--ipfs-api")
+            .arg(api.to_string())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn the daemon"),
+    );
+    let (announced, _stdout) = announce(&mut child).await;
+    assert_serving(announced_native_addr(&announced)).await;
+    assert!(
+        child.try_wait().expect("poll the daemon").is_none(),
+        "a hostile node must not be able to kill the daemon at startup"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A stop must not cut a client off mid-transfer. The daemon binds its own port and
 /// announces it, so this allocates nothing and cannot race another process for one.
 #[tokio::test]
