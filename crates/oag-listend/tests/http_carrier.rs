@@ -1032,6 +1032,88 @@ async fn store_bound() {
         .expect("run");
 }
 
+/// A WAV of exactly `total` bytes. `wav::generate_n` caps at 40,000 samples, so a fixture at the
+/// frame bound has to be built directly. The container sizes are filled in honestly, as a real file
+/// would have them; the payload need not be samples, because the sniff reads the header.
+fn wav_of_exact_size(total: usize) -> Vec<u8> {
+    let data_len = total - 44;
+    let mut out = Vec::with_capacity(total);
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&((36 + data_len) as u32).to_le_bytes());
+    out.extend_from_slice(b"WAVE");
+    out.extend_from_slice(b"fmt ");
+    out.extend_from_slice(&16u32.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    out.extend_from_slice(&1u16.to_le_bytes()); // mono
+    out.extend_from_slice(&8000u32.to_le_bytes());
+    out.extend_from_slice(&16000u32.to_le_bytes());
+    out.extend_from_slice(&2u16.to_le_bytes());
+    out.extend_from_slice(&16u16.to_le_bytes());
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&(data_len as u32).to_le_bytes());
+    out.resize(total, 0);
+    out
+}
+
+/// A 413 must name the bound that actually refused the item. An item over the frame cap but well
+/// under the store bound used to be reported against `--max-bytes`, which is not what refused it
+/// and leaves a client unable to tell a frame-cap refusal from a store-bound one.
+#[tokio::test]
+async fn a_frame_cap_refusal_names_the_frame_cap() {
+    tokio::time::timeout(BOUND, frame_cap_refusal())
+        .await
+        .expect("within the bound")
+}
+
+async fn frame_cap_refusal() {
+    // The default store bound is 1 GiB, so only the frame cap can refuse this item.
+    let store = Arc::new(Mutex::new(AudioStore::default()));
+    let (carrier, addr) = HttpCarrier::bind_shared("127.0.0.1:0", Arc::clone(&store))
+        .await
+        .expect("bind http");
+    let shutdown = carrier.shutdown_handle();
+    let run = tokio::spawn(async move { carrier.run().await });
+
+    // A WAV exactly at the servable bound, plus one byte: over the cap, under the store bound.
+    let mut wav = wav_of_exact_size(oag_listend::protocol::MAX_SERVABLE_BYTES);
+    assert_eq!(wav.len(), oag_listend::protocol::MAX_SERVABLE_BYTES);
+    wav.push(0);
+
+    let head = format!(
+        "POST /audio HTTP/1.1\r\nHost: x\r\nContent-Type: audio/wav\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        wav.len()
+    );
+    let mut stream = TcpStream::connect(addr).await.expect("connect");
+    stream.write_all(head.as_bytes()).await.expect("write head");
+    stream.write_all(&wav).await.expect("write body");
+    stream.flush().await.expect("flush");
+
+    let mut out = Vec::new();
+    tokio::time::timeout(BOUND, stream.read_to_end(&mut out))
+        .await
+        .expect("read bound")
+        .expect("read");
+    let text = String::from_utf8_lossy(&out);
+    assert!(text.starts_with("HTTP/1.1 413"), "got {text}");
+    let cap = oag_listend::protocol::MAX_SERVABLE_BYTES;
+    assert!(
+        text.contains(&cap.to_string()),
+        "the refusal names the bound that refused it ({cap}): {text}"
+    );
+    assert!(
+        !text.contains(&oag_listend::DEFAULT_MAX_BYTES.to_string()),
+        "it must not be reported against the store bound: {text}"
+    );
+    assert_eq!(store.lock().await.len(), 0, "a refused item is not stored");
+
+    shutdown.shutdown();
+    tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .expect("shutdown bound")
+        .expect("join")
+        .expect("run");
+}
+
 /// Every format the daemon recognises must be served under its own audio content type, whatever the
 /// publisher claimed. A browser decides whether it can play from this header, so a FLAC or an MP3
 /// mislabelled as WAV would silently fail to play.

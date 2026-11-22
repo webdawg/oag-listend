@@ -112,10 +112,12 @@ pub enum ListendError {
     /// worse than one that says so.
     #[error("could not persist the audio: {0}")]
     Persist(String),
-    /// The bytes are audio, but they are larger than the store can hold. Refused rather than
-    /// written and immediately evicted: a bound that is not checked on the way in is not a bound.
+    /// The bytes are audio, but they are larger than a bound the daemon enforces: either the
+    /// store's `--max-bytes`, or the point at which a fetch reply would no longer fit a frame.
+    /// Refused rather than written and immediately evicted: a bound that is not checked on the
+    /// way in is not a bound.
     #[error(
-        "item is {len} bytes (audio plus its declared media type), larger than the {max} byte store bound"
+        "item is {len} bytes (audio plus its declared media type), larger than the {max} byte bound"
     )]
     TooLarge { len: usize, max: usize },
 }

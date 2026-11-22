@@ -756,7 +756,6 @@ async fn route(request: HttpRequest, store: &Arc<Mutex<AudioStore>>) -> HttpResp
             response
         }
         ("POST", "/audio") => {
-            let body_len = request.body.len();
             // Same entry point as every other carrier: accept under the lock, mirror after it.
             match crate::accept_and_mirror(store, request.body, request.content_type).await {
                 Ok(hash) => HttpResponse::text(201, "Created", hash.as_bytes()),
@@ -765,18 +764,14 @@ async fn route(request: HttpRequest, store: &Arc<Mutex<AudioStore>>) -> HttpResp
                     "Bad Request",
                     ListendError::NotAudio.to_string().as_bytes(),
                 ),
-                // Audio, but bigger than the store can hold: the same "too large" answer as an
-                // oversized request body, so a client can react to one status for both.
-                Err(ListendError::TooLarge { .. }) => HttpResponse::text(
-                    413,
-                    "Payload Too Large",
-                    ListendError::TooLarge {
-                        len: body_len,
-                        max: store.lock().await.max_bytes(),
-                    }
-                    .to_string()
-                    .as_bytes(),
-                ),
+                // Audio, but over a bound: the same "too large" answer an oversized request body
+                // gets, so a client can react to one status for both. The body is the error
+                // `accept` actually returned, not one rebuilt here: an item refused by the frame
+                // cap used to be reported against `--max-bytes`, which is not what refused it and
+                // gives a client no way to tell the two apart.
+                Err(e @ ListendError::TooLarge { .. }) => {
+                    HttpResponse::text(413, "Payload Too Large", e.to_string().as_bytes())
+                }
                 Err(e) => HttpResponse::text(400, "Bad Request", e.to_string().as_bytes()),
             }
         }
