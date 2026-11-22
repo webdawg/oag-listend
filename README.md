@@ -112,7 +112,9 @@ All four carriers share one store, and all accept audio and nothing else.
 
 Every entry is re-checked on load (name must be the BLAKE3 of the bytes, bytes must sniff as
 audio), and a write failure refuses the inbound rather than losing it silently. The write is
-asynchronous, so a slow disk delays the answer rather than stalling every carrier. The startup report
+asynchronous, so a slow disk delays the answer rather than blocking the executor thread. The store
+lock is held across the write; measured with the store on a network share, a concurrent fetch still
+answered in 1-3 ms. The startup report
 separates `loaded`, `skipped`, `evicted`, and `truncated`, so a bound that pushed entries out -- or
 a directory with more entries than the load will consider -- is visible rather than counted as held.
 
@@ -122,7 +124,8 @@ being read.
 A single item is also capped by what one frame can carry (`MAX_FRAME_BYTES - 256`), so a store
 bound above the frame cap cannot admit an item that no client could fetch.
 Verified by hand: a 4044-byte WAV against `--max-bytes 100` returned
-`audio is 4044 bytes, larger than the 100 byte store bound`, while a small WAV was accepted.
+`item is 4044 bytes (audio plus its declared media type), larger than the 100 byte bound`, while a
+small WAV was accepted.
 
 The HTTP content type comes from the bytes, not from what the publisher claimed; `Range`, `HEAD`,
 `GET /audio`, and `Expect: 100-continue` are supported, so a browser can stream and seek and a

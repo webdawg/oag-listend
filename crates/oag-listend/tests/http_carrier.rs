@@ -1018,6 +1018,15 @@ async fn store_bound() {
         text.contains("larger than") || text.to_lowercase().contains("too large"),
         "the refusal states why: {text}"
     );
+    // The exact shape, so README's quoted message cannot go stale silently as it once did.
+    assert!(
+        text.contains(&format!("item is {} bytes", tone.len())),
+        "the refusal reports the item it actually refused: {text}"
+    );
+    assert!(
+        text.contains("larger than the 256 byte bound"),
+        "and names the bound that refused it: {text}"
+    );
     assert_eq!(
         store.lock().await.len(),
         0,

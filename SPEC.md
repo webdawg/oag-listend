@@ -232,9 +232,13 @@ does prune on load, which is the behaviour `--check` deliberately does not have.
 `--dir PATH` makes the store content-addressed: `<PATH>/<hash>` is the audio, `<PATH>/<hash>.json`
 is the declared media type, and `<PATH>/<hash>.cid` is the IPFS CID once the item has been
 mirrored. An accepted item is written before it is answerable -- a write failure
-is a refusal, not a silent loss. The write is asynchronous (`tokio::fs`), so a slow disk delays the
-answer instead of stalling every carrier's executor thread. The eviction unlink is asynchronous
-too, and is taken off the lock: a slow disk must not stall every other client's accept.
+is a refusal, not a silent loss. The write is asynchronous (`tokio::fs`), so it does not block the
+executor thread. The store lock is held across it, though, because `accept` runs with the lock
+taken: a write or an eviction unlink that genuinely blocks would hold up every other client's store
+operation. That is a deliberate ordering choice -- the bytes must be durable before the item is
+answerable -- and it has not been observed to stall. Measured against the real binary with its
+store on a network share: a 16 MiB publish, and a stream of 16 MiB publishes with an eviction on
+every one, a concurrent fetch of a small item answered in 1-3 ms.
 
 On startup every entry is re-checked: the name must be the BLAKE3 of the bytes and the bytes must
 still sniff as audio, so a hand-placed file cannot smuggle anything in. The load is reported as
@@ -293,8 +297,10 @@ recognisable rather than a protocol error.
 
 All carriers share one store behind one mutex, so accepts and inserts serialise. The mutex covers
 the lookup and the insert, not the byte copies: `serve` returns an `Arc<AudioItem>`, so a large
-`Fetch` releases the lock before copying the audio, and the persistent write is asynchronous. A
-slow disk or a large item delays the answer that caused it, not every other client.
+`Fetch` releases the lock before copying the audio, and a large item therefore never holds the lock
+during a copy. The durable write and the eviction unlink are awaited inside `accept`, so the lock is
+held across them; they are asynchronous (they do not block the executor), and measured on a network
+share they did not stall a concurrent fetch, but a write that genuinely blocks would.
 
 ## Listing order and pages
 
