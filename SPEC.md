@@ -10,8 +10,8 @@ content-addressed, so `--dir` persists every accepted sound under its BLAKE3 and
 back. The daemon publishes a small seeded set of generated sounds, accepts audio, and serves it back
 with the BLAKE3 of the bytes.
 
-`cargo test -p oag-listend` runs 73 unit and 77 end-to-end tests, all green, in debug and
-release (`79 unit and 81 end-to-end` with `--features reticulum`). End to end they cover:
+`cargo test -p oag-listend` runs 75 unit and 77 end-to-end tests, all green, in debug and
+release (`81 unit and 81 end-to-end` with `--features reticulum`). End to end they cover:
 
 - the native back-and-forth: publish, fetch, verify, reject non-audio, not-found, and frames written
   together in one write answered in order;
@@ -226,6 +226,10 @@ than the `MAX_LOAD_ENTRIES` the load will consider) -- never silent, and never c
 entry as held. Only regular files are read -- a FIFO or device named like a hash would block
 forever, and a directory would error. A sidecar larger than 4 KiB is not a media type and is ignored
 rather than read into memory; a `.cid` sidecar must be a plausible identifier within 128 bytes.
+Both sidecar readers stat first and require a regular file, exactly as the audio reader does: a
+hand-placed FIFO would make `std::fs::read` block forever and hang startup, and a huge file would
+be pulled into memory only to be rejected. The bound is enforced on the way in, not after the
+read.
 The same bound applies on the way out, at `AudioItem::new`: a declared media type larger than
 4 KiB is not kept. Without that, a publisher could send a declared type almost as large as a
 frame -- megabytes -- which would be written to disk and then ignored by every later load, so

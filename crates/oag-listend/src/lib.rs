@@ -897,12 +897,26 @@ async fn persist_cid(dir: Option<&Path>, content_hash: &str, cid: &str) {
     }
 }
 
+/// Read a sidecar only if it is a regular file no larger than `max` bytes.
+///
+/// Stat before reading, for the same reasons the audio path does: a hand-placed FIFO would make
+/// `std::fs::read` block forever and hang startup, and a huge file would be pulled into memory
+/// only to be rejected. Neither is a sidecar, so neither is read -- the bound is enforced on the
+/// way in, not after the read.
+fn read_bounded_regular(path: &Path, max: usize) -> Option<Vec<u8>> {
+    let metadata = std::fs::metadata(path).ok()?;
+    if !metadata.is_file() || metadata.len() as usize > max {
+        return None;
+    }
+    std::fs::read(path).ok()
+}
+
 /// The CID this store recorded for a content hash, if the sidecar is present and plausible. Written
 /// when an item is mirrored, so a restart can skip re-adding what is already on IPFS; the association
 /// is trustworthy because the loader verified the file's name is the BLAKE3 of its bytes.
 fn read_cid_sidecar(dir: &Path, hash: &str) -> Option<String> {
-    let bytes = std::fs::read(dir.join(format!("{hash}.cid"))).ok()?;
-    if bytes.is_empty() || bytes.len() > MAX_CID_SIDECAR_BYTES {
+    let bytes = read_bounded_regular(&dir.join(format!("{hash}.cid")), MAX_CID_SIDECAR_BYTES)?;
+    if bytes.is_empty() {
         return None;
     }
     let cid = String::from_utf8(bytes).ok()?.trim().to_string();
@@ -911,11 +925,7 @@ fn read_cid_sidecar(dir: &Path, hash: &str) -> Option<String> {
 }
 
 fn read_sidecar(dir: &Path, hash: &str) -> Option<String> {
-    let path = dir.join(format!("{hash}.json"));
-    if std::fs::metadata(&path).ok()?.len() as usize > MAX_SIDECAR_BYTES {
-        return None;
-    }
-    let raw = std::fs::read(path).ok()?;
+    let raw = read_bounded_regular(&dir.join(format!("{hash}.json")), MAX_SIDECAR_BYTES)?;
     let text = String::from_utf8(raw).ok()?;
     let text = text.trim();
     if text.is_empty() {
@@ -1458,6 +1468,76 @@ mod tests {
             reopened.serve(&hash).unwrap().media_type,
             None,
             "an oversized sidecar is ignored, not trusted"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A FIFO named like a sidecar must be ignored, not read. Reading one blocks forever, so a
+    /// store directory containing one would hang startup instead of refusing it. This is the same
+    /// class the audio path already guards against; the sidecar readers did not, and the CID
+    /// reader also read before checking its size.
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_sidecar_does_not_hang_the_load() {
+        let dir = temp_dir("fifo-sidecar");
+        // A valid audio entry, so the load reaches the sidecar readers.
+        let item = AudioItem::new(wav::generate(9, wav::Sound::Tone), None);
+        std::fs::write(dir.join(&item.content_hash), &item.bytes).unwrap();
+        for suffix in ["cid", "json"] {
+            let made = std::process::Command::new("mkfifo")
+                .arg(dir.join(format!("{}.{suffix}", item.content_hash)))
+                .status()
+                .and_then(|status| {
+                    status
+                        .success()
+                        .then_some(())
+                        .ok_or(std::io::Error::other("mkfifo failed"))
+                })
+                .is_ok();
+            assert!(made, "mkfifo must be available to exercise this");
+        }
+
+        // The load is blocking, so it runs on a thread: a reader that blocks would otherwise hang
+        // the test rather than fail it.
+        let loaded = dir.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(AudioStore::with_directory(&loaded, 1024 * 1024));
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(Ok((store, report))) => {
+                assert_eq!(report.loaded, 1, "the audio itself still loads");
+                assert_eq!(
+                    store.content_id(&item.content_hash),
+                    None,
+                    "a FIFO is not a CID"
+                );
+                assert_eq!(
+                    store.serve(&item.content_hash).unwrap().media_type,
+                    None,
+                    "a FIFO is not a media type"
+                );
+            }
+            Ok(Err(e)) => panic!("the load failed: {e}"),
+            Err(_) => panic!("a FIFO sidecar hung the load: it was read, not stat'd"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn an_oversized_cid_sidecar_is_ignored() {
+        let dir = temp_dir("cid-sidecar");
+        let (mut store, _) = AudioStore::with_directory(&dir, 1024 * 1024).unwrap();
+        let wav = wav::generate(9, wav::Sound::Tone);
+        let hash = store.accept(wav, None).await.unwrap();
+        // Larger than the CID bound, so it must not be read into memory at all.
+        std::fs::write(dir.join(format!("{hash}.cid")), vec![b'c'; 4096]).unwrap();
+        let (reopened, report) = AudioStore::with_directory(&dir, 1024 * 1024).unwrap();
+        assert_eq!(report.loaded, 1);
+        assert_eq!(
+            reopened.content_id(&hash),
+            None,
+            "an oversized CID sidecar is ignored"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
