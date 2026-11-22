@@ -52,8 +52,11 @@ fn binary() -> &'static str {
     env!("CARGO_BIN_EXE_oag-listend")
 }
 
-/// Reserve a port by binding and dropping it. There is a small race between this and the daemon's
-/// own bind, which is why the serving test fails on the daemon's error output rather than hanging.
+/// Reserve a port by binding and dropping it.
+///
+/// There is a small race between this and the daemon's own bind. Prefer port 0 plus the daemon's
+/// own announcement ([`announced_addr`]) wherever the announcement can be read; this remains only
+/// for the one test whose stdout is `/dev/full`, and that test retries instead.
 fn free_port() -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve a port");
     listener.local_addr().expect("reserved port").port()
@@ -80,20 +83,29 @@ async fn announce(child: &mut tokio::process::Child) -> (Vec<u8>, tokio::process
     let mut chunk = [0u8; 1024];
     let deadline = Instant::now() + BOUND;
     loop {
-        assert!(
-            Instant::now() < deadline,
-            "the daemon never announced its address; output was {}",
-            String::from_utf8_lossy(&announced)
-        );
         if let Some(status) = child.try_wait().expect("poll the daemon") {
             panic!(
                 "the daemon exited before announcing: {status}; output was {}",
                 String::from_utf8_lossy(&announced)
             );
         }
-        let n = tokio::time::timeout(Duration::from_millis(200), stdout.read(&mut chunk))
+        // One read bounded by the deadline, not by a short idle timeout. A legitimate startup can
+        // be silent for a long time -- the startup IPFS mirror is bounded at 30 s -- and a 200 ms
+        // idle timeout here would turn that silence into a failure.
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "the daemon never announced its address; output was {}",
+            String::from_utf8_lossy(&announced)
+        );
+        let n = tokio::time::timeout(remaining, stdout.read(&mut chunk))
             .await
-            .expect("a read within the bound")
+            .unwrap_or_else(|_| {
+                panic!(
+                    "the daemon never announced its address; output was {}",
+                    String::from_utf8_lossy(&announced)
+                )
+            })
             .expect("read stdout");
         if n == 0 {
             // Output ended without the announcement: the daemon died or never started. Returning a
@@ -205,18 +217,17 @@ fn version_and_help_work_and_usage_errors_exit_two() {
 /// each. Drives the real binary three times against one live daemon.
 #[tokio::test]
 async fn the_client_verifies_audio_over_every_transport() {
-    let native_port = free_port();
-    let udp_port = free_port();
     let dir = temp_dir("client-transports");
     std::fs::create_dir_all(&dir).expect("make the runtime directory");
     let sock = dir.join("audio.sock");
 
+    // Port 0: the daemon picks the port and announces it, so no other process can take it first.
     let mut child = Daemon(
         Command::new(binary())
             .arg("--listen")
-            .arg(format!("127.0.0.1:{native_port}"))
+            .arg("127.0.0.1:0")
             .arg("--udp")
-            .arg(format!("127.0.0.1:{udp_port}"))
+            .arg("127.0.0.1:0")
             .arg("--unix")
             .arg(&sock)
             .arg("--no-generate")
@@ -226,7 +237,9 @@ async fn the_client_verifies_audio_over_every_transport() {
             .expect("spawn the daemon"),
     );
     let (announced, _stdout) = announce(&mut child).await;
-    assert_serving(announced_native_addr(&announced)).await;
+    let native = announced_native_addr(&announced);
+    let udp = announced_udp_addr(&announced);
+    assert_serving(native).await;
     // The announce line is printed once the native carrier is up; the other carriers bind around
     // the same time, so wait briefly for the socket rather than racing it.
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -240,12 +253,8 @@ async fn the_client_verifies_audio_over_every_transport() {
     }
 
     let cases = [
-        vec!["--addr".to_string(), format!("127.0.0.1:{native_port}")],
-        vec![
-            "--udp".to_string(),
-            "--addr".to_string(),
-            format!("127.0.0.1:{udp_port}"),
-        ],
+        vec!["--addr".to_string(), native.to_string()],
+        vec!["--udp".to_string(), "--addr".to_string(), udp.to_string()],
         vec!["--unix".to_string(), sock.display().to_string()],
     ];
     for args in cases {
@@ -289,36 +298,24 @@ async fn the_udp_client_reaches_an_ipv6_daemon() {
         eprintln!("skipped: no IPv6 loopback on this host");
         return;
     }
-    let udp_port = {
-        let probe = tokio::net::UdpSocket::bind("[::1]:0")
-            .await
-            .expect("probe bind");
-        probe.local_addr().expect("probe addr").port()
-    };
-    let native_port = free_port();
-
+    // Port 0 on both carriers: the daemon announces the IPv6 address it chose.
     let mut child = Daemon(
         Command::new(binary())
             .arg("--listen")
-            .arg(format!("127.0.0.1:{native_port}"))
+            .arg("127.0.0.1:0")
             .arg("--udp")
-            .arg(format!("[::1]:{udp_port}"))
+            .arg("[::1]:0")
             .arg("--no-generate")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .expect("spawn the daemon"),
     );
-    let (_announced, _stdout) = announce(&mut child).await;
+    let (announced, _stdout) = announce(&mut child).await;
+    let udp = announced_udp_addr(&announced);
 
     let output = std::process::Command::new(push_pull())
-        .args([
-            "--udp",
-            "--addr",
-            &format!("[::1]:{udp_port}"),
-            "--seed",
-            "3",
-        ])
+        .args(["--udp", "--addr", &udp.to_string(), "--seed", "3"])
         .output()
         .expect("run push_pull --udp over IPv6");
     assert!(
@@ -551,15 +548,34 @@ async fn sigint_is_also_a_clean_stop() {
     outcome.expect("the SIGINT exchange must complete within the bound")
 }
 
-/// The native address from the daemon's own announcement.
-fn announced_native_addr(announced: &[u8]) -> std::net::SocketAddr {
+/// The address the daemon announced for a carrier, read from its own output.
+///
+/// Binding an ephemeral port (`127.0.0.1:0`) and reading back what the daemon chose is the only
+/// race-free way to pick one. [`free_port`] reserves a port by binding it and dropping the socket,
+/// which leaves a window in which another process -- another test in this binary, or CI's second
+/// job on the same runner -- takes it; the daemon then exits on a bind failure that the test reads
+/// as "never announced", which is how a loaded run failed twice.
+fn announced_addr(announced: &[u8], prefix: &str) -> std::net::SocketAddr {
     let text = String::from_utf8_lossy(announced);
     let rest = text
-        .split("listening on ")
+        .split(prefix)
         .nth(1)
-        .expect("the daemon announced a native address");
+        .unwrap_or_else(|| panic!("the daemon did not announce {prefix:?}; output was {text}"));
     let end = rest.find('\n').unwrap_or(rest.len());
-    rest[..end].trim().parse().expect("a socket address")
+    rest[..end]
+        .trim()
+        .parse()
+        .unwrap_or_else(|_| panic!("not a socket address: {rest:?}"))
+}
+
+/// The native address from the daemon's own announcement.
+fn announced_native_addr(announced: &[u8]) -> std::net::SocketAddr {
+    announced_addr(announced, "oag-listend listening on ")
+}
+
+/// The UDP address from the daemon's own announcement.
+fn announced_udp_addr(announced: &[u8]) -> std::net::SocketAddr {
+    announced_addr(announced, "oag-listend udp on ")
 }
 
 /// Confirm the daemon is genuinely serving, not merely that it printed a line., not merely that it printed a line.
@@ -706,20 +722,19 @@ async fn the_binary_serves_audio_until_it_is_stopped() {
 }
 
 async fn serve() {
-    let port = free_port();
-    let addr = format!("127.0.0.1:{port}");
     let mut child = Daemon(
         Command::new(binary())
             .arg("--listen")
-            .arg(&addr)
+            .arg("127.0.0.1:0")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .expect("spawn the daemon"),
     );
-    let (_announced, _stdout) = announce(&mut child).await;
+    let (announced, _stdout) = announce(&mut child).await;
+    let addr = announced_native_addr(&announced);
 
-    let mut stream = TcpStream::connect(&addr)
+    let mut stream = TcpStream::connect(addr)
         .await
         .expect("connect to the daemon");
     let hello = protocol::encode_frame(&protocol::encode_request(&Request::Hello));
@@ -778,42 +793,51 @@ async fn an_unwritable_stdout_does_not_stop_the_audio() {
 
 #[cfg(unix)]
 async fn unwritable_stdout() {
-    let port = free_port();
-    let addr = format!("127.0.0.1:{port}");
-    let sink = std::fs::OpenOptions::new()
-        .write(true)
-        .open("/dev/full")
-        .expect("open /dev/full");
-    let mut child = Daemon(
-        Command::new(binary())
-            .arg("--listen")
-            .arg(&addr)
-            .arg("--no-generate")
-            .stdout(Stdio::from(sink))
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("spawn the daemon"),
-    );
-
-    // stdout is unreadable by design here, so wait on the listener rather than the announcement.
-    let mut stream = None;
-    let deadline = Instant::now() + BOUND;
-    while stream.is_none() {
-        assert!(
-            Instant::now() < deadline,
-            "the daemon never came up with an unwritable stdout"
+    // stdout is /dev/full, so the announcement cannot be read and readiness is a connection.
+    //
+    // A port reserved by `free_port` can still be taken in the window before the daemon binds it,
+    // and this test cannot fall back to port 0 because it has no announcement to read. So a start
+    // that dies -- which is what a taken port looks like -- is retried on a fresh port rather than
+    // failing the test.
+    let mut started: Option<(Daemon, TcpStream)> = None;
+    for _ in 0..5 {
+        let addr: std::net::SocketAddr = format!("127.0.0.1:{}", free_port())
+            .parse()
+            .expect("a socket address");
+        let sink = std::fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/full")
+            .expect("open /dev/full");
+        let mut child = Daemon(
+            Command::new(binary())
+                .arg("--listen")
+                .arg(addr.to_string())
+                .arg("--no-generate")
+                .stdout(Stdio::from(sink))
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("spawn the daemon"),
         );
-        assert!(
-            child.try_wait().expect("poll the daemon").is_none(),
-            "the daemon exited because its stdout could not be written"
-        );
-        if let Ok(connected) = TcpStream::connect(&addr).await {
-            stream = Some(connected);
-        } else {
-            tokio::time::sleep(Duration::from_millis(50)).await;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if child.try_wait().expect("poll the daemon").is_some() {
+                break; // exited: a reserved port was almost certainly taken
+            }
+            if let Ok(stream) = TcpStream::connect(addr).await {
+                started = Some((child, stream));
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the daemon never came up with an unwritable stdout"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        if started.is_some() {
+            break;
         }
     }
-    let mut stream = stream.expect("connected");
+    let (mut child, mut stream) = started.expect("the daemon came up on one of the reserved ports");
 
     // The audio must still flow: hello, publish, fetch, verify.
     let tone = oag_listend::wav::generate(2027, oag_listend::wav::Sound::Tone);
@@ -978,12 +1002,10 @@ async fn ipfs_wiring() {
         let _ = stream.shutdown().await;
     });
 
-    let port = free_port();
-    let addr = format!("127.0.0.1:{port}");
     let mut child = Daemon(
         Command::new(binary())
             .arg("--listen")
-            .arg(&addr)
+            .arg("127.0.0.1:0")
             .arg("--no-generate")
             .arg("--ipfs-api")
             .arg(format!("127.0.0.1:{api_port}"))
@@ -995,6 +1017,7 @@ async fn ipfs_wiring() {
     // Kept: `read_to_end` below resumes where this handle was left, so the startup lines are
     // needed separately to assert on them.
     let (announced, mut stdout) = announce(&mut child).await;
+    let addr = announced_native_addr(&announced);
 
     // An operator's publish.
     let mut stream = TcpStream::connect(&addr).await.expect("connect");
