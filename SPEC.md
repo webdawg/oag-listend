@@ -10,8 +10,8 @@ content-addressed, so `--dir` persists every accepted sound under its BLAKE3 and
 back. The daemon publishes a small seeded set of generated sounds, accepts audio, and serves it back
 with the BLAKE3 of the bytes.
 
-`cargo test -p oag-listend` runs 79 unit and 78 end-to-end tests, all green, in debug and
-release (`85 unit and 82 end-to-end` with `--features reticulum`). End to end they cover:
+`cargo test -p oag-listend` runs 79 unit and 79 end-to-end tests, all green, in debug and
+release (`85 unit and 83 end-to-end` with `--features reticulum`). End to end they cover:
 
 - the native back-and-forth: publish, fetch, verify, reject non-audio, not-found, and frames written
   together in one write answered in order;
@@ -415,11 +415,10 @@ object count unchanged.
 
 Of the imagination `Transport` seam, every carrier is now implemented in oag-listend: TCP, UDP,
 HTTP, IPFS, the HTTP CONNECT tunnel (a client-side wrapper, so nothing to build), and Reticulum
-(opt-in). The only remaining work is the one that needs infrastructure this repository does not
-have:
+(opt-in). Both halves of the IPFS mirror are validated against a real Kubo node, and chunked
+replies are decoded because that is what a real node sends. The one remaining item needs
+infrastructure this repository does not have:
 
-- **Test both halves of the IPFS mirror against a real Kubo node** (`/api/v0/add` and
-  `/api/v0/cat`). Add chunked-reply decoding only if it proves necessary.
 - **Test the Reticulum carrier against a real Reticulum transport instance.** It is exercised over
   its own `TcpServer` interface on loopback, which proves the audio surface but not interop with
   another Reticulum implementation.

@@ -359,29 +359,28 @@ fn push_pull() -> std::path::PathBuf {
             root.join("target")
         }
     };
-    let mut path = target.join("debug").join("examples").join("push_pull");
-    if !path.exists() {
-        let release = target.join("release").join("examples").join("push_pull");
-        if release.exists() {
-            path = release;
-        }
+    // Always ask cargo to bring the example up to date, not only when it is missing. `cargo test`
+    // does not rebuild an example whose source changed, so a stale binary would silently test code
+    // that no longer exists -- which is exactly how a test written against the fixed client once
+    // ran against the pre-fix one. A no-op build is a few hundredths of a second.
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let status = std::process::Command::new(cargo)
+        .args(["build", "-p", "oag-listend", "--example", "push_pull"])
+        .status()
+        .expect("run cargo to build the push_pull example");
+    assert!(status.success(), "building the push_pull example failed");
+
+    let debug = target.join("debug").join("examples").join("push_pull");
+    if debug.exists() {
+        return debug;
     }
-    if !path.exists() {
-        // `cargo test` does not build examples, and these tests execute the shipped client. Building
-        // it here keeps `cargo test -p oag-listend` self-sufficient on a clean tree.
-        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-        let status = std::process::Command::new(cargo)
-            .args(["build", "-p", "oag-listend", "--example", "push_pull"])
-            .status()
-            .expect("run cargo to build the push_pull example");
-        assert!(status.success(), "building the push_pull example failed");
-    }
+    let release = target.join("release").join("examples").join("push_pull");
     assert!(
-        path.exists(),
+        release.exists(),
         "the push_pull example must be built to test it: {}",
-        path.display()
+        release.display()
     );
-    path
+    release
 }
 
 #[test]
@@ -430,6 +429,51 @@ async fn the_client_fails_cleanly_against_a_dead_daemon() {
     assert_eq!(output.status.code(), Some(1), "a runtime failure is exit 1");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!stderr.is_empty(), "the failure must say why: {stderr}");
+}
+
+/// A daemon that declares a frame over the cap must not make the client reserve that much. The
+/// client used to allocate `len` bytes from the wire before checking it, so a hostile or broken
+/// daemon could declare `u32::MAX` and make it reserve 4 GiB. The daemon's own reader checks first;
+/// the client must too.
+#[tokio::test]
+async fn the_client_refuses_a_frame_over_the_cap() {
+    tokio::time::timeout(BOUND, oversized_frame())
+        .await
+        .expect("within the bound")
+}
+
+async fn oversized_frame() {
+    // A stand-in daemon that answers the first request with an oversized frame declaration and
+    // then closes. It never reads the request, which is fine -- the client's failure is on the
+    // reply.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind the stand-in daemon");
+    let addr = listener.local_addr().expect("stand-in addr");
+    let stand_in = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept");
+        let declared = (oag_listend::protocol::MAX_FRAME_BYTES + 1) as u32;
+        let _ = stream.write_all(&declared.to_be_bytes()).await;
+        let _ = stream.shutdown().await;
+    });
+
+    // `tokio::process`, not `std::process`: this test's runtime is single-threaded, and a blocking
+    // wait would never let the stand-in task run.
+    let output = tokio::process::Command::new(push_pull())
+        .args(["--addr", &addr.to_string()])
+        .output()
+        .await
+        .expect("run push_pull against the stand-in daemon");
+    assert!(
+        !output.status.success(),
+        "a frame over the cap must be refused, not allocated"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("byte cap"),
+        "the refusal says which rule broke: {stderr}"
+    );
+    stand_in.await.expect("join the stand-in daemon");
 }
 
 /// A stop must not cut a client off mid-transfer. The daemon binds its own port and

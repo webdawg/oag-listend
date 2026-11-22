@@ -120,16 +120,7 @@ async fn round_trip(args: &Args, request: &Request) -> std::io::Result<Response>
         let mut stream = tokio::net::UnixStream::connect(path).await?;
         stream.write_all(&frame).await?;
         stream.flush().await?;
-        let mut prefix = [0u8; 4];
-        tokio::time::timeout(Duration::from_secs(10), stream.read_exact(&mut prefix))
-            .await
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "read timed out"))??;
-        let len = u32::from_be_bytes(prefix) as usize;
-        let mut body = vec![0u8; len];
-        tokio::time::timeout(Duration::from_secs(10), stream.read_exact(&mut body))
-            .await
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "read timed out"))??;
-        return decode_body(&body);
+        return decode_body(&read_frame(&mut stream).await?);
     }
     if args.udp {
         let addr: std::net::SocketAddr = match args.addr.parse() {
@@ -169,17 +160,35 @@ async fn round_trip(args: &Args, request: &Request) -> std::io::Result<Response>
         let mut stream = TcpStream::connect(&args.addr).await?;
         stream.write_all(&frame).await?;
         stream.flush().await?;
-        let mut prefix = [0u8; 4];
-        tokio::time::timeout(Duration::from_secs(10), stream.read_exact(&mut prefix))
-            .await
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "read timed out"))??;
-        let len = u32::from_be_bytes(prefix) as usize;
-        let mut body = vec![0u8; len];
-        tokio::time::timeout(Duration::from_secs(10), stream.read_exact(&mut body))
-            .await
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "read timed out"))??;
-        decode_body(&body)
+        decode_body(&read_frame(&mut stream).await?)
     }
+}
+
+/// Read one length-prefixed frame from a stream.
+///
+/// The declared length is checked **before** the body is allocated, exactly as the daemon's own
+/// reader does. Reading first and allocating afterwards let a hostile or broken daemon declare
+/// `u32::MAX` and make the client reserve 4 GiB.
+async fn read_frame<S: AsyncReadExt + Unpin>(stream: &mut S) -> std::io::Result<Vec<u8>> {
+    let mut prefix = [0u8; 4];
+    tokio::time::timeout(Duration::from_secs(10), stream.read_exact(&mut prefix))
+        .await
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "read timed out"))??;
+    let len = u32::from_be_bytes(prefix) as usize;
+    if len > oag_listend::protocol::MAX_FRAME_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "the daemon declared a {len} byte frame, over the {} byte cap",
+                oag_listend::protocol::MAX_FRAME_BYTES
+            ),
+        ));
+    }
+    let mut body = vec![0u8; len];
+    tokio::time::timeout(Duration::from_secs(10), stream.read_exact(&mut body))
+        .await
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "read timed out"))??;
+    Ok(body)
 }
 
 /// A datagram arrives as a whole frame, prefix included.

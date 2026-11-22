@@ -85,6 +85,9 @@ and `/api/v0/cat`; it has **not** been tested against a real Kubo node. See `SPE
     cargo run -p oag-listend --example push_pull -- --udp --addr 127.0.0.1:7120
     cargo run -p oag-listend --example push_pull -- --unix /tmp/oag-listend.sock
 
+Like the daemon, the client checks a reply's declared frame length before allocating for it, so a
+broken or hostile daemon cannot make it reserve 4 GiB from a single length prefix.
+
 or over HTTP, with any client:
 
     curl -X POST --data-binary @tone.wav http://127.0.0.1:7101/audio   # -> the content hash
@@ -178,8 +181,8 @@ not only against a test harness. The Unix socket is not probed there: it is owne
 
 **Serves, and survives a restart.** Six ways to reach the audio are live and tested: the native
 protocol over TCP, HTTP, UDP, a Unix socket, an IPFS mirror, and -- opt-in -- Reticulum
-(`--features reticulum`). `cargo test -p oag-listend` runs 79 unit tests plus 78 end-to-end;
-`--features reticulum` adds the carrier's own unit and end-to-end tests (167 in total). The store
+(`--features reticulum`). `cargo test -p oag-listend` runs 79 unit tests plus 79 end-to-end;
+`--features reticulum` adds the carrier's own unit and end-to-end tests (168 in total). The store
 mutex covers lookup and insert, not byte copies or disk writes, so one slow client does not stall
 the others. Runs as a systemd service (`scripts/oag-listend.service`) and shuts down cleanly on
 SIGINT and SIGTERM. The native protocol, HTTP, UDP, and the Unix socket share one store, and all
