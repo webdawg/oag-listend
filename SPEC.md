@@ -10,8 +10,8 @@ content-addressed, so `--dir` persists every accepted sound under its BLAKE3 and
 back. The daemon publishes a small seeded set of generated sounds, accepts audio, and serves it back
 with the BLAKE3 of the bytes.
 
-`cargo test -p oag-listend` runs 82 unit and 82 end-to-end tests, all green, in debug and
-release (`88 unit and 86 end-to-end` with `--features reticulum`). End to end they cover:
+`cargo test -p oag-listend` runs 83 unit and 82 end-to-end tests, all green, in debug and
+release (`89 unit and 86 end-to-end` with `--features reticulum`). End to end they cover:
 
 - the native back-and-forth: publish, fetch, verify, reject non-audio, not-found, and frames written
   together in one write answered in order;
@@ -233,7 +233,12 @@ does prune on load, which is the behaviour `--check` deliberately does not have.
 is the declared media type, and `<PATH>/<hash>.cid` is the IPFS CID once the item has been
 mirrored. An accepted item is written before it is answerable -- a write failure
 is a refusal, not a silent loss. The write is asynchronous (`tokio::fs`), so it does not block the
-executor thread. The store lock is held across it, though, because `accept` runs with the lock
+executor thread, and it is bounded by `STORAGE_TIMEOUT` like every other blocking operation: a
+filesystem that stalls -- an SMB share whose server has stopped answering -- would otherwise hold
+the publish open indefinitely, because the write is awaited before the item is answerable. The
+bound turns that into the same typed refusal, and is far above what the largest item needs (16 MiB
+at the measured 9.8 MB/s of the operator's share is about two seconds). The eviction unlink, the
+`.cid` sidecar write and the duplicate-path `stat` are bounded too. The store lock is held across it, though, because `accept` runs with the lock
 taken: a write or an eviction unlink that genuinely blocks would hold up every other client's store
 operation. That is a deliberate ordering choice -- the bytes must be durable before the item is
 answerable -- and it has not been observed to stall. Measured against the real binary with its

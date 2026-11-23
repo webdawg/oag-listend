@@ -649,9 +649,16 @@ impl AudioStore {
                 // would stall the executor. An error is treated as absent, so the restore is
                 // attempted; `persist` recreates a missing directory and fails loudly if it
                 // cannot.
-                let present = tokio::fs::try_exists(dir.join(&existing.content_hash))
-                    .await
-                    .unwrap_or(false);
+                // A stat is a storage operation too. On a timeout the file is treated as absent,
+                // which means the bounded write below simply re-persists it.
+                let present = tokio::time::timeout(
+                    STORAGE_TIMEOUT,
+                    tokio::fs::try_exists(dir.join(&existing.content_hash)),
+                )
+                .await
+                .ok()
+                .and_then(|answer| answer.ok())
+                .unwrap_or(false);
                 if !present {
                     self.persist(dir, &existing).await?;
                 }
@@ -676,7 +683,9 @@ impl AudioStore {
         }
         let paths = std::mem::take(&mut self.evicted);
         for path in paths {
-            let _ = tokio::fs::remove_file(path).await;
+            // Bounded, like the write: this runs inside `accept`, so an unbounded unlink would
+            // hold the publish open on a filesystem that has stalled.
+            let _ = tokio::time::timeout(STORAGE_TIMEOUT, tokio::fs::remove_file(path)).await;
         }
     }
 
@@ -688,18 +697,7 @@ impl AudioStore {
     /// write on a slow disk would stall every carrier's executor thread. The write still completes
     /// before the item is answerable, so a failure is still a refusal.
     async fn persist(&self, dir: &Path, item: &AudioItem) -> Result<(), ListendError> {
-        tokio::fs::create_dir_all(dir)
-            .await
-            .map_err(|e| ListendError::Persist(e.to_string()))?;
-        tokio::fs::write(dir.join(&item.content_hash), &item.bytes)
-            .await
-            .map_err(|e| ListendError::Persist(e.to_string()))?;
-        if let Some(media_type) = &item.media_type {
-            // A sidecar is metadata; a failure to write it is not a failure to store the audio.
-            let sidecar = dir.join(format!("{}.json", item.content_hash));
-            let _ = tokio::fs::write(sidecar, media_type.as_bytes()).await;
-        }
-        Ok(())
+        persist_bounded(dir, item, STORAGE_TIMEOUT).await
     }
 
     /// Offer every accepted item to IPFS as well. `None` (the default) mirrors nothing, so the
@@ -959,6 +957,16 @@ pub fn servable_bound(max_bytes: usize) -> usize {
 /// rest silently.
 pub const MAX_LOAD_ENTRIES: usize = 100_000;
 
+/// The bound on one filesystem operation in the accept path.
+///
+/// Every network read and write has a timeout, and so does the disk. `accept` awaits the durable
+/// write before the item is answerable, so a filesystem that hangs -- an SMB share whose server has
+/// stalled, say -- would otherwise hold a publish open indefinitely. A timeout turns that into the
+/// same typed refusal as any other write failure: the audio is not answered as stored. It is far
+/// above what the largest item needs (16 MiB at the measured 9.8 MB/s of the operator's share is
+/// about two seconds).
+pub const STORAGE_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// The most items the store will hold at once, however small they are. The byte bound does not
 /// bound this, and per-entry overhead dominates for tiny audio. It is the same cap a directory load
 /// honours ([`MAX_LOAD_ENTRIES`]), so a start and a lifetime of publishes agree.
@@ -969,14 +977,58 @@ pub const MAX_STORE_ENTRIES: usize = MAX_LOAD_ENTRIES;
 const MAX_SIDECAR_BYTES: usize = 4096;
 
 /// The declared media type recorded beside a persisted item, if any.
+/// Run one storage operation under `bound`, turning a filesystem that never answers into the same
+/// typed refusal as any other write failure. Every blocking operation in the accept path goes
+/// through here.
+async fn with_storage_bound<T>(
+    bound: Duration,
+    op: impl std::future::Future<Output = Result<T, ListendError>>,
+) -> Result<T, ListendError> {
+    match tokio::time::timeout(bound, op).await {
+        Ok(inner) => inner,
+        Err(_) => Err(ListendError::Persist(
+            "the filesystem did not answer in time".into(),
+        )),
+    }
+}
+
+/// Write an item durably under `bound`. Split from [`AudioStore::persist`] so a test can prove the
+/// bound is applied without needing a filesystem that actually hangs.
+async fn persist_bounded(
+    dir: &Path,
+    item: &AudioItem,
+    bound: Duration,
+) -> Result<(), ListendError> {
+    with_storage_bound(bound, async {
+        tokio::fs::create_dir_all(dir)
+            .await
+            .map_err(|e| ListendError::Persist(e.to_string()))?;
+        tokio::fs::write(dir.join(&item.content_hash), &item.bytes)
+            .await
+            .map_err(|e| ListendError::Persist(e.to_string()))?;
+        if let Some(media_type) = &item.media_type {
+            // A sidecar is metadata; a failure to write it is not a failure to store the audio.
+            let sidecar = dir.join(format!("{}.json", item.content_hash));
+            let _ = tokio::fs::write(sidecar, media_type.as_bytes()).await;
+        }
+        Ok(())
+    })
+    .await
+}
+
 /// Write the `<hash>.cid` association beside the audio, so a restart skips re-adding it.
 ///
 /// Called with no lock held and asynchronously, exactly like the audio write: a blocking write on the
 /// accept path would stall every other client behind one disk operation.
 async fn persist_cid(dir: Option<&Path>, content_hash: &str, cid: &str) {
     if let Some(dir) = dir {
-        // Best-effort: a lost sidecar costs one redundant add, never audio.
-        let _ = tokio::fs::write(dir.join(format!("{content_hash}.cid")), cid.as_bytes()).await;
+        // Best-effort: a lost sidecar costs one redundant add, never audio. Bounded like every
+        // other storage operation, so a hung filesystem cannot hold the mirror open.
+        let _ = tokio::time::timeout(
+            STORAGE_TIMEOUT,
+            tokio::fs::write(dir.join(format!("{content_hash}.cid")), cid.as_bytes()),
+        )
+        .await;
     }
 }
 
@@ -1852,6 +1904,48 @@ mod tests {
         );
         assert!(reopened.serve(&small_hash).is_ok());
         assert!(reopened.serve(&hash).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The real durable write, through `persist_bounded`, against a filesystem operation that never
+    /// completes. `persist` is what `accept` awaits before the item is answerable, so a bound that
+    /// is not applied there would leave a publish hung on a stalled filesystem.
+    ///
+    /// A FIFO with no reader blocks in `open()` indefinitely -- a deterministic stand-in for the
+    /// stalled share, and one that does not depend on timer granularity (a real write finishes in
+    /// about a millisecond, which a wall-clock bound cannot reliably lose to).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_durable_write_that_never_completes_is_refused() {
+        let dir = temp_dir("hung-disk");
+        let item = AudioItem::new(wav::generate(2, wav::Sound::Tone), None);
+        let made = std::process::Command::new("mkfifo")
+            .arg(dir.join(&item.content_hash))
+            .status()
+            .and_then(|s| {
+                s.success()
+                    .then_some(())
+                    .ok_or(std::io::Error::other("mkfifo failed"))
+            })
+            .is_ok();
+        assert!(made, "mkfifo must be available to exercise this");
+
+        let result = persist_bounded(&dir, &item, Duration::from_millis(500)).await;
+        assert!(
+            matches!(result, Err(ListendError::Persist(_))),
+            "a write that never completes is a refusal, got {result:?}"
+        );
+
+        // Cancelling the timed-out future does not cancel the blocking `open` behind it, so the
+        // writer would stay blocked and the runtime would wait for it on the way out. Opening the
+        // FIFO read-write does not block and lets that open finish; it is held for a moment so the
+        // kernel sees a reader when it evaluates the blocked open.
+        let unblocked = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(dir.join(&item.content_hash));
+        std::thread::sleep(Duration::from_millis(200));
+        drop(unblocked);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -184,8 +184,8 @@ not only against a test harness. The Unix socket is not probed there: it is owne
 
 **Serves, and survives a restart.** Six ways to reach the audio are live and tested: the native
 protocol over TCP, HTTP, UDP, a Unix socket, an IPFS mirror, and -- opt-in -- Reticulum
-(`--features reticulum`). `cargo test -p oag-listend` runs 82 unit tests plus 82 end-to-end;
-`--features reticulum` adds the carrier's own unit and end-to-end tests (174 in total). The store
+(`--features reticulum`). `cargo test -p oag-listend` runs 83 unit tests plus 82 end-to-end;
+`--features reticulum` adds the carrier's own unit and end-to-end tests (175 in total). The store
 mutex covers lookup and insert, not byte copies, so a slow reader does not stall the others. (The
 durable write and the eviction unlink are awaited inside `accept`, so the lock is held across them;
 measured on a network share they did not stall a concurrent fetch.) Runs as a systemd service (`scripts/oag-listend.service`) and shuts down cleanly on
