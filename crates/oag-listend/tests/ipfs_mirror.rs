@@ -699,6 +699,14 @@ async fn serve_by_cid() {
         "the served BLAKE3 must be published so the client can verify: {text}"
     );
 
+    // The read half is a way to reach audio, not a new inbound channel: fetching something the
+    // daemon does not hold must not put it in the store. SPEC says so; nothing pinned it.
+    assert_eq!(
+        store.lock().await.len(),
+        0,
+        "fetching by CID must not store what it fetched"
+    );
+
     shutdown.shutdown();
     tokio::time::timeout(Duration::from_secs(5), run)
         .await

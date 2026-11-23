@@ -460,6 +460,13 @@ hash, a non-audio object fetched by CID is refused, a CID the daemon does **not*
 from the node and served byte-identically, and a restart reports `offered 0 of N` with the node's
 object count unchanged.
 
+Re-validated after the startup pass moved: with a four-item store and `--ipfs-api`, the daemon
+answers in 13 ms while the pass mirrors all four (`offered 4 of 4`), every one is pinned by the node
+and `ipfs cat` returns it byte-identically, `GET /ipfs/{cid}` serves each byte-identically, an object
+added straight to the node and not held locally is fetched and served byte-identically, a restart
+reports `offered 0 of 5`, and fetching by CID still stores nothing -- which is now pinned by a test,
+because SPEC claimed it and nothing checked it.
+
 ## Next
 
 Of the imagination `Transport` seam, every carrier is now implemented in oag-listend: TCP, UDP,
