@@ -333,6 +333,9 @@ async fn main() {
         None => None,
     };
     let udp_shutdown = udp.as_ref().map(|(carrier, _)| carrier.shutdown_handle());
+    if let Some((carrier, _)) = &udp {
+        active_counters.push(carrier.active_handle());
+    }
 
     let unix = match &args.unix {
         Some(path) => {

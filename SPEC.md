@@ -10,8 +10,8 @@ content-addressed, so `--dir` persists every accepted sound under its BLAKE3 and
 back. The daemon publishes a small seeded set of generated sounds, accepts audio, and serves it back
 with the BLAKE3 of the bytes.
 
-`cargo test -p oag-listend` runs 83 unit and 84 end-to-end tests, all green, in debug and
-release (`89 unit and 88 end-to-end` with `--features reticulum`). End to end they cover:
+`cargo test -p oag-listend` runs 83 unit and 85 end-to-end tests, all green, in debug and
+release (`89 unit and 89 end-to-end` with `--features reticulum`). End to end they cover:
 
 - the native back-and-forth: publish, fetch, verify, reject non-audio, not-found, and frames written
   together in one write answered in order;
@@ -222,6 +222,13 @@ reply goes back to the sender, and the frame codec is reused unchanged. A datagr
 65,507 bytes, so a fetch whose response does not fit is answered with a rejection -- never a silent
 truncation. Small exchanges (hello, list, a generated tone, a short recording) are this carrier's
 job; a long recording belongs on TCP or HTTP.
+
+Each datagram is handled in its own task, like every other carrier handles each connection or link,
+with the same concurrency cap (64) applying backpressure to a flood. This carrier used to handle
+inline, which made it the one carrier with head-of-line blocking: a publish whose mirror hung held
+the whole loop, and every other peer's datagram waited out the add timeout -- measured at 9.70 s
+before the change and 0.000 s after. In-flight datagrams are counted, so a stop drains them like the
+other carriers' sessions.
 
 ## Persistence
 

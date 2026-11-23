@@ -11,11 +11,12 @@
 
 #![forbid(unsafe_code)]
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::net::UdpSocket;
-use tokio::sync::{watch, Mutex};
+use tokio::sync::{watch, Mutex, Semaphore};
 
 use crate::protocol::{self, Request, Response};
 use crate::server::ShutdownHandle;
@@ -29,11 +30,17 @@ pub const MAX_FRAME_BYTES: usize = MAX_DATAGRAM_BYTES - 4;
 pub const MAX_DATAGRAM_LIST_LIMIT: usize = 900;
 /// A datagram exchange is bounded like every other network read and write.
 pub const IO_TIMEOUT: Duration = Duration::from_secs(10);
+/// Concurrent datagrams being handled. The same session limit every other carrier applies, so a
+/// flood applies backpressure rather than spawning without bound.
+pub const MAX_CONNECTIONS: usize = 64;
 
 pub struct UdpCarrier {
     store: Arc<Mutex<AudioStore>>,
-    socket: UdpSocket,
+    socket: Arc<UdpSocket>,
     local_addr: std::net::SocketAddr,
+    /// Requests in flight, for a bounded shutdown grace period. A datagram is handled in its own
+    /// task, so this counts those tasks.
+    active: Arc<AtomicUsize>,
     shutdown_tx: watch::Sender<bool>,
 }
 
@@ -42,7 +49,7 @@ impl UdpCarrier {
         addr: &str,
         store: Arc<Mutex<AudioStore>>,
     ) -> std::io::Result<(Self, std::net::SocketAddr)> {
-        let socket = UdpSocket::bind(addr).await?;
+        let socket = Arc::new(UdpSocket::bind(addr).await?);
         let local_addr = socket.local_addr()?;
         let (shutdown_tx, _) = watch::channel(false);
         Ok((
@@ -50,6 +57,7 @@ impl UdpCarrier {
                 store,
                 socket,
                 local_addr,
+                active: Arc::new(AtomicUsize::new(0)),
                 shutdown_tx,
             },
             local_addr,
@@ -64,7 +72,26 @@ impl UdpCarrier {
         ShutdownHandle::new(self.shutdown_tx.clone())
     }
 
+    /// Requests in flight right now.
+    pub fn active_sessions(&self) -> usize {
+        self.active.load(Ordering::SeqCst)
+    }
+
+    /// The live request counter, so a caller can wait for in-flight datagrams to drain.
+    pub fn active_handle(&self) -> Arc<AtomicUsize> {
+        Arc::clone(&self.active)
+    }
+
+    /// Serve datagrams until stopped.
+    ///
+    /// Each datagram is handled in its own task, like every other carrier handles each connection
+    /// or link. Handling inline made this the one carrier with head-of-line blocking: a publish
+    /// whose mirror hung held the whole loop, and every other peer's datagram waited out the add
+    /// timeout -- measured at 9.70 s before the change. The semaphore caps concurrency at the same
+    /// session limit the other carriers use, so a flood applies backpressure instead of spawning
+    /// without bound.
     pub async fn run(&self) -> std::io::Result<()> {
+        let semaphore = Arc::new(Semaphore::new(MAX_CONNECTIONS));
         let mut shutdown_rx = self.shutdown_tx.subscribe();
         let mut buf = vec![0u8; MAX_DATAGRAM_BYTES];
         loop {
@@ -75,14 +102,23 @@ impl UdpCarrier {
                         Ok(pair) => pair,
                         Err(_) => continue,
                     };
-                    if let Some(frame) = handle(&buf[..len], &self.store).await {
-                        // A datagram either carries the whole response or it does not; a silent
-                        // truncation would be a lie about the audio.
-                        if frame.len() <= MAX_DATAGRAM_BYTES {
-                            let _ = tokio::time::timeout(IO_TIMEOUT, self.socket.send_to(&frame, peer))
-                                .await;
+                    let Ok(permit) = semaphore.clone().acquire_owned().await else { break };
+                    let store = Arc::clone(&self.store);
+                    let socket = Arc::clone(&self.socket);
+                    let active = Arc::clone(&self.active);
+                    let data = buf[..len].to_vec();
+                    tokio::spawn(async move {
+                        let _permit = permit;
+                        let _guard = crate::server::ActiveGuard::raise(&active);
+                        if let Some(frame) = handle(&data, &store).await {
+                            // A datagram either carries the whole response or it does not; a silent
+                            // truncation would be a lie about the audio.
+                            if frame.len() <= MAX_DATAGRAM_BYTES {
+                                let _ = tokio::time::timeout(IO_TIMEOUT, socket.send_to(&frame, peer))
+                                    .await;
+                            }
                         }
-                    }
+                    });
                 }
             }
         }

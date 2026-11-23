@@ -13,6 +13,7 @@ use tokio::sync::Mutex as TokioMutex;
 use oag_listend::http::HttpCarrier;
 use oag_listend::ipfs::IpfsPublisher;
 use oag_listend::protocol::{self, Request, Response};
+use oag_listend::udp::UdpCarrier;
 use oag_listend::{wav, AudioFormat, AudioStore, ListendServer, MirrorOutcome};
 
 const BOUND: Duration = Duration::from_secs(20);
@@ -478,6 +479,79 @@ async fn http_get(addr: std::net::SocketAddr, path: &str) -> Vec<u8> {
         .expect("read bound")
         .expect("read");
     out
+}
+
+/// UDP used to be the one carrier that handled a request inline, so one publish whose mirror hung
+/// held the whole loop: every other peer's datagram waited out the add timeout. Measured at 9.70 s
+/// before the change, 0.000 s after. Each datagram now gets its own task, like every other carrier
+/// gives each connection or link.
+#[tokio::test]
+async fn a_hung_mirror_does_not_stall_other_udp_clients() {
+    tokio::time::timeout(BOUND, hung_mirror_udp())
+        .await
+        .expect("the hung-mirror UDP exchange must complete within the bound")
+}
+
+async fn hung_mirror_udp() {
+    // A node that accepts every add and never answers, so the mirror waits out its 10 s bound.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind the silent stub");
+    let api = listener.local_addr().expect("stub addr");
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let _held = stream;
+                std::future::pending::<()>().await;
+            });
+        }
+    });
+
+    let store = Arc::new(TokioMutex::new(AudioStore::default()));
+    store
+        .lock()
+        .await
+        .set_ipfs(Some(IpfsPublisher::new(api.to_string())));
+    let (udp, addr) = UdpCarrier::bind_shared("127.0.0.1:0", Arc::clone(&store))
+        .await
+        .expect("bind udp");
+    let shutdown = udp.shutdown_handle();
+    let run = tokio::spawn(async move { udp.run().await });
+
+    let client = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("bind the client");
+    // A publish whose mirror will hang.
+    let publish = protocol::encode_frame(&protocol::encode_request(&Request::Publish {
+        declared_media_type: Some("audio/wav".into()),
+        bytes: wav::generate(32, wav::Sound::Tone),
+    }));
+    client
+        .send_to(&publish, addr)
+        .await
+        .expect("send the publish");
+    // Let it reach the hanging mirror before measuring anything else.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // Another peer's liveness probe. It must not wait for the mirror's 10 s bound, so a 5 s ceiling
+    // is a generous discriminator.
+    let hello = protocol::encode_frame(&protocol::encode_request(&Request::Hello));
+    client.send_to(&hello, addr).await.expect("send hello");
+    let mut buf = vec![0u8; 65536];
+    let (n, _) = tokio::time::timeout(Duration::from_secs(5), client.recv_from(&mut buf))
+        .await
+        .expect("another UDP client must be answered while a mirror hangs")
+        .expect("recv");
+    let reply = protocol::decode_response(protocol::decode_frame(&buf[..n]).expect("a frame"))
+        .expect("a response");
+    assert!(matches!(reply, Response::Hello { .. }), "{reply:?}");
+
+    shutdown.shutdown();
+    tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .expect("shutdown bound")
+        .expect("join")
+        .expect("run");
 }
 
 /// A Kubo node that accepts and then says nothing must not stall the daemon. The mirror happens
