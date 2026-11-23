@@ -10,8 +10,8 @@ content-addressed, so `--dir` persists every accepted sound under its BLAKE3 and
 back. The daemon publishes a small seeded set of generated sounds, accepts audio, and serves it back
 with the BLAKE3 of the bytes.
 
-`cargo test -p oag-listend` runs 83 unit and 82 end-to-end tests, all green, in debug and
-release (`89 unit and 86 end-to-end` with `--features reticulum`). End to end they cover:
+`cargo test -p oag-listend` runs 83 unit and 83 end-to-end tests, all green, in debug and
+release (`89 unit and 87 end-to-end` with `--features reticulum`). End to end they cover:
 
 - the native back-and-forth: publish, fetch, verify, reject non-audio, not-found, and frames written
   together in one write answered in order;
@@ -160,10 +160,12 @@ the same `accept_and_mirror` entry point every carrier uses; every outbound fetc
 and the hash they must verify against; a ping returns the musical liveness item.
 
     oag-listend --listen 127.0.0.1:7100 --http 127.0.0.1:7101 --udp 127.0.0.1:7120 \
-                --unix /tmp/oag-listend.sock --dir /var/lib/oag-listend --seed 20261112
+                --unix /tmp/oag-listend.sock --dir /tmp/oag-listend-store --seed 20261112
 
-(The systemd unit uses `/run/oag-listend/audio.sock`, which its `RuntimeDirectory=` creates; a
-bare `cargo run` should use a path it can create.)
+(The systemd unit uses `/run/oag-listend/audio.sock` and `/var/lib/oag-listend`, which its
+`RuntimeDirectory=` and `StateDirectory=` create for the `oag` user. A bare `cargo run` should use
+paths it can create: `/var/lib` is not writable by an ordinary user, and the daemon refuses with
+`cannot open store ...: Permission denied ... the daemon must be able to create and write --dir`.)
     cargo run -p oag-listend --example push_pull -- --addr 127.0.0.1:7100
     cargo run -p oag-listend --example push_pull -- --udp --addr 127.0.0.1:7120
     cargo run -p oag-listend --example push_pull -- --unix /tmp/oag-listend.sock

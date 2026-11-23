@@ -542,6 +542,38 @@ async fn hostile_startup() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A `--dir` this process cannot create is refused with the reason, not just an errno. The first
+/// command an operator runs is README's, and "Permission denied" on its own reads like a broken
+/// binary rather than a directory the daemon may not write.
+#[test]
+fn an_unusable_store_is_refused_with_the_reason() {
+    let dir = temp_dir("unusable-store");
+    std::fs::create_dir_all(&dir).expect("make the store parent");
+    let blocker = dir.join("not-a-dir");
+    std::fs::write(&blocker, b"x").expect("write the blocker");
+    let output = std::process::Command::new(binary())
+        .arg("--listen")
+        .arg("127.0.0.1:0")
+        .arg("--dir")
+        .arg(blocker.join("store"))
+        .output()
+        .expect("run the daemon");
+    assert!(
+        !output.status.success(),
+        "an unusable --dir must be a refusal, not a start"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("cannot open store"),
+        "the refusal names the store: {stderr}"
+    );
+    assert!(
+        stderr.contains("must be able to create and write --dir"),
+        "and says what to do about it: {stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A stop must not cut a client off mid-transfer. The daemon binds its own port and
 /// announces it, so this allocates nothing and cannot race another process for one.
 #[tokio::test]

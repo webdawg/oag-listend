@@ -36,7 +36,12 @@ One additional individual directive is implemented:
 
     cargo run -p oag-listend -- --listen 127.0.0.1:7100 --http 127.0.0.1:7101 --udp 127.0.0.1:7120 \
         --unix /tmp/oag-listend.sock \
-        --dir /var/lib/oag-listend --seed 20261112
+        --dir /tmp/oag-listend-store --seed 20261112
+
+`--dir` must be a directory this process can create and write. The example uses `/tmp` because a
+bare `cargo run` as an ordinary user cannot write `/var/lib`; the systemd unit uses
+`/var/lib/oag-listend`, which its `StateDirectory=` creates for the `oag` user, and
+`/run/oag-listend/audio.sock`, which its `RuntimeDirectory=` creates.
 
 The daemon binds, prints four generated items -- silence, tone, noise, and the canonical ping -- and
 serves until interrupted. The generated set seeds an empty store only -- a restart with `--dir` does not add more -- and a generated sound the
@@ -184,8 +189,8 @@ not only against a test harness. The Unix socket is not probed there: it is owne
 
 **Serves, and survives a restart.** Six ways to reach the audio are live and tested: the native
 protocol over TCP, HTTP, UDP, a Unix socket, an IPFS mirror, and -- opt-in -- Reticulum
-(`--features reticulum`). `cargo test -p oag-listend` runs 83 unit tests plus 82 end-to-end;
-`--features reticulum` adds the carrier's own unit and end-to-end tests (175 in total). The store
+(`--features reticulum`). `cargo test -p oag-listend` runs 83 unit tests plus 83 end-to-end;
+`--features reticulum` adds the carrier's own unit and end-to-end tests (176 in total). The store
 mutex covers lookup and insert, not byte copies, so a slow reader does not stall the others. (The
 durable write and the eviction unlink are awaited inside `accept`, so the lock is held across them;
 measured on a network share they did not stall a concurrent fetch.) Runs as a systemd service (`scripts/oag-listend.service`) and shuts down cleanly on

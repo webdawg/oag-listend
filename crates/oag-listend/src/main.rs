@@ -248,7 +248,12 @@ async fn main() {
                 AudioStore::with_directory(dir, args.max_bytes)
             };
             let (store, report) = opened.unwrap_or_else(|e| {
-                complain!("oag-listend: cannot open store {dir}: {e}");
+                // Name the requirement, not just the errno: "Permission denied" alone reads like a
+                // broken binary rather than a directory this process may not write.
+                complain!(
+                    "oag-listend: cannot open store {dir}: {e}; the daemon must be able to \
+                     create and write --dir"
+                );
                 std::process::exit(1);
             });
             say!(
