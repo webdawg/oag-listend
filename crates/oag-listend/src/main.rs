@@ -287,15 +287,6 @@ async fn main() {
     if let Some(addr) = &args.ipfs_api {
         store.set_ipfs(Some(oag_listend::ipfs::IpfsPublisher::new(addr.clone())));
         say!("offering accepted audio to IPFS at {addr} (best-effort)");
-        // Audio already on disk would otherwise never reach IPFS: only publishes made after this
-        // daemon started would be mirrored.
-        let held = store.len();
-        if held > 0 {
-            let offered = store
-                .mirror_existing(oag_listend::STARTUP_MIRROR_BUDGET)
-                .await;
-            say!("  offered {offered} of {held} stored item(s) to IPFS");
-        }
     }
     let store = Arc::new(Mutex::new(store));
 
@@ -424,6 +415,20 @@ async fn main() {
     let unix_run = unix.map(|(carrier, _)| tokio::spawn(async move { carrier.run().await }));
     #[cfg(feature = "reticulum")]
     let reticulum_run = reticulum.map(|carrier| tokio::spawn(async move { carrier.run().await }));
+
+    // The startup mirror pass runs *after* the carriers are serving. Audio already on disk would
+    // otherwise never reach IPFS -- only publishes made after this daemon started would be
+    // mirrored -- but running it before the bind meant a slow or stalled node delayed the daemon
+    // from serving, which contradicts the mirror being best-effort.
+    if args.ipfs_api.is_some() {
+        let held = store.lock().await.len();
+        if held > 0 {
+            let offered =
+                oag_listend::mirror_existing_shared(&store, oag_listend::STARTUP_MIRROR_BUDGET)
+                    .await;
+            say!("  offered {offered} of {held} stored item(s) to IPFS");
+        }
+    }
 
     // SIGINT (Ctrl+C) and SIGTERM (`systemctl stop`, `kill`) both shut down cleanly, so the
     // Unix socket is removed and the operator's stop command is not a crash.

@@ -10,8 +10,8 @@ content-addressed, so `--dir` persists every accepted sound under its BLAKE3 and
 back. The daemon publishes a small seeded set of generated sounds, accepts audio, and serves it back
 with the BLAKE3 of the bytes.
 
-`cargo test -p oag-listend` runs 83 unit and 83 end-to-end tests, all green, in debug and
-release (`89 unit and 87 end-to-end` with `--features reticulum`). End to end they cover:
+`cargo test -p oag-listend` runs 83 unit and 84 end-to-end tests, all green, in debug and
+release (`89 unit and 88 end-to-end` with `--features reticulum`). End to end they cover:
 
 - the native back-and-forth: publish, fetch, verify, reject non-audio, not-found, and frames written
   together in one write answered in order;
@@ -409,7 +409,10 @@ CID (`ipfs mirror: N mirrored, M failed`, then one line per outcome).
 On startup with `--ipfs-api`, everything already held is offered too -- a restart would otherwise
 mirror only audio published afterwards, and an existing library would never reach IPFS. That pass is
 bounded as a whole (`STARTUP_MIRROR_BUDGET`, 30 s) so a large store cannot hold startup open, while
-each item keeps its own per-call bound.
+each item keeps its own per-call bound. It runs **after the carriers are serving**: it used to run
+before the bind, and a node answering three seconds per add held the daemon back from serving by
+12.3 s -- a stalled node would have held it for the whole budget, which contradicts the mirror being
+best-effort.
 
 A client that fetches an item is told where else it lives: the store remembers the CID per content
 hash, `Response::Audio` carries it as an **optional trailing field**, and HTTP exposes it as

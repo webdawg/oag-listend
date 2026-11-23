@@ -42,6 +42,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use tokio::sync::Mutex;
+
+use crate::ipfs::IpfsPublisher;
+
 pub use protocol::{Request, Response};
 pub use server::ListendServer;
 
@@ -732,16 +736,7 @@ impl AudioStore {
         if self.mirror_cids.contains_key(content_hash) {
             return false; // already offered; a restart must not rewrite the library
         }
-        let outcome = match ipfs.add(bytes).await {
-            Ok(cid) => MirrorOutcome::Mirrored {
-                content_hash: content_hash.to_string(),
-                cid,
-            },
-            Err(e) => MirrorOutcome::Failed {
-                content_hash: content_hash.to_string(),
-                reason: e.to_string(),
-            },
-        };
+        let outcome = add_to_ipfs(&ipfs, content_hash, bytes).await;
         if let (Some(dir), MirrorOutcome::Mirrored { content_hash, cid }) =
             (self.dir.as_deref(), &outcome)
         {
@@ -942,6 +937,89 @@ impl AudioStore {
             cid_index: HashMap::new(),
         }
     }
+}
+
+/// Add `bytes` to the node and build the outcome. Shared by the owned-store pass and the
+/// serving-path pass so the two cannot drift.
+async fn add_to_ipfs(ipfs: &IpfsPublisher, content_hash: &str, bytes: &[u8]) -> MirrorOutcome {
+    match ipfs.add(bytes).await {
+        Ok(cid) => MirrorOutcome::Mirrored {
+            content_hash: content_hash.to_string(),
+            cid,
+        },
+        Err(e) => MirrorOutcome::Failed {
+            content_hash: content_hash.to_string(),
+            reason: e.to_string(),
+        },
+    }
+}
+
+/// Offer one already-held item to IPFS, taking the store lock only for the check and the recording
+/// -- never across the network call. This is what lets the startup pass run beside live traffic.
+async fn offer_shared(
+    store: &Arc<Mutex<AudioStore>>,
+    item: Arc<AudioItem>,
+    remaining: Duration,
+) -> bool {
+    let (ipfs, dir, already) = {
+        let store = store.lock().await;
+        (
+            store.ipfs.clone(),
+            store.dir_path().map(Path::to_path_buf),
+            store.mirror_cids.contains_key(&item.content_hash),
+        )
+    };
+    if already {
+        return false; // already offered; a restart must not rewrite the library
+    }
+    let Some(ipfs) = ipfs else { return false };
+    let outcome = match tokio::time::timeout(
+        remaining,
+        add_to_ipfs(&ipfs, &item.content_hash, &item.bytes),
+    )
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(_) => MirrorOutcome::Failed {
+            content_hash: item.content_hash.clone(),
+            reason: "the node did not answer in time".into(),
+        },
+    };
+    if let (Some(dir), MirrorOutcome::Mirrored { content_hash, cid }) = (dir.as_deref(), &outcome) {
+        persist_cid(Some(dir), content_hash, cid).await;
+    }
+    store.lock().await.record_mirror(outcome);
+    true
+}
+
+/// The startup mirror pass, against a store the carriers are already serving.
+///
+/// [`AudioStore::mirror_existing`] needs an owned store, so it can only run before anything binds:
+/// measured, a node answering three seconds per add delayed the daemon from serving by 12.3 s, and
+/// a stalled node would hold it up for the whole 30 s budget. That contradicts the mirror being
+/// best-effort. This version takes the lock only for the snapshot and the recording, so the pass
+/// runs beside live traffic and a slow node delays nothing.
+pub async fn mirror_existing_shared(store: &Arc<Mutex<AudioStore>>, budget: Duration) -> usize {
+    let items: Vec<Arc<AudioItem>> = {
+        let store = store.lock().await;
+        store
+            .hashes()
+            .into_iter()
+            .filter_map(|hash| store.serve(&hash).ok())
+            .collect()
+    };
+    let mut offered = 0usize;
+    let deadline = std::time::Instant::now() + budget;
+    for item in items {
+        let remaining = match deadline.checked_duration_since(std::time::Instant::now()) {
+            Some(remaining) if !remaining.is_zero() => remaining,
+            _ => break,
+        };
+        if offer_shared(store, item, remaining).await {
+            offered += 1;
+        }
+    }
+    offered
 }
 
 /// The largest item this store will hold and serve: the store bound, capped by what a single

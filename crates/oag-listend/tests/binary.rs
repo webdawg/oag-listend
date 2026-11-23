@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use oag_listend::protocol::{self, Request, Response};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::process::Command;
 
@@ -570,6 +570,102 @@ fn an_unusable_store_is_refused_with_the_reason() {
     assert!(
         stderr.contains("must be able to create and write --dir"),
         "and says what to do about it: {stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The startup IPFS mirror pass must not delay serving. It is documented as best-effort -- "a
+/// mirror failure is recorded, never propagated" -- but it ran before the carriers bound, so a slow
+/// node held the daemon back from serving: measured at 12.3 s with a node answering three seconds
+/// per add, and a stalled node would have held it for the whole 30 s budget.
+#[tokio::test]
+async fn the_startup_mirror_pass_does_not_delay_serving() {
+    tokio::time::timeout(BOUND, mirror_delay())
+        .await
+        .expect("within the bound")
+}
+
+async fn mirror_delay() {
+    use oag_listend::{wav, AudioStore};
+
+    // A store with two items, so the pass has work to do.
+    let dir = temp_dir("mirror-delay");
+    std::fs::create_dir_all(&dir).expect("make the store directory");
+    {
+        let (mut store, _) = AudioStore::with_directory(&dir, 1024 * 1024).expect("open the store");
+        store
+            .accept(wav::generate(1, wav::Sound::Tone), None)
+            .await
+            .expect("seed one");
+        store
+            .accept(wav::generate(2, wav::Sound::Tone), None)
+            .await
+            .expect("seed two");
+    }
+
+    // A node that answers, but slowly enough that the pass is still running when the daemon has
+    // already announced.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind the stand-in node");
+    let api = listener.local_addr().expect("node addr");
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let mut buf = [0u8; 4096];
+            let _ = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut buf)).await;
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 40\r\n\r\n{\"Hash\":\"bafytestcid\",\"Name\":\"audio\"}\r\n")
+                .await;
+            let _ = stream.shutdown().await;
+        }
+    });
+
+    let mut child = Daemon(
+        Command::new(binary())
+            .arg("--listen")
+            .arg("127.0.0.1:0")
+            .arg("--dir")
+            .arg(&dir)
+            .arg("--no-generate")
+            .arg("--ipfs-api")
+            .arg(api.to_string())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn the daemon"),
+    );
+    let (announced, stdout) = announce(&mut child).await;
+    let announced = String::from_utf8_lossy(&announced).into_owned();
+    assert!(announced.contains("listening on"), "{announced}");
+    assert!(
+        !announced.contains("offered"),
+        "the pass ran before the daemon served, so a slow node delayed it: {announced}"
+    );
+
+    // And the pass still does its job, afterwards.
+    let mut lines = tokio::io::BufReader::new(stdout).lines();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut report = String::new();
+    loop {
+        if Instant::now() >= deadline {
+            break;
+        }
+        match tokio::time::timeout(Duration::from_secs(2), lines.next_line()).await {
+            Ok(Ok(Some(line))) => {
+                if line.contains("offered") {
+                    report = line;
+                    break;
+                }
+            }
+            Ok(Ok(None)) => break, // the daemon closed its output
+            Ok(Err(e)) => panic!("read the daemon's output: {e}"),
+            Err(_) => continue, // quiet for a moment; the deadline above still applies
+        }
+    }
+    assert!(
+        report.contains("offered 2 of 2"),
+        "the pass still offers what is held, after serving starts: {report:?}"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
