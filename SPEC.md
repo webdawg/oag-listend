@@ -41,8 +41,9 @@ afterwards;
   byte more is refused; oversized sidecars are ignored while small ones are read; a load over the
   bound evicts and unlinks; every load-path skip reason is counted; the mirror log is capped;
 - a client hanging up mid-reply leaves both the native and HTTP carriers serving;
-- IPv6: all four carriers serve over `[::1]`, the stream and HTTP ones connecting to the literal
-  address rather than the one the carrier reported;
+- IPv6: the three network carriers -- native TCP, HTTP and UDP -- serve over `[::1]`, the stream
+  and HTTP ones connecting to the literal address rather than the one the carrier reported (the
+  Unix socket is not an address);
 - a daemon whose stdout cannot be written (`> /dev/full`) still serves audio and still exits 0;
 - the operator surface: the daemon binary (`--version`, `--help`, usage exit codes, start/serve/stop,
 `--check`, refused startup generation, non-loopback warnings) and the `push_pull` client's CLI.
@@ -215,7 +216,7 @@ same sniff rule and with `X-Content-Hash` and immutable caching. Every response 
 the audio. Anything else is 404.
 
 It is a hand-rolled request/response loop with no framework: one request, one response, then
-close. All four carriers bind around one shared `Arc<Mutex<AudioStore>>`, so a publish on any is
+close. Every carrier binds around one shared `Arc<Mutex<AudioStore>>`, so a publish on any is
 served on any.
 
 ## The UDP carrier

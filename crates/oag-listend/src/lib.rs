@@ -13,10 +13,12 @@
 //! surface so no carrier can forget it: [`AudioStore::accept`] admits bytes only if they carry a
 //! recognised audio signature, checked on the bytes and never on a declared type.
 //!
-//! The daemon is live on four carriers: [`server`] (native TCP frames), [`http`], [`udp`],
-//! and [`unix`].
-//! [`protocol`] is the audio-only frame format they share, and [`wav`] generates the sounds a
-//! fresh daemon publishes. The rules did not move -- every inbound path still goes through
+//! The daemon is live on six ways in: [`server`] (native TCP frames), [`http`], [`udp`],
+//! [`unix`], the [`ipfs`] mirror, and -- behind a cargo feature -- `reticulum`. The four socket
+//! carriers are the ones that bind an address; IPFS reaches audio this daemon already holds and
+//! fetches the rest from a node, and Reticulum serves over its own TCP interface.
+//! [`protocol`] is the audio-only frame format the socket carriers share, and [`wav`] generates
+//! the sounds a fresh daemon publishes. The rules did not move -- every inbound path still goes through
 //! [`AudioStore::accept`], checked on bytes.
 //!
 //! The store is content-addressed: an item's name is the BLAKE3 of its bytes, so it can be

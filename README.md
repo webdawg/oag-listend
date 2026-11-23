@@ -109,7 +109,7 @@ or over HTTP, with any client:
     curl http://127.0.0.1:7101/ping                                       # -> the musical ping
     curl http://127.0.0.1:7101/ipfs/<cid>                                 # -> audio fetched from IPFS
 
-All four carriers share one store, and all accept audio and nothing else.
+Every carrier shares one store, and all accept audio and nothing else.
 
 `--dir` persists the audio content-addressed under a directory, so a restart loads it back:
 
