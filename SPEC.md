@@ -10,8 +10,8 @@ content-addressed, so `--dir` persists every accepted sound under its BLAKE3 and
 back. The daemon publishes a small seeded set of generated sounds, accepts audio, and serves it back
 with the BLAKE3 of the bytes.
 
-`cargo test -p oag-listend` runs 85 unit and 87 end-to-end tests, all green, in debug and
-release (`91 unit and 91 end-to-end` with `--features reticulum`). End to end they cover:
+`cargo test -p oag-listend` runs 87 unit and 87 end-to-end tests, all green, in debug and
+release (`93 unit and 91 end-to-end` with `--features reticulum`). End to end they cover:
 
 - the native back-and-forth: publish, fetch, verify, reject non-audio, not-found, and frames written
   together in one write answered in order;
@@ -174,7 +174,10 @@ Bounds: every read and write syscall has a 10 s timeout -- per syscall, not per 
 slow client uploading or downloading the largest item is not cut off mid-transfer -- and each
 session and each HTTP connection also has a total bound (30 minutes), covering the read, the route,
 and the response, so a client that dribbles a byte every few seconds in either direction cannot hold
-one of the 64 session slots open indefinitely. A frame may not exceed 16 MiB, the store is capped by
+one of the 64 session slots open indefinitely. Both totals are pinned by a test that drives the same
+function with a short bound and a deliberately longer per-read bound, then asserts the short one is
+what ended it -- without the total those take eight and ten seconds instead.
+A frame may not exceed 16 MiB, the store is capped by
 `--max-bytes` (1 GiB by default), and at most 64 sessions are served at once per carrier.
 A single item is capped by `servable_bound` -- the store bound capped by what one frame can carry
 (`MAX_FRAME_BYTES - 256`) -- so no accepted item can be one that a client's own decoder would

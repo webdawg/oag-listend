@@ -22,8 +22,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
 use crate::server::{write_all_bounded, ShutdownHandle};
@@ -106,7 +106,7 @@ impl HttpCarrier {
                     tokio::spawn(async move {
                         let _permit = permit;
                         let _active = crate::server::ActiveGuard::raise(&active);
-                        let _ = serve_connection(stream, store).await;
+                        let _ = serve_connection(stream, store, REQUEST_TIMEOUT).await;
                     });
                 }
             }
@@ -115,18 +115,28 @@ impl HttpCarrier {
     }
 }
 
-async fn serve_connection(stream: TcpStream, store: Arc<Mutex<AudioStore>>) -> std::io::Result<()> {
+async fn serve_connection<S>(
+    stream: S,
+    store: Arc<Mutex<AudioStore>>,
+    request_timeout: Duration,
+) -> std::io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     // The total covers the whole connection -- read, route, and response -- so a client that reads
     // the response slowly cannot hold one of the session slots indefinitely either.
-    tokio::time::timeout(REQUEST_TIMEOUT, serve_connection_inner(stream, store))
+    tokio::time::timeout(request_timeout, serve_connection_inner(stream, store))
         .await
         .map_err(|_| timeout_error())?
 }
 
-async fn serve_connection_inner(
-    mut stream: TcpStream,
+async fn serve_connection_inner<S>(
+    mut stream: S,
     store: Arc<Mutex<AudioStore>>,
-) -> std::io::Result<()> {
+) -> std::io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let request = match read_request(&mut stream).await? {
         Some(request) => request,
         None => return Ok(()),
@@ -158,7 +168,7 @@ async fn serve_connection_inner(
 
 /// Discard up to `max` bytes of a body the reader did not consume, so closing the socket does not
 /// turn into a TCP reset that discards the response.
-async fn drain(stream: &mut TcpStream, max: usize) -> std::io::Result<()> {
+async fn drain<S: AsyncRead + Unpin>(stream: &mut S, max: usize) -> std::io::Result<()> {
     let mut buf = [0u8; 4096];
     let mut left = max;
     while left > 0 {
@@ -192,7 +202,9 @@ struct HttpRequest {
     body: Vec<u8>,
 }
 
-async fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<HttpRequest>> {
+async fn read_request<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
+) -> std::io::Result<Option<HttpRequest>> {
     let mut head = Vec::new();
     let mut buf = [0u8; 1024];
     loop {
@@ -870,7 +882,10 @@ impl HttpResponse {
     }
 }
 
-async fn write_response(stream: &mut TcpStream, response: &HttpResponse) -> std::io::Result<()> {
+async fn write_response<S: AsyncWrite + Unpin>(
+    stream: &mut S,
+    response: &HttpResponse,
+) -> std::io::Result<()> {
     let mut out = Vec::new();
     out.extend_from_slice(
         format!("HTTP/1.1 {} {}\r\n", response.status, response.reason).as_bytes(),
@@ -905,4 +920,30 @@ async fn write_response(stream: &mut TcpStream, response: &HttpResponse) -> std:
 
 fn timeout_error() -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::TimedOut, "http io timed out")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::AudioStore;
+
+    /// The total bound on one HTTP connection is real, and it is the total that fires -- not the
+    /// per-read bound underneath it. A client that connects and sends nothing must be cut off rather
+    /// than hold one of the session slots indefinitely. The production bound is 30 minutes, so the
+    /// test drives the same function with a short one, then asserts the short one won: without the
+    /// total bound this takes the reader's ten-second IO timeout instead.
+    #[tokio::test]
+    async fn a_client_that_says_nothing_is_cut_off_at_the_request_bound() {
+        let (client, server) = tokio::io::duplex(64);
+        let store = Arc::new(Mutex::new(AudioStore::default()));
+        let started = std::time::Instant::now();
+        let result = serve_connection(server, store, Duration::from_millis(50)).await;
+        let elapsed = started.elapsed();
+        assert!(result.is_err(), "a silent client must be cut off");
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "the request bound (50 ms) must be what ends it, not the 10 s read timeout: {elapsed:?}"
+        );
+        drop(client);
+    }
 }

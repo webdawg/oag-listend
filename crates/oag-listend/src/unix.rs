@@ -116,6 +116,7 @@ impl UnixCarrier {
                             READ_TIMEOUT,
                             WRITE_TIMEOUT,
                             crate::protocol::MAX_FRAME_BYTES,
+                            crate::server::SESSION_TIMEOUT,
                         )
                         .await;
                     });

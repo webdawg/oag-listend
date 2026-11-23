@@ -207,7 +207,15 @@ impl ListendServer {
                     tokio::spawn(async move {
                         let _permit = permit;
                         let _active = ActiveGuard::raise(&active);
-                        let _ = serve_session(stream, store, read_timeout, write_timeout, max_frame).await;
+                        let _ = serve_session(
+                            stream,
+                            store,
+                            read_timeout,
+                            write_timeout,
+                            max_frame,
+                            SESSION_TIMEOUT,
+                        )
+                        .await;
                     });
                 }
             }
@@ -225,12 +233,13 @@ pub(crate) async fn serve_session<S>(
     read_timeout: Duration,
     write_timeout: Duration,
     max_frame: usize,
+    session_timeout: Duration,
 ) -> std::io::Result<()>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     tokio::time::timeout(
-        SESSION_TIMEOUT,
+        session_timeout,
         serve_session_inner(stream, store, read_timeout, write_timeout, max_frame),
     )
     .await
@@ -492,6 +501,37 @@ mod tests {
 
     /// The read bound is per syscall, not per transfer: 100 one-byte reads at 10 ms each take
     /// about a second, far longer than the 50 ms bound, and must still succeed.
+    /// The total bound on one session is real, and it is the total that fires -- not the per-read
+    /// bound underneath it. A client that connects and then says nothing must be cut off rather than
+    /// hold one of the 64 slots indefinitely. The production bound is 30 minutes, so the test drives
+    /// the same function with a short one and a deliberately longer read bound, then asserts the
+    /// short one won: without the total bound this takes the read bound's eight seconds instead.
+    #[tokio::test]
+    async fn a_client_that_says_nothing_is_cut_off_at_the_session_bound() {
+        let (client, server) = tokio::io::duplex(64);
+        let store = Arc::new(Mutex::new(AudioStore::default()));
+        let started = std::time::Instant::now();
+        let result = serve_session(
+            server,
+            store,
+            Duration::from_secs(8),
+            Duration::from_secs(8),
+            crate::protocol::MAX_FRAME_BYTES,
+            Duration::from_millis(50),
+        )
+        .await;
+        let elapsed = started.elapsed();
+        assert!(
+            result.is_err(),
+            "a silent client must be cut off, not hold the slot"
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "the session bound (50 ms) must be what ends it, not the 8 s read bound: {elapsed:?}"
+        );
+        drop(client);
+    }
+
     #[tokio::test]
     async fn a_slow_but_progressing_read_is_not_cut_off() {
         let (mut client, mut server) = tokio::io::duplex(64);
