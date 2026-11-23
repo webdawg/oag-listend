@@ -542,6 +542,52 @@ async fn hostile_startup() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The client must prove what it is talking to, not just print it. A daemon on a different frame
+/// protocol answers in a shape this client does not understand, and every later exchange would be a
+/// guess.
+#[tokio::test]
+async fn the_client_refuses_a_daemon_on_another_protocol_version() {
+    tokio::time::timeout(BOUND, wrong_version())
+        .await
+        .expect("within the bound")
+}
+
+async fn wrong_version() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind the stand-in daemon");
+    let addr = listener.local_addr().expect("stand-in addr");
+    tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept");
+        let mut buf = [0u8; 1024];
+        let _ = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut buf)).await;
+        let reply = oag_listend::protocol::encode_response(&Response::Hello {
+            name: "test".into(),
+            protocol_version: 999,
+            item_count: 0,
+        });
+        let mut frame = (reply.len() as u32).to_be_bytes().to_vec();
+        frame.extend_from_slice(&reply);
+        let _ = stream.write_all(&frame).await;
+        let _ = stream.shutdown().await;
+    });
+
+    let output = tokio::process::Command::new(push_pull())
+        .args(["--addr", &addr.to_string()])
+        .output()
+        .await
+        .expect("run push_pull");
+    assert!(
+        !output.status.success(),
+        "a version mismatch must be refused, not guessed at"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("frame protocol 999"),
+        "the refusal names both versions: {stderr}"
+    );
+}
+
 /// A `--dir` this process cannot create is refused with the reason, not just an errno. The first
 /// command an operator runs is README's, and "Permission denied" on its own reads like a broken
 /// binary rather than a directory the daemon may not write.

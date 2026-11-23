@@ -207,6 +207,23 @@ fn decode_body(body: &[u8]) -> std::io::Result<Response> {
 async fn exchange(args: &Args) -> std::io::Result<()> {
     let hello = round_trip(args, &Request::Hello).await?;
     println!("daemon: {hello:?}");
+    // Prove what this is talking to, not just print it. A daemon on a different frame protocol
+    // answers in a shape this client does not understand, and every later exchange would be a
+    // guess. Refusing here is cheaper than misreading a reply.
+    if let Response::Hello {
+        protocol_version, ..
+    } = &hello
+    {
+        if *protocol_version != oag_listend::protocol::PROTOCOL_VERSION {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "the daemon speaks frame protocol {protocol_version}, this client speaks {}",
+                    oag_listend::protocol::PROTOCOL_VERSION
+                ),
+            ));
+        }
+    }
 
     // The musical liveness answer (operator directive: even pings are music).
     match round_trip(args, &Request::Ping).await? {
