@@ -2048,6 +2048,48 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// SPEC: "Only regular files are read -- a FIFO or device named like a hash would block
+    /// forever". A directory is already covered elsewhere; this pins the case that would actually
+    /// hang, on a thread with a bound, so dropping the regularity check fails the test instead of
+    /// stalling the suite.
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_named_like_a_hash_is_skipped_not_read() {
+        let dir = temp_dir("fifo-entry");
+        let made = std::process::Command::new("mkfifo")
+            .arg(dir.join("0".repeat(64)))
+            .status()
+            .and_then(|s| {
+                s.success()
+                    .then_some(())
+                    .ok_or(std::io::Error::other("mkfifo failed"))
+            })
+            .is_ok();
+        assert!(made, "mkfifo must be available to exercise this");
+
+        let loaded = dir.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(AudioStore::load_dir_impl(
+                &loaded,
+                1024 * 1024,
+                MAX_LOAD_ENTRIES,
+                false,
+                LOAD_DEADLINE,
+            ));
+        });
+        match rx.recv_timeout(Duration::from_secs(10)) {
+            Ok(Ok((store, report))) => {
+                assert_eq!(report.loaded, 0);
+                assert_eq!(report.skipped, 1, "the FIFO is skipped, not read");
+                assert!(store.is_empty());
+            }
+            Ok(Err(e)) => panic!("the load failed: {e}"),
+            Err(_) => panic!("a FIFO named like a hash hung the load: it was read, not stat'd"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A load that cannot finish inside its deadline stops and says so, rather than looking like a
     /// hang. The deadline is checked between entries; it cannot interrupt a single read that is
     /// already blocked in the kernel, and the docs say so.

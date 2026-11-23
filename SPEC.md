@@ -10,8 +10,8 @@ content-addressed, so `--dir` persists every accepted sound under its BLAKE3 and
 back. The daemon publishes a small seeded set of generated sounds, accepts audio, and serves it back
 with the BLAKE3 of the bytes.
 
-`cargo test -p oag-listend` runs 84 unit and 87 end-to-end tests, all green, in debug and
-release (`90 unit and 91 end-to-end` with `--features reticulum`). End to end they cover:
+`cargo test -p oag-listend` runs 85 unit and 87 end-to-end tests, all green, in debug and
+release (`91 unit and 91 end-to-end` with `--features reticulum`). End to end they cover:
 
 - the native back-and-forth: publish, fetch, verify, reject non-audio, not-found, and frames written
   together in one write answered in order;
@@ -262,7 +262,9 @@ the `MAX_LOAD_ENTRIES` the load will consider), and `timed out` (the wall-clock 
 with entries unread) -- never silent, and never counting an evicted entry as held. The deadline is
 `LOAD_DEADLINE`, checked between entries; it cannot interrupt a single read already blocked in the
 kernel, and bounding that would need asynchronous I/O, which the load does not use. Only regular files are read -- a FIFO or device named like a hash would block
-forever, and a directory would error. A sidecar larger than 4 KiB is not a media type and is ignored
+forever, and a directory would error. Both halves of that are pinned: a directory is skipped by one
+test, and a FIFO by another that runs the load on a thread with a bound, so dropping the regularity
+check fails in ten seconds rather than stalling the suite. A sidecar larger than 4 KiB is not a media type and is ignored
 rather than read into memory; a `.cid` sidecar must be a plausible identifier within 128 bytes.
 Both sidecar readers stat first and require a regular file, exactly as the audio reader does: a
 hand-placed FIFO would make `std::fs::read` block forever and hang startup, and a huge file would
@@ -272,8 +274,12 @@ The same bound applies on the way out, at `AudioItem::new`: a declared media typ
 4 KiB is not kept. Without that, a publisher could send a declared type almost as large as a
 frame -- megabytes -- which would be written to disk and then ignored by every later load, so
 `--max-bytes` would bound the audio but not the bytes actually stored. Equal bounds on the way
-out and the way in are what make the store bound a bound on disk. The audio is never refused
-because of its metadata.
+out and the way in are what make the store bound a bound on disk.
+
+An *oversized* declared type is dropped rather than refusing the audio. A *kept* one counts toward
+the bound, so an item can be refused because of its metadata, and that is deliberate: a 44-byte WAV
+carrying a 4 KiB type is answered `413` against a 100-byte bound, because accepting it would put
+4,140 bytes in a store bounded at 100.
 
 A kept media type therefore counts toward the store bound: an item's **footprint** is its audio
 plus its declared type, and `bytes_held` sums footprints. Otherwise a publisher could send a

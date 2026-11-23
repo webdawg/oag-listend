@@ -123,12 +123,13 @@ audio), and a write failure refuses the inbound rather than losing it silently. 
 asynchronous, so a slow disk delays the answer rather than blocking the executor thread. The store
 lock is held across the write; measured with the store on a network share, a concurrent fetch still
 answered in 1-3 ms. The startup report
-separates `loaded`, `skipped`, `evicted`, and `truncated`, so a bound that pushed entries out -- or
-a directory with more entries than the load will consider -- is visible rather than counted as held.
+separates `loaded`, `skipped`, `evicted`, `truncated`, and `timed out`, so a bound that pushed
+entries out, a directory with more entries than the load will consider, or a load that reached its
+wall-clock deadline is visible rather than counted as held.
 
-`--max-bytes` is enforced on the way in: audio larger than the bound is refused with `413 Payload Too
-Large` rather than written and immediately evicted, and an oversized startup file is skipped without
-being read.
+`--max-bytes` is enforced on the way in: an item whose audio, or audio plus its declared media
+type, exceeds the bound is refused with `413 Payload Too Large` rather than written and immediately
+evicted, and an oversized startup file is skipped without being read.
 A single item is also capped by what one frame can carry (`MAX_FRAME_BYTES - 256`), so a store
 bound above the frame cap cannot admit an item that no client could fetch.
 Verified by hand: a 4044-byte WAV against `--max-bytes 100` returned
@@ -192,8 +193,8 @@ not only against a test harness. The Unix socket is not probed there: it is owne
 
 **Serves, and survives a restart.** Six ways to reach the audio are live and tested: the native
 protocol over TCP, HTTP, UDP, a Unix socket, an IPFS mirror, and -- opt-in -- Reticulum
-(`--features reticulum`). `cargo test -p oag-listend` runs 84 unit tests plus 87 end-to-end;
-`--features reticulum` adds the carrier's own unit and end-to-end tests (181 in total). The store
+(`--features reticulum`). `cargo test -p oag-listend` runs 85 unit tests plus 87 end-to-end;
+`--features reticulum` adds the carrier's own unit and end-to-end tests (182 in total). The store
 mutex covers lookup and insert, not byte copies, so a slow reader does not stall the others. (The
 durable write and the eviction unlink are awaited inside `accept`, so the lock is held across them;
 measured on a network share they did not stall a concurrent fetch.) Runs as a systemd service (`scripts/oag-listend.service`) and shuts down cleanly on
