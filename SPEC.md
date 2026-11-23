@@ -10,8 +10,8 @@ content-addressed, so `--dir` persists every accepted sound under its BLAKE3 and
 back. The daemon publishes a small seeded set of generated sounds, accepts audio, and serves it back
 with the BLAKE3 of the bytes.
 
-`cargo test -p oag-listend` runs 84 unit and 86 end-to-end tests, all green, in debug and
-release (`90 unit and 90 end-to-end` with `--features reticulum`). End to end they cover:
+`cargo test -p oag-listend` runs 84 unit and 87 end-to-end tests, all green, in debug and
+release (`90 unit and 91 end-to-end` with `--features reticulum`). End to end they cover:
 
 - the native back-and-forth: publish, fetch, verify, reject non-audio, not-found, and frames written
   together in one write answered in order;
@@ -335,7 +335,10 @@ or across a daemon restart -- is a reproducibility hazard with no benefit.
 
 `--unix PATH` serves the same frame protocol over a filesystem socket, so a local process reaches
 the daemon by path rather than by port: no port to allocate or collide, and the file's permissions
-decide who may connect. It shares the TCP session loop, so the protocol, the bounds, and the
+decide who may connect. The mode is whatever the process umask leaves -- under the default `022`
+that is `0755`, and connecting needs *write* permission on the socket, so only the daemon's own user
+can connect. The shipped unit runs as `oag` and does not override the umask; set `UMask=` in the unit
+to open the socket to other local users. It shares the TCP session loop, so the protocol, the bounds, and the
 inbound rule are identical by construction. A stale socket file from a killed daemon is removed on
 bind and on shutdown.
 

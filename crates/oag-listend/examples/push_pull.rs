@@ -259,6 +259,18 @@ async fn exchange(args: &Args) -> std::io::Result<()> {
                 std::process::exit(1);
             }
         };
+        // The acknowledgement is a claim about what was stored, so prove it against the bytes
+        // that were sent. Without this the client would print a hash the daemon may have got
+        // wrong, and only notice later -- if the fetch happened to miss.
+        if !AudioItem::verify(&hash, &bytes) {
+            eprintln!(
+                "push_pull: the daemon acknowledged {}, which is not the BLAKE3 of the {} bytes it \
+                 was sent",
+                hash,
+                bytes.len()
+            );
+            std::process::exit(1);
+        }
         println!("published {label}: {} ({} bytes)", &hash[..16], bytes.len());
 
         match round_trip(

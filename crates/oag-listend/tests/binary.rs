@@ -542,6 +542,85 @@ async fn hostile_startup() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The client proves the acknowledgement, not just the fetch. A daemon that answers a publish with
+/// a hash that is not the BLAKE3 of the bytes it was sent must be refused, not printed and trusted
+/// for the fetch that follows.
+#[tokio::test]
+async fn the_client_refuses_an_acknowledgement_that_does_not_match() {
+    tokio::time::timeout(BOUND, wrong_ack())
+        .await
+        .expect("within the bound")
+}
+
+async fn wrong_ack() {
+    use oag_listend::{wav, AudioItem};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind the stand-in daemon");
+    let addr = listener.local_addr().expect("stand-in addr");
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buf = [0u8; 8192];
+            let Ok(Ok(n)) =
+                tokio::time::timeout(Duration::from_secs(5), stream.read(&mut buf)).await
+            else {
+                return;
+            };
+            let body = match protocol::decode_frame(&buf[..n]) {
+                Ok(body) => body,
+                Err(_) => continue,
+            };
+            let request = match protocol::decode_request(body) {
+                Ok(request) => request,
+                Err(_) => continue,
+            };
+            let reply = match request {
+                Request::Hello => protocol::encode_response(&Response::Hello {
+                    name: "test".into(),
+                    protocol_version: protocol::PROTOCOL_VERSION,
+                    item_count: 0,
+                }),
+                Request::Ping => {
+                    let item = AudioItem::new(wav::generate(3, wav::Sound::Tone), None);
+                    protocol::encode_response(&Response::Audio {
+                        content_hash: item.content_hash.clone(),
+                        bytes: item.bytes.clone(),
+                        cid: None,
+                    })
+                }
+                // The whole point: acknowledge with someone else's hash.
+                Request::Publish { .. } => protocol::encode_response(&Response::Published {
+                    content_hash: "0".repeat(64),
+                }),
+                _ => continue,
+            };
+            let mut frame = (reply.len() as u32).to_be_bytes().to_vec();
+            frame.extend_from_slice(&reply);
+            let _ = stream.write_all(&frame).await;
+            let _ = stream.shutdown().await;
+        }
+    });
+
+    let output = tokio::process::Command::new(push_pull())
+        .args(["--addr", &addr.to_string(), "--seed", "3"])
+        .output()
+        .await
+        .expect("run push_pull");
+    assert!(
+        !output.status.success(),
+        "a wrong acknowledgement must be refused, not printed"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("not the BLAKE3"),
+        "the refusal says what was wrong: {stderr}"
+    );
+}
+
 /// The client must prove what it is talking to, not just print it. A daemon on a different frame
 /// protocol answers in a shape this client does not understand, and every later exchange would be a
 /// guess.
