@@ -144,6 +144,10 @@ pub struct LoadReport {
     /// The directory held more entries than the load will consider. Nothing is deleted or changed
     /// by this; the operator is told instead of the load silently ignoring the rest.
     pub truncated: bool,
+    /// The load stopped at its wall-clock deadline with entries left unread. Nothing is deleted or
+    /// changed by this either; the operator is told rather than left waiting on a directory that is
+    /// slow (or whose filesystem has stalled) without knowing why.
+    pub timed_out: bool,
 }
 
 /// The codec inside an Ogg container, from the first (beginning-of-stream) page.
@@ -463,7 +467,7 @@ impl AudioStore {
         dir: impl Into<PathBuf>,
         max_bytes: usize,
     ) -> std::io::Result<(Self, LoadReport)> {
-        Self::load_dir_impl(dir, max_bytes, MAX_LOAD_ENTRIES, false)
+        Self::load_dir_impl(dir, max_bytes, MAX_LOAD_ENTRIES, false, LOAD_DEADLINE)
     }
 
     /// Open a store directory and report on it **without changing it**. `--check` uses this.
@@ -477,7 +481,7 @@ impl AudioStore {
         dir: impl Into<PathBuf>,
         max_bytes: usize,
     ) -> std::io::Result<(Self, LoadReport)> {
-        Self::load_dir_impl(dir, max_bytes, MAX_LOAD_ENTRIES, true)
+        Self::load_dir_impl(dir, max_bytes, MAX_LOAD_ENTRIES, true, LOAD_DEADLINE)
     }
 
     /// See [`Self::with_directory`]. Only the tests use this directly, to vary the entry cap.
@@ -487,7 +491,7 @@ impl AudioStore {
         max_bytes: usize,
         max_entries: usize,
     ) -> std::io::Result<(Self, LoadReport)> {
-        Self::load_dir_impl(dir, max_bytes, max_entries, false)
+        Self::load_dir_impl(dir, max_bytes, max_entries, false, LOAD_DEADLINE)
     }
 
     fn load_dir_impl(
@@ -495,6 +499,7 @@ impl AudioStore {
         max_bytes: usize,
         max_entries: usize,
         read_only: bool,
+        deadline_budget: Duration,
     ) -> std::io::Result<(Self, LoadReport)> {
         let dir = dir.into();
         // A check must not create the directory it is checking: creating it would hide a typo in
@@ -517,6 +522,7 @@ impl AudioStore {
         let mut report = LoadReport::default();
         let mut inserted = 0usize;
         let mut considered = 0usize;
+        let deadline = std::time::Instant::now() + deadline_budget;
 
         let entries = std::fs::read_dir(&dir)?;
         for entry in entries {
@@ -530,6 +536,12 @@ impl AudioStore {
             let path = entry.path();
             if path.extension().is_some() {
                 continue; // a sidecar, not audio
+            }
+            // Checked before each entry, so a slow directory stops at the deadline rather than
+            // after it. A single read already in flight is not interrupted.
+            if std::time::Instant::now() >= deadline {
+                report.timed_out = true;
+                break;
             }
             // The cap counts audio entries, so a directory of sidecars alone cannot
             // truncate the audio load.
@@ -1034,6 +1046,15 @@ pub fn servable_bound(max_bytes: usize) -> usize {
 /// process an unbounded number of entries. The load reports `truncated` rather than ignoring the
 /// rest silently.
 pub const MAX_LOAD_ENTRIES: usize = 100_000;
+
+/// The bound on a whole directory load.
+///
+/// A load is already bounded in work -- `MAX_LOAD_ENTRIES` entries, each at most the item bound --
+/// but a filesystem that is slow rather than stalled would still take as long as it takes. The
+/// deadline stops the load and reports it, so a big directory on a slow share cannot look like a
+/// hang. It cannot interrupt a single syscall that is already blocked in the kernel; bounding that
+/// needs asynchronous I/O, which the load does not use, and the limit is recorded as such.
+pub const LOAD_DEADLINE: Duration = Duration::from_secs(300);
 
 /// The bound on one filesystem operation in the accept path.
 ///
@@ -2024,6 +2045,45 @@ mod tests {
             .open(dir.join(&item.content_hash));
         std::thread::sleep(Duration::from_millis(200));
         drop(unblocked);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A load that cannot finish inside its deadline stops and says so, rather than looking like a
+    /// hang. The deadline is checked between entries; it cannot interrupt a single read that is
+    /// already blocked in the kernel, and the docs say so.
+    #[test]
+    fn a_load_that_cannot_meet_its_deadline_reports_it() {
+        let dir = temp_dir("deadline");
+        for i in 0..4u64 {
+            let wav = wav::generate_n(i, wav::Sound::Tone, 4);
+            let hash = blake3::hash(&wav).to_hex().to_string();
+            std::fs::write(dir.join(hash), wav).unwrap();
+        }
+        // A budget that has already elapsed: the first entry stops the load.
+        let (_store, report) = AudioStore::load_dir_impl(
+            &dir,
+            1024 * 1024,
+            MAX_LOAD_ENTRIES,
+            false,
+            Duration::from_nanos(1),
+        )
+        .unwrap();
+        assert!(
+            report.timed_out,
+            "the deadline must be reported, not swallowed"
+        );
+        assert_eq!(report.loaded, 0, "nothing was read before the deadline");
+        assert_eq!(report.skipped, 0);
+
+        // And a real budget loads the same directory whole.
+        let (_store, report) =
+            AudioStore::load_dir_impl(&dir, 1024 * 1024, MAX_LOAD_ENTRIES, false, LOAD_DEADLINE)
+                .unwrap();
+        assert!(
+            !report.timed_out,
+            "a small directory loads well inside the deadline"
+        );
+        assert_eq!(report.loaded, 4);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

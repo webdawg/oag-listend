@@ -256,15 +256,22 @@ async fn main() {
                 );
                 std::process::exit(1);
             });
+            let mut notes = Vec::new();
+            if report.truncated {
+                notes.push("truncated (more entries than the load considers)");
+            }
+            if report.timed_out {
+                notes.push("timed out (the load deadline elapsed with entries unread)");
+            }
             say!(
                 "store {dir}: loaded {} skipped {} evicted {}{}",
                 report.loaded,
                 report.skipped,
                 report.evicted,
-                if report.truncated {
-                    " truncated (more entries than the load considers)"
+                if notes.is_empty() {
+                    String::new()
                 } else {
-                    ""
+                    format!(" -- {}", notes.join(", "))
                 }
             );
             store

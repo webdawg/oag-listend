@@ -10,8 +10,8 @@ content-addressed, so `--dir` persists every accepted sound under its BLAKE3 and
 back. The daemon publishes a small seeded set of generated sounds, accepts audio, and serves it back
 with the BLAKE3 of the bytes.
 
-`cargo test -p oag-listend` runs 83 unit and 85 end-to-end tests, all green, in debug and
-release (`89 unit and 89 end-to-end` with `--features reticulum`). End to end they cover:
+`cargo test -p oag-listend` runs 84 unit and 85 end-to-end tests, all green, in debug and
+release (`90 unit and 89 end-to-end` with `--features reticulum`). End to end they cover:
 
 - the native back-and-forth: publish, fetch, verify, reject non-audio, not-found, and frames written
   together in one write answered in order;
@@ -257,9 +257,11 @@ every one, a concurrent fetch of a small item answered in 1-3 ms.
 On startup every entry is re-checked: the name must be the BLAKE3 of the bytes and the bytes must
 still sniff as audio, so a hand-placed file cannot smuggle anything in. The load is reported as
 `loaded` (entries now held), `skipped` (not read, or rejected), `evicted` (read and accepted, then
-pushed out by the byte bound while later entries loaded), and `truncated` (the directory held more
-than the `MAX_LOAD_ENTRIES` the load will consider) -- never silent, and never counting an evicted
-entry as held. Only regular files are read -- a FIFO or device named like a hash would block
+pushed out by the byte bound while later entries loaded), `truncated` (the directory held more than
+the `MAX_LOAD_ENTRIES` the load will consider), and `timed out` (the wall-clock deadline elapsed
+with entries unread) -- never silent, and never counting an evicted entry as held. The deadline is
+`LOAD_DEADLINE`, checked between entries; it cannot interrupt a single read already blocked in the
+kernel, and bounding that would need asynchronous I/O, which the load does not use. Only regular files are read -- a FIFO or device named like a hash would block
 forever, and a directory would error. A sidecar larger than 4 KiB is not a media type and is ignored
 rather than read into memory; a `.cid` sidecar must be a plausible identifier within 128 bytes.
 Both sidecar readers stat first and require a regular file, exactly as the audio reader does: a
