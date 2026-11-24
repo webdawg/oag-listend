@@ -201,7 +201,7 @@ measured on a network share they did not stall a concurrent fetch.) Runs as a sy
 SIGINT and SIGTERM. The native protocol, HTTP, UDP, and the Unix socket share one store, and all
 were verified by hand: audio posted to HTTP came back byte-identical, `push_pull` verified over
 TCP and UDP, HTML labelled `audio/wav` was refused on every carrier, and a daemon restarted with
-`--dir` loaded 5 items and served the posted WAV byte-identical.
+`--dir` reloaded exactly the item count it had written and served the posted WAV byte-identical.
 The audio surface (`AudioItem`, `AudioStore`, `AudioFormat::sniff`) is unchanged; the rules did not
 move to the wire, they were already at the surface. See `SPEC.md` for the carriers and the bounds.
 
