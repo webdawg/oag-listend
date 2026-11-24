@@ -148,6 +148,23 @@ jobs:
             fi
           done
 
+      # The claim the daemon makes about itself, proved against the installed unit: the audio is
+      # still there after a stop and a start. A hash is captured before the stop and fetched again
+      # after the restart; `cmp` fails if the bytes differ or the item is gone.
+      - name: A restart serves the same audio
+        run: |
+          curl -fsS -o /tmp/oag-hashes.txt http://127.0.0.1:7101/audio
+          hash=$(head -1 /tmp/oag-hashes.txt)
+          curl -fsS -o /tmp/oag-before-restart.wav "http://127.0.0.1:7101/audio/$hash"
+          sudo systemctl disable --now oag-listend
+          sudo systemctl enable --now oag-listend
+          for _ in $(seq 1 60); do
+            curl -fsS -o /dev/null http://127.0.0.1:7101/ping && break
+            sleep 1
+          done
+          curl -fsS -o /tmp/oag-after-restart.wav "http://127.0.0.1:7101/audio/$hash"
+          cmp /tmp/oag-before-restart.wav /tmp/oag-after-restart.wav
+
       - name: Stop the unit
         if: always()
         run: sudo systemctl disable --now oag-listend
