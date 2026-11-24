@@ -310,3 +310,62 @@ async fn a_stale_socket_file_is_replaced_not_refused() {
         .expect("run");
     let _ = std::fs::remove_file(&path);
 }
+
+/// SPEC: "A hash-shaped field with the wrong shape is still a protocol error; answer it rather than
+/// dropping the connection, so a buggy client can be fixed." The codec's refusal is pinned in
+/// protocol.rs; this pins what the session does about it -- answer and keep going.
+#[tokio::test]
+async fn a_malformed_hash_is_answered_and_the_session_survives() {
+    let path = socket_path("badhash");
+    std::fs::create_dir_all(path.parent().unwrap()).expect("make the parent");
+    let store = Arc::new(Mutex::new(AudioStore::default()));
+    let (carrier, _) = oag_listend::unix::UnixCarrier::bind_shared(&path, Arc::clone(&store))
+        .await
+        .expect("bind unix");
+    let shutdown = carrier.shutdown_handle();
+    let run = tokio::spawn(async move { carrier.run().await });
+
+    let mut stream = UnixStream::connect(&path).await.expect("connect unix");
+    let bad = Request::Fetch {
+        content_hash: "abc".into(),
+    };
+    let frame = protocol::encode_frame(&protocol::encode_request(&bad));
+    stream.write_all(&frame).await.expect("write the bad fetch");
+    stream.flush().await.expect("flush");
+
+    let mut prefix = [0u8; 4];
+    stream.read_exact(&mut prefix).await.expect("a reply");
+    let len = u32::from_be_bytes(prefix) as usize;
+    let mut body = vec![0u8; len];
+    stream.read_exact(&mut body).await.expect("the reply body");
+    match protocol::decode_response(&body).expect("decodes") {
+        Response::Rejected { reason } => assert!(reason.contains("64 hex"), "{reason}"),
+        other => panic!("expected a rejection, got {other:?}"),
+    }
+
+    // The session survived it, so a well-formed request on the same connection is answered.
+    let hello = protocol::encode_frame(&protocol::encode_request(&Request::Hello));
+    stream.write_all(&hello).await.expect("write hello");
+    stream.flush().await.expect("flush");
+    stream
+        .read_exact(&mut prefix)
+        .await
+        .expect("a second reply");
+    let len = u32::from_be_bytes(prefix) as usize;
+    let mut body = vec![0u8; len];
+    stream.read_exact(&mut body).await.expect("the second body");
+    assert!(
+        matches!(
+            protocol::decode_response(&body).expect("decodes"),
+            Response::Hello { .. }
+        ),
+        "the session must survive a malformed hash"
+    );
+
+    shutdown.shutdown();
+    tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .expect("shutdown bound")
+        .expect("join")
+        .expect("run");
+}

@@ -10,8 +10,8 @@ content-addressed, so `--dir` persists every accepted sound under its BLAKE3 and
 back. The daemon publishes a small seeded set of generated sounds, accepts audio, and serves it back
 with the BLAKE3 of the bytes.
 
-`cargo test -p oag-listend` runs 91 unit and 89 end-to-end tests, all green, in debug and
-release (`97 unit and 93 end-to-end` with `--features reticulum`). End to end they cover:
+`cargo test -p oag-listend` runs 91 unit and 90 end-to-end tests, all green, in debug and
+release (`97 unit and 94 end-to-end` with `--features reticulum`). End to end they cover:
 
 - the native back-and-forth: publish, fetch, verify, reject non-audio, not-found, and frames written
   together in one write answered in order;
@@ -326,7 +326,9 @@ exactly 100,000 held, at ~500 bytes of overhead each -- so reaching the 1 GiB by
 ## The hello
 
 `Hello` answers with the daemon name (`oag-listend`), the frame protocol version, and the item
-count. A client can therefore tell what it reached and whether it speaks the same protocol, instead
+count. A fetch whose hash is the wrong shape is answered rather than allowed to drop the
+connection -- a buggy client can be fixed -- and the session then still works; `unix_carrier.rs`
+pins that. A client can therefore tell what it reached and whether it speaks the same protocol, instead
 of inferring from a bare count. An unrecognised name still decodes, so a future daemon is
 recognisable rather than a protocol error.
 
