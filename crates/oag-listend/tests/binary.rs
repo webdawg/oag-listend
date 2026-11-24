@@ -542,6 +542,57 @@ async fn hostile_startup() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Directive step 5: the generator is seeded "so tests are reproducible". The generator itself is
+/// pinned, but nothing checked the whole path from the `--seed` flag to the store: two daemons
+/// started with the same seed must hold the same sounds, and the set is the four documented ones.
+#[tokio::test]
+async fn two_daemons_on_the_same_seed_hold_the_same_sounds() {
+    let mut sets = Vec::new();
+    for name in ["seed-a", "seed-b"] {
+        let dir = temp_dir(name);
+        std::fs::create_dir_all(&dir).expect("make the store");
+        let mut child = Daemon(
+            Command::new(binary())
+                .arg("--listen")
+                .arg("127.0.0.1:0")
+                .arg("--http")
+                .arg("127.0.0.1:0")
+                .arg("--dir")
+                .arg(&dir)
+                .arg("--seed")
+                .arg("20261123")
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("spawn the daemon"),
+        );
+        let (announced, _stdout) = announce(&mut child).await;
+        let announced = String::from_utf8_lossy(&announced);
+        assert!(
+            announced.contains("listening on"),
+            "the daemon came up: {announced}"
+        );
+
+        let mut hashes: Vec<String> = std::fs::read_dir(&dir)
+            .expect("read the store")
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.len() == 64)
+            .collect();
+        hashes.sort();
+        assert_eq!(
+            hashes.len(),
+            4,
+            "silence, tone, noise and the ping: {hashes:?}"
+        );
+        sets.push(hashes);
+    }
+    assert_eq!(
+        sets[0], sets[1],
+        "the same seed must give the same sounds in the same order"
+    );
+}
+
 /// The client proves the acknowledgement, not just the fetch. A daemon that answers a publish with
 /// a hash that is not the BLAKE3 of the bytes it was sent must be refused, not printed and trusted
 /// for the fetch that follows.
