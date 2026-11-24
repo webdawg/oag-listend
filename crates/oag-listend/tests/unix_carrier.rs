@@ -257,3 +257,56 @@ async fn refuse(path: &std::path::Path) {
     );
     let _ = std::fs::remove_file(path);
 }
+
+/// SPEC: "A stale socket file from a killed daemon is removed on bind." The live-socket refusal and
+/// the non-socket refusal are pinned elsewhere; this pins the other half -- a socket whose listener
+/// is gone is the exact thing a killed daemon leaves behind, and it must be replaced rather than
+/// leaving the path unusable.
+#[tokio::test]
+async fn a_stale_socket_file_is_replaced_not_refused() {
+    let path = socket_path("stalesocket");
+    let stale = std::os::unix::net::UnixListener::bind(&path).expect("bind the stale socket");
+    drop(stale);
+    assert!(path.exists());
+    assert!(
+        UnixStream::connect(&path).await.is_err(),
+        "nothing is listening on it"
+    );
+
+    let store = Arc::new(Mutex::new(AudioStore::default()));
+    let (carrier, bound) = oag_listend::unix::UnixCarrier::bind_shared(&path, Arc::clone(&store))
+        .await
+        .expect("a stale socket must be replaced");
+    assert_eq!(bound, path);
+    let shutdown = carrier.shutdown_handle();
+    let run = tokio::spawn(async move { carrier.run().await });
+
+    // And it serves once replaced -- on this carrier, not a second one bound to the same path.
+    let mut stream = UnixStream::connect(&path).await.expect("connect unix");
+    let tone = wav::generate(42, wav::Sound::Tone);
+    let hash = match round_trip(
+        &mut stream,
+        &Request::Publish {
+            declared_media_type: Some("audio/wav".into()),
+            bytes: tone.clone(),
+        },
+    )
+    .await
+    {
+        Response::Published { content_hash } => content_hash,
+        other => panic!("expected Published, got {other:?}"),
+    };
+    assert!(AudioItem::verify(&hash, &tone));
+    match round_trip(&mut stream, &Request::Fetch { content_hash: hash }).await {
+        Response::Audio { bytes, .. } => assert_eq!(bytes, tone),
+        other => panic!("expected Audio, got {other:?}"),
+    }
+
+    shutdown.shutdown();
+    tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .expect("shutdown bound")
+        .expect("join")
+        .expect("run");
+    let _ = std::fs::remove_file(&path);
+}

@@ -1248,14 +1248,16 @@ async fn an_unwritable_stdout_does_not_stop_the_audio() {
 }
 
 #[cfg(unix)]
-async fn unwritable_stdout() {
-    // stdout is /dev/full, so the announcement cannot be read and readiness is a connection.
-    //
-    // A port reserved by `free_port` can still be taken in the window before the daemon binds it,
-    // and this test cannot fall back to port 0 because it has no announcement to read. So a start
-    // that dies -- which is what a taken port looks like -- is retried on a fresh port rather than
-    // failing the test.
-    let mut started: Option<(Daemon, TcpStream)> = None;
+/// Start the real daemon with stdout pointed at `/dev/full`, where its announcement cannot be
+/// read, and return it plus a connection that has answered a Hello. Used by
+/// `an_unwritable_stdout_does_not_stop_the_audio`.
+///
+/// A port reserved by `free_port` can still be taken in the window before the daemon binds it,
+/// and the daemon takes a moment to bind at all, so readiness is a successful Hello round trip
+/// checked against the daemon's own name. A bare connect succeeding is not evidence that *this*
+/// daemon is listening -- a different process could hold the port -- and that mistake is what made
+/// the first version of this test attach to the wrong listener and fail with a reset.
+async fn start_with_unwritable_stdout() -> (Daemon, TcpStream) {
     for _ in 0..5 {
         let addr: std::net::SocketAddr = format!("127.0.0.1:{}", free_port())
             .parse()
@@ -1274,26 +1276,56 @@ async fn unwritable_stdout() {
                 .spawn()
                 .expect("spawn the daemon"),
         );
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            if child.try_wait().expect("poll the daemon").is_some() {
-                break; // exited: a reserved port was almost certainly taken
+
+        let outcome = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut stream;
+            loop {
+                if child.try_wait().expect("poll the daemon").is_some() {
+                    return Err(std::io::Error::other("the daemon exited"));
+                }
+                match TcpStream::connect(addr).await {
+                    Ok(connected) => {
+                        stream = connected;
+                        break;
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
+                        // Not bound yet: give it a moment rather than discarding the attempt.
+                        tokio::time::sleep(Duration::from_millis(25)).await;
+                    }
+                    Err(e) => return Err(e),
+                }
             }
-            if let Ok(stream) = TcpStream::connect(addr).await {
-                started = Some((child, stream));
-                break;
+            let frame = protocol::encode_frame(&protocol::encode_request(&Request::Hello));
+            stream.write_all(&frame).await?;
+            stream.flush().await?;
+            let mut prefix = [0u8; 4];
+            stream.read_exact(&mut prefix).await?;
+            let len = u32::from_be_bytes(prefix) as usize;
+            let mut body = vec![0u8; len];
+            stream.read_exact(&mut body).await?;
+            let response = protocol::decode_response(&body)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+            Ok::<_, std::io::Error>((stream, response))
+        })
+        .await;
+
+        match outcome {
+            Ok(Ok((stream, Response::Hello { name, .. })))
+                if name == oag_listend::protocol::DAEMON_NAME =>
+            {
+                return (child, stream);
             }
-            assert!(
-                Instant::now() < deadline,
-                "the daemon never came up with an unwritable stdout"
-            );
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-        if started.is_some() {
-            break;
+            other => {
+                eprintln!("attempt not ours: {other:?}");
+                continue; // `child` drops here, killing this attempt
+            }
         }
     }
-    let (mut child, mut stream) = started.expect("the daemon came up on one of the reserved ports");
+    panic!("no attempt reached this daemon");
+}
+
+async fn unwritable_stdout() {
+    let (mut child, mut stream) = start_with_unwritable_stdout().await;
 
     // The audio must still flow: hello, publish, fetch, verify.
     let tone = oag_listend::wav::generate(2027, oag_listend::wav::Sound::Tone);
