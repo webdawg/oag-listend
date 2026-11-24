@@ -1590,6 +1590,27 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The other half of "removed out of band": servable while this process holds it, gone across a
+    /// restart. The pair is what makes the republish restore meaningful -- without it the restore
+    /// would be restoring something that was never really lost.
+    #[tokio::test]
+    async fn a_restart_without_the_file_loses_the_item() {
+        let dir = temp_dir("selfheal-restart");
+        let (mut store, _) = AudioStore::with_directory(&dir, 1024 * 1024).unwrap();
+        let wav = wav::generate(12, wav::Sound::Tone);
+        let hash = store.accept(wav, None).await.unwrap();
+        std::fs::remove_file(dir.join(&hash)).unwrap();
+        drop(store);
+
+        let (reopened, report) = AudioStore::with_directory(&dir, 1024 * 1024).unwrap();
+        assert_eq!(report.loaded, 0, "nothing on disk means nothing held");
+        assert!(
+            reopened.serve(&hash).is_err(),
+            "gone across a restart -- which is why a republish must restore it"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[tokio::test]
     async fn a_republish_restores_a_file_deleted_out_of_band() {
         let dir = temp_dir("selfheal");
@@ -1598,9 +1619,15 @@ mod tests {
         let hash = store.accept(wav.clone(), None).await.unwrap();
         assert!(dir.join(&hash).exists());
         std::fs::remove_file(dir.join(&hash)).unwrap();
+        // The bytes are held in memory, so losing the file does not make the item unservable --
+        // only a restart would. The comment above said this; nothing checked it.
+        assert!(
+            store.serve(&hash).is_ok(),
+            "a file deleted out of band must not make a held item unservable"
+        );
 
-        // The same bytes again: the in-memory item is still served, and the durable copy is
-        // restored rather than the item becoming one a restart would lose.
+        // The same bytes again: the durable copy is restored rather than the item becoming one a
+        // restart would lose.
         let again = store.accept(wav, None).await.unwrap();
         assert_eq!(again, hash);
         assert!(

@@ -10,8 +10,8 @@ content-addressed, so `--dir` persists every accepted sound under its BLAKE3 and
 back. The daemon publishes a small seeded set of generated sounds, accepts audio, and serves it back
 with the BLAKE3 of the bytes.
 
-`cargo test -p oag-listend` runs 87 unit and 87 end-to-end tests, all green, in debug and
-release (`93 unit and 91 end-to-end` with `--features reticulum`). End to end they cover:
+`cargo test -p oag-listend` runs 88 unit and 87 end-to-end tests, all green, in debug and
+release (`94 unit and 91 end-to-end` with `--features reticulum`). End to end they cover:
 
 - the native back-and-forth: publish, fetch, verify, reject non-audio, not-found, and frames written
   together in one write answered in order;
@@ -299,7 +299,9 @@ Eviction unlinks the file, so the directory and the store agree on what is held 
 awaited inside `accept`, so by the time a publish is answered the file it pushed out is already
 gone; a load drains it inline, since startup has no lock to protect. If a file is removed out of band, a
 republish of the same bytes restores it, so an item cannot silently become one that the next start
-will lose; the existence check costs a syscall only on a duplicate publish, never on the read path. Without `--dir` the store is in-memory.
+will lose; the existence check costs a syscall only on a duplicate publish, never on the read path.
+Both halves are pinned: the held item stays servable while its file is gone, and it is gone across
+a restart, which is what makes the restore meaningful rather than restoring something never lost. Without `--dir` the store is in-memory.
 
 The bound is enforced on the way in: `accept` refuses audio larger than `--max-bytes` rather than
 writing it and immediately evicting it, and a startup file larger than the bound is skipped without
