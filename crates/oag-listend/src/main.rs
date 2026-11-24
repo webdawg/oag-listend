@@ -173,6 +173,27 @@ fn reticulum_usage_lines() -> &'static str {
     }
 }
 
+/// Whether this process can create a file in `dir`.
+///
+/// Deliberately a probe rather than a reading of the mode bits: a read-only mount and an ACL both
+/// look writable, and the failure they cause otherwise surfaces at the first publish rather than
+/// at boot.
+fn store_is_writable(dir: &std::path::Path) -> bool {
+    path_is_writable(&dir.join(".oag-listend-write-probe"))
+}
+
+/// Whether a file can be created at `path`. Split out so a test can point it somewhere that is
+/// unwritable for any user.
+fn path_is_writable(path: &std::path::Path) -> bool {
+    match std::fs::write(path, b"") {
+        Ok(()) => {
+            let _ = std::fs::remove_file(path);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
 /// Say plainly when a bind address is not loopback. The default is `0.0.0.0`, which serves every
 /// interface; an operator who did not think about that should be told rather than discover it.
 fn note_public_bind(addr: std::net::SocketAddr) {
@@ -278,6 +299,16 @@ async fn main() {
         }
         None => AudioStore::with_capacity(args.max_bytes),
     };
+    // A store that cannot be written is not fatal -- it can still serve what it holds -- but an
+    // operator who boots one should hear it now rather than at the first client. The mode bits do
+    // not tell you: a read-only mount and an ACL both look writable. Probing costs one empty file,
+    // which is removed again.
+    if let Some(dir) = &args.dir {
+        if !args.check && !store_is_writable(std::path::Path::new(dir)) {
+            say!("  note: store {dir} is not writable; every publish will be refused");
+        }
+    }
+
     if args.check {
         // A check is purely a store verification: it must not contact an IPFS node or spend its
         // mirror budget, because operators and scripts call it expecting a quick answer.
@@ -508,5 +539,28 @@ async fn main() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Writability is probed, not inferred from the mode bits. The negative case uses a path
+    /// whose parent is a regular file, which no user can write through -- a mode-bits test would
+    /// be silently bypassed by root, and CI does not always run as one user.
+    #[test]
+    fn writability_is_probed_not_inferred_from_mode_bits() {
+        let tmp = std::env::temp_dir();
+        assert!(store_is_writable(&tmp), "a temp dir is writable");
+
+        let blocker = tmp.join(format!("oag-listend-not-a-dir-{}", std::process::id()));
+        std::fs::write(&blocker, b"x").expect("write the blocker file");
+        let result = path_is_writable(&blocker.join("probe"));
+        let _ = std::fs::remove_file(&blocker);
+        assert!(
+            !result,
+            "a path under a regular file is not writable by anyone"
+        );
     }
 }

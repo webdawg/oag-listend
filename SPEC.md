@@ -10,8 +10,8 @@ content-addressed, so `--dir` persists every accepted sound under its BLAKE3 and
 back. The daemon publishes a small seeded set of generated sounds, accepts audio, and serves it back
 with the BLAKE3 of the bytes.
 
-`cargo test -p oag-listend` runs 88 unit and 87 end-to-end tests, all green, in debug and
-release (`94 unit and 91 end-to-end` with `--features reticulum`). End to end they cover:
+`cargo test -p oag-listend` runs 89 unit and 87 end-to-end tests, all green, in debug and
+release (`95 unit and 91 end-to-end` with `--features reticulum`). End to end they cover:
 
 - the native back-and-forth: publish, fetch, verify, reject non-audio, not-found, and frames written
   together in one write answered in order;
@@ -207,7 +207,12 @@ audio but exceed the store bound or the frame cap) and answers
 other value alike -- with a message saying to send a `Content-Length`, and so is a request carrying
 more than one `Content-Length` header: two of them make the body's extent ambiguous and a reverse
 proxy in front may pick a different one than the daemon (RFC 7230 3.3.3 requires rejecting it). The
-unread body is drained after a half-close so the refusal is not lost to a TCP reset. A query string is never
+unread body is drained after a half-close. This one is hygiene rather than a load-bearing fix, and
+it is recorded as such: with the drain removed, a client that declares `Content-Length: 4`, sends
+40 bytes, and then waits 1.5 s before reading still receives the refusal, because Linux delivers
+data the socket already holds through a reset. It stays because leaving data in a socket is what
+turns closing it into a reset at all -- but it is not credited with an effect that was not
+observed. A query string is never
 part of the path, so `/audio/{hash}?x=1` serves the
 audio rather than 404-ing. `GET /ipfs/{cid}` serves audio by content identifier -- held items from
 the store, anything else fetched from the configured Kubo node (see "The IPFS mirror") -- under the
@@ -396,6 +401,14 @@ hold a stop open past that bound. Each carrier's session count is a drop guard, 
 panics releases its slot during the unwind; a hand-written decrement after the await is skipped by a
 panic, which would leave every later shutdown waiting the whole grace period for a session that no
 longer exists -- measured at 2.02 s against 0.003 s with the guard.
+
+On boot, if `--dir` is given and this is not a `--check`, the daemon probes that it can create a file there and says so if it cannot:
+
+    note: store /tmp/ro2 is not writable; every publish will be refused
+
+A read-only store is a legitimate configuration -- it can still serve what it holds -- so this is a
+note and not a refusal to start. It is a probe rather than a reading of the mode bits because a
+read-only mount and an ACL both look writable. `--check` does not probe: it is read-only by design.
 
 The daemon's own logging must not be able to kill it. Every line goes through a writer that ignores
 a failed write, because under systemd stdout *is* the journal: an unavailable journal, a full disk,
