@@ -10,8 +10,8 @@ content-addressed, so `--dir` persists every accepted sound under its BLAKE3 and
 back. The daemon publishes a small seeded set of generated sounds, accepts audio, and serves it back
 with the BLAKE3 of the bytes.
 
-`cargo test -p oag-listend` runs 90 unit and 87 end-to-end tests, all green, in debug and
-release (`96 unit and 91 end-to-end` with `--features reticulum`). End to end they cover:
+`cargo test -p oag-listend` runs 91 unit and 87 end-to-end tests, all green, in debug and
+release (`97 unit and 91 end-to-end` with `--features reticulum`). End to end they cover:
 
 - the native back-and-forth: publish, fetch, verify, reject non-audio, not-found, and frames written
   together in one write answered in order;
@@ -269,7 +269,7 @@ still sniff as audio, so a hand-placed file cannot smuggle anything in. The load
 pushed out by the byte bound while later entries loaded), `truncated` (the directory held more than
 the `MAX_LOAD_ENTRIES` the load will consider), and `timed out` (the wall-clock deadline elapsed
 with entries unread) -- never silent, and never counting an evicted entry as held. The deadline is
-`LOAD_DEADLINE`, checked between entries; it cannot interrupt a single read already blocked in the
+`LOAD_DEADLINE`, checked before every entry including one it is about to skip, so a directory holding nothing but sidecars cannot be walked forever; it cannot interrupt a single read already blocked in the
 kernel, and bounding that would need asynchronous I/O, which the load does not use. Only regular files are read -- a FIFO or device named like a hash would block
 forever, and a directory would error. Both halves of that are pinned: a directory is skipped by one
 test, and a FIFO by another that runs the load on a thread with a bound, so dropping the regularity

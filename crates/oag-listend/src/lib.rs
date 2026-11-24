@@ -535,15 +535,18 @@ impl AudioStore {
                     continue;
                 }
             };
-            let path = entry.path();
-            if path.extension().is_some() {
-                continue; // a sidecar, not audio
-            }
-            // Checked before each entry, so a slow directory stops at the deadline rather than
-            // after it. A single read already in flight is not interrupted.
+            // Before every entry, including one this loop is about to skip: the deadline bounds
+            // how long a load may spend on the directory at all. Checked below the sidecar filter
+            // instead, a directory holding nothing but sidecars would be walked forever, because
+            // the filter continues past the check. A single read already in flight is not
+            // interrupted.
             if std::time::Instant::now() >= deadline {
                 report.timed_out = true;
                 break;
+            }
+            let path = entry.path();
+            if path.extension().is_some() {
+                continue; // a sidecar, not audio
             }
             // The cap counts audio entries, so a directory of sidecars alone cannot
             // truncate the audio load.
@@ -1624,6 +1627,32 @@ mod tests {
             audio_files <= bound / 844 + 1,
             "the directory must track the bound: {audio_files} files"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The load deadline bounds time spent on the directory, not just time spent on audio.
+    /// Checked below the sidecar filter instead, a directory holding nothing but sidecars would
+    /// be walked forever and `timed_out` would never be set -- the very entries this test fills
+    /// it with are the ones the old ordering skipped past.
+    #[tokio::test]
+    async fn the_load_deadline_applies_to_entries_it_skips() {
+        let dir = temp_dir("deadline-skipped");
+        for i in 0..4u64 {
+            std::fs::write(dir.join(format!("{i}.json")), b"audio/wav").unwrap();
+        }
+        let (_store, report) = AudioStore::load_dir_impl(
+            &dir,
+            1024 * 1024,
+            MAX_LOAD_ENTRIES,
+            false,
+            Duration::from_nanos(1),
+        )
+        .unwrap();
+        assert!(
+            report.timed_out,
+            "a deadline already elapsed must stop the load on its first entry, skipped or not"
+        );
+        assert_eq!(report.loaded, 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

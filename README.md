@@ -193,7 +193,7 @@ not only against a test harness. The Unix socket is not probed there: it is owne
 
 **Serves, and survives a restart.** Six ways to reach the audio are live and tested: the native
 protocol over TCP, HTTP, UDP, a Unix socket, an IPFS mirror, and -- opt-in -- Reticulum
-(`--features reticulum`). `cargo test -p oag-listend` runs 90 unit tests plus 87 end-to-end;
+(`--features reticulum`). `cargo test -p oag-listend` runs 91 unit tests plus 87 end-to-end;
 `--features reticulum` adds the carrier's own unit and end-to-end tests (187 in total). The store
 mutex covers lookup and insert, not byte copies, so a slow reader does not stall the others. (The
 durable write and the eviction unlink are awaited inside `accept`, so the lock is held across them;
