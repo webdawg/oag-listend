@@ -1562,3 +1562,43 @@ async fn ipfs_wiring() {
         "the accepted audio must have been offered exactly once"
     );
 }
+
+/// README: `--check` "opens the store and prints the load report without serving and without
+/// contacting an IPFS node", so scripts can rely on a quick answer even when a mirror is
+/// configured. A refused port would prove nothing (it fails instantly too), so the stub listens
+/// and never answers. If `--check` reached for the mirror it would sit out the add bound.
+#[tokio::test]
+async fn check_never_contacts_the_configured_mirror() {
+    let dir = temp_dir("check-no-ipfs");
+    std::fs::create_dir_all(&dir).expect("make the store");
+    let tone = oag_listend::wav::generate(3, oag_listend::wav::Sound::Tone);
+    let seed = oag_listend::AudioItem::new(tone.clone(), None);
+    std::fs::write(dir.join(&seed.content_hash), &tone).expect("seed one item");
+    // Listens, accepts nothing, answers nothing -- a mirror that hangs rather than refusing.
+    let silent = std::net::TcpListener::bind("127.0.0.1:0").expect("bind the silent stub");
+    let api = silent.local_addr().expect("stub addr");
+
+    let started = std::time::Instant::now();
+    let output = tokio::process::Command::new(binary())
+        .arg("--check")
+        .arg("--dir")
+        .arg(&dir)
+        .arg("--ipfs-api")
+        .arg(api.to_string())
+        .output()
+        .await
+        .expect("run --check");
+    let elapsed = started.elapsed();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "`--check` must not wait on the mirror: {elapsed:?}"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("loaded 1"), "{stdout}");
+}
